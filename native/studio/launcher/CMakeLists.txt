@@ -14,11 +14,27 @@ if(TRAINNER_GUI_PAYLOAD_SHA256 AND
   message(FATAL_ERROR "Provide the lowercase SHA-256 of the accompanying source archive.")
 endif()
 
-add_executable(traiNNer-GUI WIN32 launcher.cpp windows_host.cpp)
-target_compile_features(traiNNer-GUI PRIVATE cxx_std_17)
+set(TRAINNER_GUI_RELEASE_TAG "" CACHE STRING "GitHub release tag for the packaged Windows launcher")
+set(release_number "(0|[1-9][0-9]*)")
+if(TRAINNER_GUI_RELEASE_TAG)
+  if(NOT TRAINNER_GUI_RELEASE_TAG MATCHES "^v${release_number}\\.${release_number}\\.${release_number}(-preview\\.${release_number})?$")
+    message(FATAL_ERROR "Use a GitHub release tag of the form vX.Y.Z or vX.Y.Z-preview.N.")
+  endif()
+  string(REGEX MATCHALL "[0-9]+" release_numbers "${TRAINNER_GUI_RELEASE_TAG}")
+  foreach(number IN LISTS release_numbers)
+    if(number GREATER 4294967295)
+      message(FATAL_ERROR "Each release tag component must fit in an unsigned 32-bit integer.")
+    endif()
+  endforeach()
+endif()
+
+add_executable(traiNNer-GUI WIN32 launcher.cpp updates.cpp windows_host.cpp)
+target_compile_features(traiNNer-GUI PRIVATE cxx_std_20)
 target_compile_definitions(traiNNer-GUI PRIVATE UNICODE _UNICODE
-  TRAINNER_GUI_PAYLOAD_SHA256="${TRAINNER_GUI_PAYLOAD_SHA256}")
-target_link_libraries(traiNNer-GUI PRIVATE advapi32 bcrypt comctl32 ole32 oleaut32 shell32 uuid wbemuuid)
+  TRAINNER_GUI_PAYLOAD_SHA256="${TRAINNER_GUI_PAYLOAD_SHA256}"
+  TRAINNER_GUI_RELEASE_TAG="${TRAINNER_GUI_RELEASE_TAG}")
+target_link_libraries(traiNNer-GUI PRIVATE advapi32 bcrypt comctl32 ole32 oleaut32
+  runtimeobject shell32 uuid wbemuuid winhttp wintrust)
 if(MSVC)
   set_property(TARGET traiNNer-GUI PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
   target_compile_options(traiNNer-GUI PRIVATE /W4 /utf-8)

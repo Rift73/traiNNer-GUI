@@ -16,6 +16,14 @@ CUDA training in the managed environment requires an NVIDIA Ampere or newer GPU 
 
 The pinned Python package downloads total about **3.57 GiB** based on published package sizes. Allow about **20 GiB** for the managed WSL ext4 filesystem, including the installed runtime and cached downloads.
 
+## Updates
+
+Keep launching the EXE from the folder you extracted. The packaged launcher checks the [latest GitHub release](https://github.com/Rift73/traiNNer-GUI/releases/latest) in the background. An offline launch opens the installed version. If you downloaded the original Preview 1, extract this refreshed ZIP over the original launcher folder once to keep your shortcut.
+
+On a managed install, an update prepares the new trainer alongside the current one. Switching versions waits for training and queued work to finish. Matching Python dependencies are reused. Your Windows workspace keeps the same project UUID, recipes, checkpoints and logs. Refresh a connected phone after the switch to load the updated UI. If your original Preview 1 shortcut used `--state-dir`, keep that argument on the replacement shortcut so its queue is checked during migration.
+
+If you chose **Use an existing WSL checkout**, the launcher can update independently. Update that checkout through your normal Git workflow.
+
 ## Workspace and setup files
 
 - The Windows workspace contains **.trainner-gui-project.json**. It stores the version and project UUID, for example {"version":1,"project_id":"a12e4400-9392-4f6a-84cb-e245776bd4fe"}. Keep this file with the workspace. Opening an existing marker preserves its UUID.
@@ -43,5 +51,7 @@ In PowerShell, run a GUI executable through **Start-Process -Wait** when an inst
 ## Build the Windows asset
 
 Run **Build-Desktop.ps1 -Package -Destination <Windows release directory>** with the existing Windows C++ Build Tools, clang-cl, CMake and Ninja. Use Python 3 in the source checkout's WSL distribution, or Python 3.12 through the Windows Python launcher for a Windows checkout. The build invokes **scripts/package-windows.py** to produce the source archive, embeds its hash into the x64 launcher, and assembles **traiNNer-GUI-Windows-x64.zip**.
+
+For a new public version, pass its exact GitHub tag to the package build, for example `-Package -ReleaseTag v0.1.1`. Upload **traiNNer-GUI-Windows-x64.zip** to that release and mark it **Latest** for automatic delivery. Use a newer tag for each future update.
 
 Running **Build-Desktop.ps1** without **-Package** builds the developer executable for an existing checkout. Use **-BuildDirectory** and **-Destination** to keep scratch builds outside the checkout.

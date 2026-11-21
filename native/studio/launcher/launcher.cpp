@@ -1,5 +1,6 @@
 // Select or set up the local Linux trainer and open its Studio service.
 #include "windows_host.hpp"
+#include "updates.hpp"
 
 #include <shellapi.h>
 
@@ -22,6 +23,7 @@ using namespace host;
 
 constexpr wchar_t managed_distro[] = L"traiNNer-GUI";
 constexpr wchar_t managed_root[] = L"/opt/trainner-gui";
+constexpr wchar_t managed_releases[] = L"/opt/trainner-gui-releases/";
 constexpr wchar_t managed_user[] = L"trainer";
 constexpr wchar_t archive_name[] = L"trainner-gui-source.tar.gz";
 constexpr char payload_hash[] = TRAINNER_GUI_PAYLOAD_SHA256;
@@ -33,6 +35,8 @@ constexpr char usage[] =
 
 struct Options {
     bool url = false;
+    bool apply_update = false;
+    bool stage_update = false;
     bool phone_status = false;
     bool cpu_only = false;
     bool configure = false;
@@ -59,6 +63,7 @@ struct Pending {
 struct Profile {
     explicit Profile(fs::path folder) : folder(std::move(folder)) {}
     fs::path config() const { return folder / L"desktop.conf"; }
+    fs::path last_managed() const { return folder / L"previous-managed.conf"; }
     fs::path pending() const { return folder / L"setup.conf"; }
     fs::path log() const { return folder / L"setup.log"; }
     fs::path distro_location() const { return folder / L"wsl"; }
@@ -74,7 +79,9 @@ Options parse_options(const std::vector<wstring>& args) {
                 throw std::runtime_error(usage);
             return args[++i];
         };
-        if (arg == L"--url") options.url = true;
+        if (arg == L"--apply-update" && args.size() == 1) options.apply_update = true;
+        else if (arg == L"--stage-update" && args.size() == 1) options.stage_update = true;
+        else if (arg == L"--url") options.url = true;
         else if (arg == L"--phone-status") options.phone_status = true;
         else if (arg == L"--cpu-only") options.cpu_only = true;
         else if (arg == L"--configure") options.configure = true;
@@ -108,12 +115,16 @@ void check_checkout(const Settings& value) {
         throw std::runtime_error("Provide a WSL distribution name and an absolute Linux checkout path.");
 }
 
+bool is_digest(const string& hash) {
+    return hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == string::npos;
+}
+
 void check_settings(const Settings& value) {
     check_checkout(value);
     if (value.project.empty() != value.project_id.empty()
         || (!value.project.empty() && (!value.project.is_absolute() || !valid_project_id(value.project_id)))
-        || (value.managed && (value.distro != managed_distro || value.root != managed_root
-                              || value.project.empty() || value.payload.size() != 64)))
+        || (value.managed && (value.distro != managed_distro || value.project.empty() || !is_digest(value.payload)
+                              || (value.root != managed_root && value.root != managed_releases + wide(value.payload)))))
         throw std::runtime_error("Invalid desktop settings. Run with --configure.");
 }
 
@@ -126,15 +137,19 @@ std::vector<string> fields(const string& text, size_t count) {
     return result;
 }
 
-std::optional<Settings> load_settings(const Profile& profile) {
-    if (!fs::exists(profile.config())) return {};
-    const auto values = fields(read_text(profile.config()), 7);
+std::optional<Settings> read_settings(const fs::path& file) {
+    if (!fs::exists(file)) return {};
+    const auto values = fields(read_text(file), 7);
     if (values[0] != "traiNNer-GUI 1" || (values[1] != "managed" && values[1] != "existing"))
         throw std::runtime_error("Unsupported desktop settings. Run with --configure.");
     Settings result{wide(values[2]), wide(values[3]), wide(values[4]), values[5], values[6],
                     values[1] == "managed"};
     check_settings(result);
     return result;
+}
+
+std::optional<Settings> load_settings(const Profile& profile) {
+    return read_settings(profile.config());
 }
 
 void save_settings(const Profile& profile, const Settings& value) {
@@ -373,16 +388,63 @@ void verify_project(const Profile& profile, const Settings& value) {
     }
 }
 
+void open_payload(const fs::path& folder, const string& expected_hash, Handle& source) {
+    const auto archive = folder / archive_name;
+    source.reset(CreateFileW(archive.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!source || sha256(source.get()) != expected_hash)
+        throw std::runtime_error("The source archive is missing or belongs to a different release."
+                                 " Extract the entire Windows ZIP and open the launcher from that folder.");
+}
+
+ProcessResult provision_payload(const Profile& profile, const Settings& selected, const Handle& source,
+                                const std::vector<wstring>& extra, const string& stage) {
+    auto arguments = linux_command(selected, false, L"root");
+    arguments.insert(arguments.end(), {L"/bin/bash", L"-ec",
+        LR"(set -o pipefail
+staging=$(mktemp -d)
+trap 'rm -rf -- "$staging"' EXIT
+tar -xzf - --no-same-owner --no-same-permissions -C "$staging"
+chmod +x "$staging/trainner-gui" "$staging/install.sh"
+exec 0</dev/null
+/bin/bash "$staging/scripts/provision-wsl.sh" --user trainer "$@")", L"trainner-gui"});
+    if (!SetFilePointerEx(source.get(), LARGE_INTEGER{}, nullptr, FILE_BEGIN))
+        throw std::runtime_error("Could not rewind the verified Linux payload.");
+    arguments.insert(arguments.end(), extra.begin(), extra.end());
+    const auto result = wsl(arguments, INFINITE, source.get());
+    log_result(profile, stage, result);
+    return result;
+}
+
+Settings stage_managed_upgrade(const Profile& profile, const fs::path& folder, const Settings& current) {
+    if (!managed_registered(profile))
+        throw std::runtime_error("The dedicated managed distribution is unavailable.");
+    Settings candidate = current;
+    candidate.payload = payload_hash;
+    candidate.root = managed_releases + wide(candidate.payload);
+    check_settings(candidate);
+    Handle source;
+    open_payload(folder, candidate.payload, source);
+    std::vector<wstring> args{L"--upgrade-from", current.root, L"--release", wide(candidate.payload)};
+    args.emplace_back(L"--probe");
+    const auto idle = provision_payload(profile, current, source, args, "Check update readiness");
+    if (idle.code)
+        throw Exit(static_cast<int>(idle.code), "The managed update is pending. " + trim_lines(idle.err));
+    args.pop_back();
+    const auto result = provision_payload(profile, current, source, args, "Stage managed update");
+    if (result.code)
+        throw Exit(static_cast<int>(result.code), "Could not prepare the managed update. See "
+                   + utf8(profile.log().wstring()) + ".");
+    verify_project(profile, candidate);
+    return candidate;
+}
+
 void prepare_managed(const Profile& profile, const fs::path& folder, Settings& selected,
                      Pending pending, SetupDialogs& dialogs, const Options& options) {
     if (selected.payload.empty())
         throw std::runtime_error("Use the Windows release ZIP for dedicated Ubuntu setup.");
-    const auto archive = folder / archive_name;
-    Handle source(CreateFileW(archive.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!source || sha256(source.get()) != selected.payload)
-        throw std::runtime_error("The source archive is missing or belongs to a different release."
-                                 " Extract the entire Windows ZIP and open the launcher from that folder.");
+    Handle source;
+    open_payload(folder, selected.payload, source);
     if (!pending.reboot_after.empty() && pending.reboot_after == boot_time())
         throw Exit(ERROR_SUCCESS_REBOOT_REQUIRED, "Restart Windows and open traiNNer-GUI.exe again.");
     const bool windows_setup = need_windows_setup();
@@ -421,23 +483,12 @@ void prepare_managed(const Profile& profile, const fs::path& folder, Settings& s
     save_pending(profile, pending);
     if (!managed_registered(profile)) register_managed(profile, dialogs);
     dialogs.progress(L"Preparing the Linux trainer. This can take several minutes.");
-    auto arguments = linux_command(selected, false, L"root");
-    arguments.insert(arguments.end(), {L"/bin/bash", L"-ec",
-        LR"(set -o pipefail
-staging=$(mktemp -d)
-trap 'rm -rf -- "$staging"' EXIT
-tar -xzf - --no-same-owner --no-same-permissions -C "$staging"
-chmod +x "$staging/trainner-gui" "$staging/install.sh"
-exec 0</dev/null
-/bin/bash "$staging/scripts/provision-wsl.sh" --user trainer "$@")", L"trainner-gui"});
     auto provision = [&](bool cpu_only) {
-        if (!SetFilePointerEx(source.get(), LARGE_INTEGER{}, nullptr, FILE_BEGIN))
-            throw std::runtime_error("Could not reopen the source archive for setup.");
-        auto command = arguments;
-        if (cpu_only) command.emplace_back(L"--cpu-only");
-        const auto result = wsl(command, INFINITE, source.get());
-        log_result(profile, cpu_only ? "CPU-only runtime setup" : "CUDA runtime setup", result);
-        return result;
+        std::vector<wstring> switches;
+        if (selected.root != managed_root) switches = {L"--release", wide(selected.payload)};
+        if (cpu_only) switches.emplace_back(L"--cpu-only");
+        return provision_payload(profile, selected, source, switches,
+                                 cpu_only ? "CPU-only runtime setup" : "CUDA runtime setup");
     };
     auto result = provision(pending.cpu_only);
     if (result.code == 4 && !pending.cpu_only && !options.non_interactive) {
@@ -462,19 +513,103 @@ exec 0</dev/null
                 wsl({L"--manage", managed_distro, L"--set-default-user", managed_user}));
 }
 
+void lock_settings(const Profile& profile, Handle& lock, DWORD wait_ms = 0) {
+    const auto deadline = GetTickCount64() + wait_ms;
+    do {
+        lock.reset(CreateFileW((profile.folder / L"setup.lock").c_str(), GENERIC_WRITE, 0, nullptr,
+                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (lock) return;
+        if (GetLastError() != ERROR_SHARING_VIOLATION)
+            throw std::runtime_error("Could not lock the desktop settings.");
+        if (GetTickCount64() >= deadline)
+            throw Exit(75, "Desktop setup or update is already running.");
+        Sleep(50);
+    } while (true);
+}
+
+void activate_managed(const Profile& profile, const Settings& current, const Settings& candidate) {
+    auto gate = linux_command(candidate, true);
+    gate.insert(gate.end(), {L"/usr/bin/python3", L"-I", candidate.root + L"/studio/update_gate.py",
+                             L"activate", L"--old-root", current.root});
+    // Preview 1 did not register alternate state bases. Include the one the
+    // original shortcut selected even when its previous service is closed.
+    const auto state = env(L"TRAINNER_GUI_WINDOWS_UPDATE_STATE");
+    if (!state.empty()) {
+        const auto base = state.front() == L'/' || state.front() == L'~' ? state : current.root + L"/" + state;
+        gate.insert(gate.end(), {L"--state-dir", base});
+    }
+    bool committed = false;
+    try {
+        const auto result = wsl(gate, 60000, nullptr, "TRAINNER_GUI_UPDATE_GATE_READY", [&]() {
+            save_settings(profile, candidate);
+            committed = true;
+        });
+        log_result(profile, "Activate managed update", result);
+        if (result.code)
+            throw Exit(static_cast<int>(result.code), "The managed update is pending. " + trim_lines(result.err));
+    } catch (const std::exception& error) {
+        if (!committed) throw;
+        // The backend pointer is already durable. Reporting failure here would
+        // make the Windows updater launch an older executable against it.
+        OutputDebugStringA(error.what());
+    }
+}
+
+void apply_update(const Profile& profile, const fs::path& folder, bool stage_only, bool migrate_original = false) {
+    if (elevated() || !is_digest(payload_hash))
+        throw std::runtime_error("Apply updates from a packaged launcher as your ordinary Windows user.");
+    if (fs::exists(profile.pending())) throw Exit(75, "Initial setup is in progress.");
+    // Take the config snapshot with the same lock used by setup and activation.
+    Handle snapshot_lock;
+    fs::create_directories(profile.folder);
+    lock_settings(profile, snapshot_lock);
+    const auto selected = load_settings(profile);
+    const auto expected = selected ? read_text(profile.config()) : string{};
+    snapshot_lock.reset();
+    if (!selected) return;  // No workspace has been configured yet.
+    if (!selected->managed) {
+        if (!selected->project.empty()) verify_project(profile, *selected);
+        return;
+    }
+    if (!managed_registered(profile)) throw std::runtime_error("The dedicated Ubuntu installation is unavailable.");
+    if (selected->payload == payload_hash) return;
+    Settings candidate = *selected;
+    candidate.payload = payload_hash;
+    candidate.root = managed_releases + wide(candidate.payload);
+    check_settings(candidate);
+
+    // A published ready marker lives in the root-owned side-by-side installation.
+    // Recheck the original account and runtime mode in case the user reconfigured it.
+    auto ready = linux_command(*selected, false);
+    ready.insert(ready.end(), {L"/bin/bash", L"-c",
+        LR"(read -r _ account uid mode < "$1/.managed-ready" &&
+            read -r _ other other_uid other_mode < "$2/.managed-ready" &&
+            [[ $account == "$other" && $uid == "$other_uid" && $mode == "$other_mode" ]])",
+        L"trainner-gui", selected->root, candidate.root});
+    if (wsl(ready).code) {
+        if (!stage_only && !migrate_original)
+            throw Exit(ERROR_NOT_READY, "The update needs to be prepared for this workspace.");
+        candidate = stage_managed_upgrade(profile, folder, *selected);
+    } else {
+        verify_project(profile, candidate);
+    }
+    if (stage_only) return;
+
+    Handle lock;
+    lock_settings(profile, lock);
+    if (fs::exists(profile.pending()) || read_text(profile.config()) != expected)
+        throw Exit(75, "The selected workspace changed while preparing the update.");
+    activate_managed(profile, *selected, candidate);
+}
+
 Settings setup(const Options& options, const Profile& profile, const fs::path& folder, bool interactive) {
     if (elevated())
         throw std::runtime_error("Open setup as your normal Windows user. Windows will ask for"
                                  " administrator approval if WSL needs to be installed.");
 
     fs::create_directories(profile.folder);
-    Handle lock(CreateFileW((profile.folder / L"setup.lock").c_str(), GENERIC_WRITE, 0, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!lock) {
-        if (GetLastError() == ERROR_SHARING_VIOLATION)
-            throw std::runtime_error("Desktop setup is already running.");
-        throw std::runtime_error("Could not lock the desktop settings.");
-    }
+    Handle lock;
+    lock_settings(profile, lock);
     SetupDialogs dialogs(interactive);
     const auto pending = load_pending(profile);
     const bool resume = !options.configure && !pending.project.empty();
@@ -501,8 +636,36 @@ Settings setup(const Options& options, const Profile& profile, const fs::path& f
         else project = dialogs.folder(L"Choose a local NTFS workspace folder");
     }
     selected.project = local_ntfs_folder(project);
+    std::optional<Settings> previous_release;
 
+    // Explicit configuration also repairs an unreadable previous selection.
+    auto recover_selection = [&](const fs::path& file) -> std::optional<Settings> {
+        try {
+            return read_settings(file);
+        } catch (const std::runtime_error& error) {
+            log_result(profile, "Recover desktop settings during setup", {1, {}, error.what()});
+            return {};
+        }
+    };
     if (managed) {
+        if (is_digest(selected.payload) && managed_registered(profile)) {
+            auto current = recover_selection(profile.config());
+            if (!current || !current->managed) current = recover_selection(profile.last_managed());
+            if (current && current->managed && current->payload == selected.payload) {
+                selected.root = current->root;
+            } else {
+                // Preview 1 could switch to a custom checkout without remembering
+                // the managed selection. A ready fixed root is its upgrade source.
+                auto probe = linux_command(selected, false);
+                probe.insert(probe.end(), {L"/usr/bin/test", L"-f", wstring(managed_root) + L"/.managed-ready"});
+                if ((current && current->managed) || !wsl(probe).code) {
+                    previous_release = current && current->managed ? *current : selected;
+                    previous_release->project = selected.project;
+                    previous_release->project_id = project_id(selected.project, true);
+                    selected = stage_managed_upgrade(profile, folder, *previous_release);
+                }
+            }
+        }
         prepare_managed(profile, folder, selected, pending, dialogs, options);
     } else {
         const auto registration = registered_distro(selected.distro);
@@ -513,7 +676,16 @@ Settings setup(const Options& options, const Profile& profile, const fs::path& f
 
     dialogs.progress(L"Checking the selected workspace.");
     verify_project(profile, selected);
-    save_settings(profile, selected);
+    if (previous_release) {
+        activate_managed(profile, *previous_release, selected);
+    } else {
+        if (!selected.managed) {
+            const auto previous = recover_selection(profile.config());
+            if (previous && previous->managed)
+                atomic_text(profile.last_managed(), read_text(profile.config()));
+        }
+        save_settings(profile, selected);
+    }
     std::error_code ignored;
     fs::remove(profile.pending(), ignored);
     return selected;
@@ -542,8 +714,6 @@ string launch(const Settings& value, const Options& options, const Profile& prof
             throw std::runtime_error("Open traiNNer-GUI as your normal Windows user.");
         if (!managed_registered(profile))
             throw std::runtime_error("The managed Ubuntu distribution is missing. Run with --configure.");
-        if (*payload_hash && value.payload != payload_hash)
-            throw std::runtime_error("Run with --configure to prepare the Linux trainer for this release.");
     }
     auto arguments = studio_command(value);
     const bool hold_client = !value.project.empty() && !options.phone_status;
@@ -583,20 +753,31 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         int argc{};
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (!argv) throw std::runtime_error("Could not read the launcher arguments.");
-        const std::vector<wstring> args(argv + 1, argv + argc);
+        std::vector<wstring> args(argv + 1, argv + argc);
         LocalFree(argv);
         interactive = std::none_of(args.begin(), args.end(), [](const wstring& arg) {
             return arg == L"--url" || arg == L"--phone-status" || arg == L"--non-interactive"
+                || arg == L"--apply-update" || arg == L"--stage-update"
                 || arg == L"--help" || arg == L"-h";
         });
+        SetEnvironmentVariableW(L"WSL_UTF8", L"1");
+        const auto folder = launcher_folder();
+        const Profile profile(profile_folder());
+        for (size_t index = 0; index + 1 < args.size(); ++index) {
+            if (args[index] == L"--state-dir")
+                SetEnvironmentVariableW(L"TRAINNER_GUI_WINDOWS_UPDATE_STATE", args[index + 1].c_str());
+        }
+        if (const auto result = updates::dispatch(folder, profile.folder, args, *payload_hash != 0))
+            return *result;
         const auto options = parse_options(args);
         if (options.help) {
             stream(STD_OUTPUT_HANDLE, usage);
             return 0;
         }
-        SetEnvironmentVariableW(L"WSL_UTF8", L"1");
-        const auto folder = launcher_folder();
-        const Profile profile(profile_folder());
+        if (options.apply_update || options.stage_update) {
+            apply_update(profile, folder, options.stage_update);
+            return 0;
+        }
         if (options.configure) {
             setup(options, profile, folder, interactive);
             return 0;
@@ -614,7 +795,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 throw std::runtime_error("Desktop setup is required. Run traiNNer-GUI.exe --configure.");
             selected = setup(options, profile, folder, true);
         }
+        // An original Preview 1 shortcut has no updater. Opening the replacement
+        // once migrates its managed backend and preserves the recorded workspace.
+        if (selected->managed && selected->root == managed_root && *payload_hash
+            && selected->payload != payload_hash && !options.phone_status) {
+            try {
+                apply_update(profile, folder, false, true);
+            } catch (const std::exception& error) {
+                log_result(profile, "Update deferred; using the installed backend", {1, {}, error.what()});
+            }
+        }
+        // Serialize selecting and opening a managed service with the short
+        // activation transaction. The service itself outlives this lock.
+        Handle launch_lock;
+        if (selected->managed) {
+            lock_settings(profile, launch_lock, 15000);
+            selected = load_settings(profile);
+            if (!selected) throw std::runtime_error("The desktop configuration is missing.");
+        }
         const auto url = launch(*selected, options, profile);
+        launch_lock.reset();
         if (inferred && interactive) remember_legacy(profile, *selected);
         if (options.url || options.phone_status) stream(STD_OUTPUT_HANDLE, url + "\n");
         else if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", wide(url).c_str(),

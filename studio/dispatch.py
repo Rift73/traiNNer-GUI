@@ -5,6 +5,8 @@ import logging
 import threading
 from pathlib import Path
 
+from .update_gate import UpdateDeferred
+
 LOG = logging.getLogger("trainner-gui.queue")
 
 
@@ -25,6 +27,8 @@ class QueueDispatcher:
                     self.manager().dispatch_once()
                     delay = 3
                     previous_error = None
+                except UpdateDeferred:
+                    delay = 3
                 except Exception as exc:
                     # A corrupt queue or inaccessible volume must stay visible,
                     # while requests for unrelated recipes keep working.

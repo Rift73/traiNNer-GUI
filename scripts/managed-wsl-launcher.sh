@@ -1,9 +1,13 @@
 #!/bin/bash
 # Packaged as trainner-gui at the installed source root.
-managed_root=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
-managed_python="$managed_root/venv/bin/python"
-export PATH="$managed_root/venv/bin:/usr/bin:/bin:/usr/lib/wsl/lib"
-export CUDA_HOME="$managed_root/venv/lib/python3.12/site-packages/nvidia/cu13"
+if ! managed_root=$(dirname -- "$(realpath -e -- "${BASH_SOURCE[0]}")") ||
+    ! managed_venv=$(realpath -e -- "$managed_root/venv"); then
+    echo "Managed traiNNer-GUI runtime is missing. Rerun Windows setup." >&2
+    return 1 2>/dev/null || exit 1
+fi
+managed_python="$managed_venv/bin/python"
+export PATH="$managed_venv/bin:/usr/bin:/bin:/usr/lib/wsl/lib"
+export CUDA_HOME="$managed_venv/lib/python3.12/site-packages/nvidia/cu13"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:/usr/lib/wsl/lib"
 export CPATH="$CUDA_HOME/include/cccl"
 unset PYTHONHOME

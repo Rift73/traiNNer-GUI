@@ -4,11 +4,11 @@ Train models locally from your browser. Edit YAML recipes, inspect datasets, and
 
 ## Start on Windows
 
-1. From the GitHub release **Assets**, download **traiNNer-GUI-Windows-x64.zip**. Extract the whole ZIP and open **traiNNer-GUI.exe**.
+1. Download the [Windows x64 ZIP](https://github.com/Rift73/traiNNer-GUI/releases/latest/download/traiNNer-GUI-Windows-x64.zip), extract it, and open **traiNNer-GUI.exe**.
 2. Choose **Set up dedicated Ubuntu** for a new installation. Setup offers to install WSL 2 if needed. If prompted, restart Windows and reopen the EXE. If you already have a working trainer in WSL, choose **Use an existing WSL checkout**.
 3. Choose a local NTFS project folder. For a first run with bundled data, open **TabularRegression / Tabular_MLP** and select **Start training**.
 
-Use the same EXE on every launch. The browser runs on Windows and training runs in Linux. The managed CUDA runtime requires an NVIDIA Ampere or newer GPU and a compatible Windows driver. CPU recipes can run without an NVIDIA GPU.
+Keep using the same EXE. It downloads updates in the background and applies them on an idle launch. If you connected your own WSL checkout, you manage its code updates. The browser runs on Windows and training runs in Linux. The managed CUDA runtime requires an NVIDIA Ampere or newer GPU and a compatible Windows driver. CPU recipes can run without an NVIDIA GPU.
 
 ## Your files
 

@@ -29,6 +29,7 @@ from .run_checkpoints import (
     prepare_import,
     prepared_import_plan,
 )
+from .update_gate import MANAGED_ROOT, is_managed_runtime, studio_admission
 from .workspace import PROJECT_DIR_ENV, WindowsProject, require_ext4
 from .yaml_edit import read_recipe, render
 
@@ -169,22 +170,23 @@ class RunManager:
 
     @contextmanager
     def execution_slot(self, *, exclusive: bool) -> Iterator[int]:
-        self.resource_lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.resource_lock.resolve() != self.resource_lock:
-            raise ValueError("The managed trainer resource lock is redirected.")
-        with self.resource_lock.open("ab") as slot:
-            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            try:
-                fcntl.flock(slot, mode | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise RunBusyError(
-                    "The managed trainer resource lease is occupied."
-                ) from error
-            if exclusive and (blocker := self._serial_blocker()):
-                raise RunBusyError(blocker)
-            # The detached supervisor and its trainer inherit the open file.
-            # Unlocking it explicitly here would release their lease as well.
-            yield slot.fileno()
+        with studio_admission(self.root):
+            self.resource_lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if self.resource_lock.resolve() != self.resource_lock:
+                raise ValueError("The managed trainer resource lock is redirected.")
+            with self.resource_lock.open("ab") as slot:
+                mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                try:
+                    fcntl.flock(slot, mode | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise RunBusyError(
+                        "The managed trainer resource lease is occupied."
+                    ) from error
+                if exclusive and (blocker := self._serial_blocker()):
+                    raise RunBusyError(blocker)
+                # The detached supervisor and its trainer inherit the open file.
+                # Unlocking it explicitly here would release their lease as well.
+                yield slot.fileno()
 
     def requested_run(self, request_id: str) -> dict[str, Any] | None:
         """Resolve a launch request without rereading recipes or trainer logs."""
@@ -565,7 +567,17 @@ class RunManager:
         return result
 
     def _cli_directories(self) -> Iterator[tuple[str, Path]]:
-        for experiment in observe.files(self.root / "experiments"):
+        experiments = self.root / "experiments"
+        original = MANAGED_ROOT / "experiments"
+        if (
+            experiments.is_symlink()
+            and self.root != MANAGED_ROOT
+            and is_managed_runtime(self.root)
+            and experiments.readlink() == original
+            and original.resolve() == original
+        ):
+            experiments = original
+        for experiment in observe.files(experiments):
             if (
                 experiment.name.startswith(".")
                 or not experiment.is_dir()

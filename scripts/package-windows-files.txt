@@ -77,6 +77,8 @@ native/studio/image_difference/README.md
 native/studio/image_difference/difference.c
 native/studio/launcher/CMakeLists.txt
 native/studio/launcher/launcher.cpp
+native/studio/launcher/updates.cpp
+native/studio/launcher/updates.hpp
 native/studio/launcher/windows_host.cpp
 native/studio/launcher/windows_host.hpp
 native/studio/metrics/Makefile
@@ -692,6 +694,7 @@ requirements/live-wsl-py312.txt
 requirements/managed-wsl-py312.txt
 retest.py
 schemas/redux-config.schema.json
+scripts/check-managed-studio-update.py
 scripts/check-managed-wsl-runtime.py
 scripts/install_runtime.py
 scripts/managed-wsl-launcher.sh
@@ -783,6 +786,7 @@ studio/tailnet_gateway.py
 studio/task_data.py
 studio/tensorboard_history.py
 studio/training_samples.py
+studio/update_gate.py
 studio/validation_summary.py
 studio/video_sources.py
 studio/video_split.py

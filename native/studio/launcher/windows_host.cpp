@@ -11,6 +11,7 @@
 #include <array>
 #include <cctype>
 #include <fstream>
+#include <exception>
 #include <memory>
 #include <regex>
 #include <type_traits>
@@ -243,15 +244,23 @@ string boot_time() {
 }
 
 ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source,
-                  const string& ready) {
+                  const string& ready, const std::function<void()>& while_ready) {
     const auto exe = wsl_exe();
     wstring command = quote(exe.wstring());
     for (const auto& arg : args) command += L" " + quote(arg);
 
     SECURITY_ATTRIBUTES attributes{sizeof(attributes), nullptr, TRUE};
     Capture out(attributes), err(attributes);
-    Handle input;
-    if (source) {
+    Handle input, keep_open;
+    if (while_ready) {
+        if (source || ready.empty()) throw std::logic_error("Invalid WSL activation handshake");
+        HANDLE read{}, write{};
+        if (!CreatePipe(&read, &write, &attributes, 0)) throw win_error("Could not open the activation pipe");
+        input.reset(read);
+        keep_open.reset(write);
+        if (!SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0))
+            throw win_error("Could not configure the activation pipe");
+    } else if (source) {
         HANDLE duplicate{};
         if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &duplicate, 0, TRUE,
                              DUPLICATE_SAME_ACCESS))
@@ -295,15 +304,23 @@ ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source
     input.reset();
 
     ProcessResult result;
+    std::exception_ptr callback_error;
     const auto started = GetTickCount64();
     for (;;) {
         out.drain(result.out);
         err.drain(result.err);
-        // The ready message transfers lifetime to the exact managed Studio
-        // process. The WSL client has no console and stops when Studio exits.
         if (!ready.empty() && (result.out.find(ready + "\n") != string::npos
-                               || result.out.find(ready + "\r\n") != string::npos))
-            return result;
+                               || result.out.find(ready + "\r\n") != string::npos)) {
+            if (!while_ready) return result;  // Studio's hidden WSL client stays attached.
+            if (keep_open) {
+                try {
+                    while_ready();  // Windows commits while Linux still holds the idle gate.
+                } catch (...) {
+                    callback_error = std::current_exception();
+                }
+                keep_open.reset();
+            }
+        }
         const auto state = WaitForSingleObject(child.get(), 25);
         if (state == WAIT_OBJECT_0) break;
         if (state == WAIT_FAILED) throw win_error("Could not wait for WSL");
@@ -317,6 +334,8 @@ ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source
     out.drain(result.out);
     err.drain(result.err);
     if (!GetExitCodeProcess(child.get(), &result.code)) throw win_error("Could not read the WSL result");
+    if (callback_error) std::rethrow_exception(callback_error);
+    if (keep_open && !result.code) throw std::runtime_error("Linux exited before confirming the activation gate.");
     return result;
 }
 

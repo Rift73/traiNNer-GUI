@@ -2,6 +2,8 @@
 param (
     [string]$BuildDirectory = (Join-Path $env:LOCALAPPDATA 'traiNNer-GUI\build\launcher'),
     [string]$Destination = $PSScriptRoot,
+    [ValidatePattern('^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.([1-9][0-9]*))?$')]
+    [string]$ReleaseTag = 'v0.1.0-preview.1',
     [switch]$Package
 )
 $ErrorActionPreference = 'Stop'
@@ -57,7 +59,8 @@ if (!$clang) {
 if (!$clang) { throw 'LLVM clang-cl is required to build the desktop launcher.' }
 $compiler = if ($clang -is [System.IO.FileInfo]) { $clang.FullName } else { $clang.Source }
 $configure = @('-S', $source, '-B', $BuildDirectory, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
-    "-DCMAKE_CXX_COMPILER=$compiler", "-DTRAINNER_GUI_PAYLOAD_SHA256=$payloadHash")
+    "-DCMAKE_CXX_COMPILER=$compiler", "-DTRAINNER_GUI_PAYLOAD_SHA256=$payloadHash",
+    "-DTRAINNER_GUI_RELEASE_TAG=$ReleaseTag")
 & cmake @configure
 if ($LASTEXITCODE -ne 0) { throw 'Launcher configuration failed.' }
 & cmake --build $BuildDirectory --target traiNNer-GUI

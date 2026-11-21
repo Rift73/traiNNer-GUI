@@ -14,17 +14,10 @@ import urllib.request
 from pathlib import Path
 
 from .recipes import atomic_text
+from .update_gate import _boot_id, _owns_live_lock, _start_ticks
 from .workspace import WindowsProject, Workspace
 
 DEFAULT_PORT = 8732
-
-
-def _start_ticks(pid: int) -> str:
-    return Path(f"/proc/{pid}/stat").read_text().rsplit(")",1)[1].split()[19]
-
-
-def _boot_id() -> str:
-    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
 @contextmanager
@@ -44,29 +37,6 @@ def stamp(state: Path, port: int, root: Path, *, project: WindowsProject | None 
     if project is not None:
         identity.update(project.status())
     atomic_text(state / "service.json",json.dumps(identity))
-
-
-def _owns_live_lock(pid: int, state: Path) -> bool:
-    """Match the service's open lock path, inode and exclusive flock."""
-    path = state.resolve() / "service-live.lock"
-    info = path.stat()
-    inode = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
-    expected = ["ADVISORY", "WRITE", str(pid), inode, "0", "EOF"]
-    proc = Path(f"/proc/{pid}")
-    for fd in (proc / "fd").iterdir():
-        try:
-            if os.readlink(fd) != str(path):
-                continue
-            with (proc / "fdinfo" / fd.name).open() as details:
-                for line in details:
-                    if line.startswith("lock:"):
-                        fields = line.split()
-                        # WSL DrvFS represents flock() as a whole-file POSIX lock.
-                        if len(fields) == 9 and fields[2] in ("FLOCK", "POSIX") and fields[3:] == expected:
-                            return True
-        except FileNotFoundError:
-            continue  # A request socket or the service itself may have closed.
-    return False
 
 
 def stop_service(root: Path, state: Path) -> bool:

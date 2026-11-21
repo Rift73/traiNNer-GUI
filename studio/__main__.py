@@ -11,6 +11,7 @@ from pathlib import Path
 from .desktop import DEFAULT_PORT, desktop_url
 from .paths import local_path
 from .server import RecipeRejected, Services, serve
+from .update_gate import remember_state_base, studio_admission
 from .workspace import Workspace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,9 +283,30 @@ def main() -> int:
     if args.command == "serve":
         if not 0 <= args.port <= 65535:
             raise ValueError("Port must be between 0 and 65535.")
-        serve(ROOT,state,args.port,args.desktop_fd)
+        serve(ROOT, state, args.port, args.desktop_fd)
         return 0
-    if args.command in ("close", "url", "tailscale", "project-info"):
+    with studio_admission(ROOT) as managed:
+        if managed and args.command != "project-info":
+            remember_state_base(state)
+        if args.command != "url":
+            return _command(args, state)
+
+        from .tailnet import auto_start
+
+        workspace = Workspace.from_environment(state)
+        url = desktop_url(ROOT, state, workspace=workspace)
+        auto_start(ROOT, workspace.state)
+    if args.hold_wsl:
+        from .desktop import hold_windows_client
+
+        hold_windows_client(url, ROOT, workspace.state)
+    else:
+        print(url)
+    return 0
+
+
+def _command(args: argparse.Namespace, state: Path) -> int:
+    if args.command in ("close", "tailscale", "project-info"):
         workspace = Workspace.from_environment(state)
         if args.command == "project-info":
             if workspace.project is None:
@@ -295,18 +317,6 @@ def main() -> int:
             from .desktop import stop_service
 
             print(json.dumps({"closed":stop_service(ROOT, workspace.state)}))
-            return 0
-        if args.command == "url":
-            from .tailnet import auto_start
-
-            url = desktop_url(ROOT, state, workspace=workspace)
-            auto_start(ROOT, workspace.state)
-            if args.hold_wsl:
-                from .desktop import hold_windows_client
-
-                hold_windows_client(url, ROOT, workspace.state)
-            else:
-                print(url)
             return 0
         from .tailnet import configure, status
 

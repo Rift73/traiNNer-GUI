@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import shutil
+from contextlib import ExitStack
 from functools import cached_property, partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .desktop import exclusive_service, stamp, forget
 from .preflight import launch_text, phase_snapshot_options, preflight
 from .recipes import RecipeLibrary
+from .update_gate import UpdateDeferred, remember_state_base, studio_admission
 from .workspace import Workspace
 from .yaml_edit import render
 
@@ -214,6 +216,10 @@ class Services:
         raise FileNotFoundError("Unknown API endpoint.")
 
     def post(self, route, body):
+        with studio_admission(self.root):
+            return self._post(route, body)
+
+    def _post(self, route, body):
         if route == "/api/catalog/refresh":
             return self.library.refresh_catalog()
         if route == "/api/reproduction/export":
@@ -478,7 +484,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error":str(exc)}, HTTPStatus.NOT_FOUND)
         except PermissionError as exc:
             self._json({"error":str(exc)}, HTTPStatus.FORBIDDEN)
-        except FileExistsError as exc:
+        except (FileExistsError, UpdateDeferred) as exc:
             self._json({"error":str(exc)}, HTTPStatus.CONFLICT)
         except (ValueError, UnicodeError) as exc:
             self._json({"error":str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -495,41 +501,43 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(root: Path, state: Path, port: int, desktop_fd: int | None = None) -> None:
-    services = Services(root, state)
-    with exclusive_service(services.state):
-        _serve(services, port, desktop_fd)
-
-
-def _serve(services: Services, port: int, desktop_fd: int | None) -> None:
-    root, state = services.root, services.state
-    handler = partial(Handler, services=services)
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-    except OSError as exc:
-        if desktop_fd is None or exc.errno != errno.EADDRINUSE:
-            raise
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     from .dispatch import QueueDispatcher
-    dispatch = QueueDispatcher(state, lambda: services.queue)
-    services.queue_wake = dispatch.wake
-    with server, dispatch:
-        stamp(state, server.server_port, root, project=services.workspace.project)
-        try:
+
+    def stop(signum, frame):
+        raise SystemExit(0)
+
+    # Service ownership lasts until shutdown. Admission lasts only through
+    # startup, so the updater can quiesce a server that is waiting for work.
+    root = root.resolve()
+    with ExitStack() as service:
+        with studio_admission(root) as managed:
+            if managed:
+                remember_state_base(state.expanduser().resolve())
+            services = Services(root, state)
+            root, state = services.root, services.state
+            service.enter_context(exclusive_service(state))
+            handler = partial(Handler, services=services)
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+            except OSError as exc:
+                if desktop_fd is None or exc.errno != errno.EADDRINUSE:
+                    raise
+                server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            service.enter_context(server)
+            previous = signal.signal(signal.SIGTERM, stop)
+            service.callback(signal.signal, signal.SIGTERM, previous)
+            stamp(state, server.server_port, root, project=services.workspace.project)
+            service.callback(forget, state)
+            dispatch = service.enter_context(QueueDispatcher(state, lambda: services.queue))
+            services.queue_wake = dispatch.wake
             if desktop_fd is None:
                 from .tailnet import auto_start
                 auto_start(root, state)
             if desktop_fd is not None:
-                with os.fdopen(desktop_fd,"w") as pipe:
-                    print(server.server_port,file=pipe)
-            print(f"traiNNer-GUI  http://127.0.0.1:{server.server_port}/",flush=True)
-            def stop(signum, frame):
-                raise SystemExit(0)
-            previous = signal.signal(signal.SIGTERM, stop)
-            try:
-                server.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                signal.signal(signal.SIGTERM, previous)
-        finally:
-            forget(state)
+                with os.fdopen(desktop_fd, "w") as pipe:
+                    print(server.server_port, file=pipe)
+            print(f"traiNNer-GUI  http://127.0.0.1:{server.server_port}/", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass

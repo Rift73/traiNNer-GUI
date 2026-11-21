@@ -29,6 +29,7 @@ from .run_checkpoints import (
     prepared_import_plan,
 )
 from .runs import ACTIVE, QUEUE_REQUEST_PREFIX, RUN_ID, RunBusyError, RunManager
+from .update_gate import studio_admission
 from .yaml_edit import read_recipe, render
 
 WAITING = {"held", "pending"}
@@ -97,12 +98,13 @@ class QueueManager:
 
     @contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self.directory.resolve() != self.directory:
-            raise ValueError("The queue directory is redirected.")
-        with (self.directory / "control.lock").open("ab") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            yield self._read()
+        with studio_admission(self.root):
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if self.directory.resolve() != self.directory:
+                raise ValueError("The queue directory is redirected.")
+            with (self.directory / "control.lock").open("ab") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                yield self._read()
 
     def _save(self, state: dict[str, Any]) -> None:
         process.write_record(self.index, state)

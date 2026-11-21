@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -15,12 +14,13 @@ from pathlib import Path
 from types import FrameType
 
 from .recipes import atomic_text
+from .update_gate import default_state_path
 from .workspace import PROJECT_STATE_DIR
 
 
 def default_state(root: Path) -> Path:
     home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-    return home / "traiNNer-GUI" / hashlib.sha256(str(root).encode()).hexdigest()[:12]
+    return default_state_path(root, home)
 
 
 def _enabled(root: Path, state: Path) -> bool:

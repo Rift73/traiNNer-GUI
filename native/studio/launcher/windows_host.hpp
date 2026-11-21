@@ -4,6 +4,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <filesystem>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -75,7 +76,7 @@ bool virtual_machine_platform_enabled();
 unsigned long windows_build_number();
 string boot_time();
 ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout = 60000, HANDLE input = nullptr,
-                  const string& ready = {});
+                  const string& ready = {}, const std::function<void()>& while_ready = {});
 void install_wsl();
 string sha256(HANDLE file);
 void stream(DWORD id, const string& text);
