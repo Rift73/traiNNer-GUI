@@ -1,0 +1,66 @@
+# Copy to options/train/ and point dataroot_lq at each labeled split.
+#   datasets/classification/train/dog/one.jpg
+#   datasets/classification/train/cat/two.jpg
+#   datasets/classification/val/dog/three.jpg
+# Classes follow class_names order, so dog is ID 0 and cat is ID 1.
+# Include every class in training. Validation may omit classes.
+# The entire image is resized to image_size on train, validation, and prediction.
+name: image_classification_mobilenet_v3_small
+task: image_classification
+task_options:
+  class_names: [dog, cat]
+  image_size: 128
+  # Top1 is always reported. Top5 is added by default when valid.
+  top_k: null
+
+num_gpu: 0
+scale: 1
+network_g:
+  type: mobilenet_v3_small
+  num_classes: 2  # Match the number of class_names. Weights start from scratch.
+# To fine-tune on a new class list, set path.pretrain_network_g to the source
+# weights and path.transfer_g to {}. Only matching named tensors are copied.
+# For a new label order with the same output size, keep this model's head fresh
+# with transfer_g: {exclude: [classifier.3.weight, classifier.3.bias]}.
+path: {}
+
+datasets:
+  train:
+    name: classification train
+    type: classfolderdataset
+    dataroot_lq: datasets/classification/train
+    use_hflip: true
+    use_rot: false
+    batch_size_per_gpu: 2
+    num_worker_per_gpu: 0
+    prefetch_factor: null
+    persistent_workers: false
+    pin_memory: false
+    dataset_enlarge_ratio: 1
+  val:
+    name: classification val
+    type: classfolderdataset
+    dataroot_lq: datasets/classification/val
+    pin_memory: false
+
+train:
+  total_iter: 1000
+  optim_g:
+    type: AdamW
+    lr: 0.0003
+  schedulers:
+    g:
+      type: StepLR
+      step_size: 500
+      gamma: 0.5
+
+val:
+  val_enabled: true
+  metrics_enabled: true
+  save_img: false
+  val_freq: 100
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: 100
+  use_tb_logger: true

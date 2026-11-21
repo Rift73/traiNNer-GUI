@@ -1,0 +1,132 @@
+/* Recipe screen frame: bar plus two resizable panes. Pane contents: recipe-form.css, recipe-source.css. */
+
+.recipe {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.recipe__library {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.recipe__library > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.recipe__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s2) var(--s4);
+  background: var(--raised);
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+/* The bar takes focus when a recipe was just chosen; the ring is drawn inside so the screen edge does not clip it. */
+.recipe__bar:focus-visible {
+  outline-offset: -2px;
+}
+
+.recipe__ident {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.recipe__title {
+  font-size: var(--text-lg);
+  font-stretch: var(--narrow);
+}
+
+.recipe__meta {
+  display: flex;
+  gap: var(--s4);
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+.recipe__fact {
+  white-space: nowrap;
+}
+
+.recipe__fact.truncate {
+  flex: 0 1 auto;
+}
+
+.recipe__verdict,
+.recipe__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.recipe__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 7px minmax(300px, var(--source-w, 44%));
+}
+
+.recipe__body[data-layout="form"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.recipe__body[data-layout="source"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.recipe__body[data-layout="form"] > .recipe__source,
+.recipe__body[data-layout="form"] > .recipe__divider,
+.recipe__body[data-layout="source"] > .recipe__form,
+.recipe__body[data-layout="source"] > .recipe__divider {
+  display: none;
+}
+
+.recipe__form,
+.recipe__source {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+
+.recipe__form > *,
+.recipe__source > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.recipe__divider {
+  cursor: col-resize;
+  background: var(--rule);
+  border-left: 3px solid var(--panel);
+  border-right: 3px solid var(--panel);
+  touch-action: none;
+}
+
+.recipe__divider:hover,
+.recipe__divider:focus-visible {
+  background: var(--ink-2);
+}
+
+@media (max-width: 980px) {
+  .recipe__body[data-layout="split"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .recipe__body[data-layout="split"] > .recipe__divider {
+    display: none;
+  }
+
+  .recipe__body[data-layout="split"] > .recipe__source {
+    border-top: 1px solid var(--rule);
+  }
+}

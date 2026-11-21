@@ -1,0 +1,643 @@
+/* Holdout results (js/runs/holdout.js): a checkpoint measured on held-out data, and the split leakage
+   check (also shown on the Data screen). Sits inside the analysis job result (analysis.css).
+   Tokens only; selectors one class deep. Colour only through badges and notices, always with a word. */
+
+.holdout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+/* the lead sentence of an evaluation, with "Compare with…" at its end; the button wraps under it
+   when the result area is narrow */
+.holdout__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.holdout__lead {
+  flex: 1 1 32ch;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-lg);
+  overflow-wrap: anywhere;
+}
+
+/* "Compare with its run" and, beside it, the link that keeps the choice open */
+.holdout__compare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+.holdout__comparelink {
+  font-size: var(--text-sm);
+}
+
+.holdout__file {
+  font-weight: 600;
+}
+
+.holdout__part {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.holdout__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.holdout__line {
+  margin: 0;
+  max-width: 80ch;
+}
+
+.holdout__note {
+  margin: 0;
+  max-width: 80ch;
+  color: var(--ink-2);
+}
+
+.holdout__quiet {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.holdout__quiet:empty {
+  display: none;
+}
+
+.holdout__absent {
+  color: var(--ink-3);
+}
+
+/* ───────── measured scores ───────── */
+
+/* A wide table (one column per metric, per class for segmentation and detection) scrolls in its own box. */
+.holdout__tablewrap {
+  max-width: 100%;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+}
+
+.holdout__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.holdout__rowhead {
+  min-width: 12ch;
+  max-width: 32ch;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Not a blank, not a zero: the word, in the warning colour (the notice below names it too). */
+.holdout__nonfinite {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+/* what kind of score the table holds: one quiet sentence per kind */
+.holdout__kinds {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  max-width: 80ch;
+}
+
+.holdout__noticebody {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.holdout__noticeline {
+  margin: 0;
+}
+
+.holdout__noticelist {
+  margin: 0;
+  padding-left: var(--s4);
+}
+
+/* ───────── results by class ───────── */
+
+.holdout__classbody {
+  min-width: 0;
+}
+
+/* one line per evaluation that kept class counts: the dataset, then "Show classes" */
+.holdout__classrows {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.holdout__classrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  min-width: 0;
+}
+
+.holdout__classname {
+  min-width: 12ch;
+  max-width: 100%;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* the class report of the chosen evaluation (js/runs/classes.js; its own rules are in validation.css) */
+.holdout__classes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+/* ───────── decisions per image ───────── */
+
+/* A dataset's row reuses .holdout__classrow: the name, "Show decisions", then this download link. */
+.holdout__decisionlink {
+  font-size: var(--text-sm);
+}
+
+/* the decisions of the chosen dataset, under the rows */
+.holdout__decisions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+/* the heading with "Hide decisions" beside it */
+.holdout__decisionhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.holdout__decisiontitle {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.holdout__decisiontitle:focus-visible {
+  outline-offset: 3px;
+}
+
+/* what the rows say in sum; also "Reading…" and the sentence for a file too large to show */
+.holdout__decisionsummary {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.holdout__decisionsummary:empty {
+  display: none;
+}
+
+.holdout__decisionbody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.holdout__decisionbody:empty {
+  display: none;
+}
+
+.holdout__decisioncheck {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: fit-content;
+  max-width: 100%;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+/* One line per image: the table scrolls sideways in its box (.holdout__tablewrap) instead of folding names. */
+.holdout__decisiontable {
+  white-space: nowrap;
+}
+
+/* The word carries the result; the colour only helps the eye find the wrong ones. */
+.holdout__decisionok {
+  color: var(--ok);
+}
+
+.holdout__decisionwrong {
+  font-weight: 600;
+  color: var(--err);
+}
+
+/* the other candidates of a decision may fold: a recipe can ask for many */
+.holdout__decisionothers {
+  min-width: 24ch;
+  white-space: normal;
+}
+
+/* ───────── change between frames, operating points ───────── */
+
+/* one dataset of a section: its name, what was measured, the evidence after */
+.holdout__set {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s1);
+  min-width: 0;
+  padding-top: var(--s2);
+  font-variant-numeric: tabular-nums;
+}
+
+.holdout__settitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.holdout__setcount {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+/* "Show the scored changes": closed until asked; the table is read when it opens */
+.holdout__fold {
+  min-width: 0;
+}
+
+.holdout__foldsummary {
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.holdout__foldbody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s1);
+}
+
+.holdout__foldbody:empty {
+  display: none;
+}
+
+/* the counts of all categories together: the word, then the number */
+.holdout__facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px var(--s4);
+  max-width: 80ch;
+  margin: 0;
+}
+
+.holdout__term {
+  color: var(--ink-2);
+}
+
+.holdout__value {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* what the sections did not draw of their summaries, as the job reported it */
+.holdout__raw {
+  min-width: 0;
+  padding-top: var(--s3);
+  font-size: var(--text-sm);
+  border-top: 1px solid var(--rule);
+}
+
+.holdout__rawsummary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.holdout__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  border: 1px solid var(--rule);
+}
+
+/* ───────── saved images ───────── */
+
+.holdout__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.holdout__thumb {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.holdout__thumblink {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s1);
+  color: var(--stage-ink);
+  text-decoration: none;
+  background: var(--stage);
+  border: 1px solid var(--rule);
+}
+
+.holdout__thumblink:hover {
+  border-color: var(--rule-strong);
+}
+
+.holdout__thumbimg {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+
+.holdout__thumbname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.holdout__thumbset {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+}
+
+.holdout__thumbset:empty {
+  display: none;
+}
+
+.holdout__more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+/* ───────── files ───────── */
+
+.holdout__fileswrap {
+  min-width: 0;
+}
+
+.holdout__files {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.holdout__fileitem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s3);
+  min-width: 0;
+}
+
+.holdout__filelink {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.holdout__filedesc {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.holdout__filegroup {
+  min-width: 0;
+}
+
+.holdout__filesummary {
+  cursor: pointer;
+  padding: 2px 0;
+  color: var(--ink);
+}
+
+/* The folded list of output images (shown only while the group is open). */
+.holdout__grouplist {
+  display: grid;
+  gap: var(--s1);
+  max-height: 320px;
+  overflow: auto;
+  margin: var(--s1) 0 0;
+  padding: 0 0 0 var(--s4);
+  list-style: none;
+}
+
+/* ───────── split leakage ───────── */
+
+.holdout__verdict {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.holdout__groups {
+  display: grid;
+  gap: var(--s3);
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.holdout__group {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2) 0 var(--s3);
+  border-bottom: 1px solid var(--rule);
+}
+
+.holdout__grouphead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+}
+
+.holdout__groupsize {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+/* Training and validation side by side; they stack when the result area is narrow. */
+.holdout__sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.holdout__side {
+  display: grid;
+  align-content: start;
+  gap: var(--s1);
+  min-width: 0;
+  padding-left: var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.holdout__sidetitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.holdout__sidecount {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.holdout__paths {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.holdout__pathitem {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.holdout__role {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.holdout__role:empty {
+  display: none;
+}
+
+.holdout__path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.holdout__key {
+  color: var(--ink-2);
+}
+
+.holdout__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.holdout__count {
+  padding-left: var(--s2);
+  border-left: 1px solid var(--rule);
+}
+
+.holdout__issues {
+  display: grid;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.holdout__issue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s2);
+  min-width: 0;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.holdout__issuemsg {
+  flex: 1 1 100%;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+@media (max-width: 720px) {
+  .holdout__lead,
+  .holdout__verdict {
+    font-size: var(--text-md);
+  }
+
+  .holdout__grid {
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  }
+}
+
+@media (forced-colors: active) {
+  .holdout__nonfinite,
+  .holdout__decisionok,
+  .holdout__decisionwrong {
+    color: CanvasText;
+  }
+}

@@ -1,0 +1,134 @@
+/* "How fast this run trained" (js/runs/timing.js): the rates, the data wait and the memory a run's trainer
+   log recorded. One quiet control until it is opened. Tokens only; selectors one class deep.
+   No colour carries meaning here. */
+
+.timing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 96ch;
+}
+
+.timing__summary {
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.timing__summary:hover {
+  color: var(--ink);
+}
+
+.timing__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2) 0 var(--s1) var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+/* one line of choices; it wraps when the page is narrow */
+.timing__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.timing__field {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.timing__label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* A choice at its natural width, not a bar across the block. */
+.timing__select {
+  width: auto;
+  max-width: min(44ch, 100%);
+}
+
+.timing__answer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.timing__answer:empty {
+  display: none;
+}
+
+.timing__line {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.timing__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.timing__title {
+  margin: 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+/* The table keeps its own width and scrolls sideways in its box when the page is narrow. */
+.timing__tablewrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+}
+
+.timing__table {
+  width: auto;
+  min-width: min(100%, 56ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the row heading: what the series is, in words or as its key */
+.timing__what {
+  min-width: 24ch;
+  max-width: 44ch;
+  font-weight: 400;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+/* "The log is still being read: ..." with its "Read on" button */
+.timing__pending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .timing__body {
+    padding-left: var(--s2);
+  }
+
+  .timing__select {
+    max-width: 100%;
+  }
+}

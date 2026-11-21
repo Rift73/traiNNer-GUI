@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+entry=$(realpath -- "$0")
+root=$(dirname -- "$entry")
+if [ -n "${TRAINNER_GUI_PYTHON:-}" ]; then
+    runtime=$TRAINNER_GUI_PYTHON
+elif [ -x "$root/venv/bin/python" ]; then
+    runtime=$root/venv/bin/python
+elif [ -x "$root/.venv/bin/python" ]; then
+    runtime=$root/.venv/bin/python
+elif [ -x "$root/../../traiNNer-redux/venv/bin/python" ]; then
+    runtime=$root/../../traiNNer-redux/venv/bin/python
+else
+    runtime=python3
+fi
+if [ "$#" -eq 0 ]; then set -- serve; fi
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+# Resolve Studio from this checkout even if the caller has a local studio.py.
+exec "$runtime" -P -m studio "$@"

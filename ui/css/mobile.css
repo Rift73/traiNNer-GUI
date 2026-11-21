@@ -1,0 +1,684 @@
+/*
+  Phone edition, part 1: sizes, the shell and the shared components. Loaded by mobile.html only, after
+  every other stylesheet, so it decides. (Part 2, mobile-screens.css, lays out the three screens.)
+
+  The idea: the bottom of the screen always says where you are and what comes next. The pipeline rail
+  of the desktop page becomes three stations in a bar at the bottom, each still showing its live state;
+  the next-step line sits right above them, with its action where the thumb is. A slim bar at the top
+  holds the name (or the way back, one level up) and the connection. Between them: one column, one
+  thing that scrolls.
+
+  Held sideways the height is short, so the stations stand in a rail at the left and the next step
+  takes one line at the top.
+*/
+
+:root {
+  /* The parts of the screen the phone keeps for itself: the notch, the rounded corners, the home bar.
+     Layout reads these four, never env() directly. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+
+  /* Everything that is pressed is at least this high. */
+  --control-h: 44px;
+  --control-sm: 38px;
+  --bar-h: 46px;
+  --tabs-h: 56px;
+  --gutter: 16px;
+  --edge-l: max(var(--gutter), var(--safe-l));
+  --edge-r: max(var(--gutter), var(--safe-r));
+
+  /* 16px text: readable at arm's length, and a field of this size is not zoomed into when it is typed in. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+
+  /* The DIN that ships with the phone has one weight, bold. It is the voice of titles and station names;
+     sentences and controls use the phone's own text face, which has every weight. */
+  --font-ui: "Bahnschrift", system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
+  --font-display: "Bahnschrift", "DIN Alternate", "DIN 2014", system-ui, -apple-system, sans-serif;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  overscroll-behavior: none;
+  /* a path or an address longer than the screen breaks instead of running off it */
+  overflow-wrap: break-word;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+.wordmark,
+.station__name,
+.dialog__title {
+  font-family: var(--font-display);
+}
+
+/* A pane that scrolls keeps its momentum to itself. */
+* {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ───────── shell ───────── */
+
+.app {
+  /* --vvh: the height left above the on-screen keyboard (js/mobile.js), else the whole screen. */
+  height: var(--vvh, 100dvh);
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "brand end"
+    "view view"
+    "next next"
+    "tabs tabs";
+}
+
+/* The rail's three parts are placed one by one: the name and the connection at the top, the stations
+   at the bottom. */
+.rail {
+  display: contents;
+}
+
+/* The surface of the top bar (the rail itself no longer draws one). */
+.app::before {
+  content: "";
+  grid-area: 1 / 1 / 2 / -1;
+  background: var(--raised);
+  border-bottom: 1px solid var(--rule);
+}
+
+.wordmark,
+.mback {
+  grid-area: brand;
+  align-self: stretch;
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  min-height: calc(var(--bar-h) + var(--safe-t));
+  padding: var(--safe-t) var(--s3) 0 var(--edge-l);
+}
+
+.wordmark {
+  font-size: var(--text-lg);
+}
+
+/* One level down, the way back takes the place of the name. */
+:root:not([data-level="home"]) .wordmark {
+  display: none;
+}
+
+.mback {
+  gap: var(--s2);
+  max-width: 100%;
+  font-weight: 600;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
+.mback::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  margin-left: 2px;
+}
+
+.mback:active {
+  color: var(--ink-2);
+}
+
+.rail__end {
+  grid-area: end;
+  align-self: stretch;
+  gap: var(--s1);
+  margin: 0;
+  padding: var(--safe-t) var(--edge-r) 0 0;
+  min-width: 0;
+}
+
+.conn {
+  height: var(--control-sm);
+  max-width: 11.5em;
+  padding: 0 var(--s2);
+}
+
+.conn__text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+}
+
+.view {
+  grid-area: view;
+}
+
+/* The next step: the sentence, then its actions across the full width. */
+.next {
+  grid-area: next;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-height: 0;
+  padding: var(--s2) var(--edge-r) var(--s2) var(--edge-l);
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 0;
+}
+
+.next:empty {
+  display: none;
+}
+
+.next__label {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.next__text {
+  flex: 1 1 calc(100% - 4em);
+  font-size: var(--text-sm);
+  line-height: 1.3;
+}
+
+.next > .btn {
+  flex: 1 1 0;
+  height: 40px;
+  min-width: 0;
+  font-size: var(--text-md);
+}
+
+/* Deeper than a screen's first level (one run, one queue entry, a part's list) what was opened is the
+   subject: the next step shrinks to one line with its first action. The whole sentence and both actions
+   are one level up. */
+@media (orientation: portrait), (min-height: 561px) {
+  :root:not([data-level="home"]) .next {
+    flex-wrap: nowrap;
+    padding-top: var(--s1);
+    padding-bottom: var(--s1);
+  }
+
+  :root:not([data-level="home"]) .next__label {
+    display: none;
+  }
+
+  :root:not([data-level="home"]) .next__text {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :root:not([data-level="home"]) .next > .btn {
+    flex: none;
+    height: var(--control-sm);
+    font-size: var(--text-sm);
+  }
+
+  :root:not([data-level="home"]) .next > .btn + .btn {
+    display: none;
+  }
+}
+
+/* The stations: where the person is, and how each of the three stands. */
+.stations {
+  grid-area: tabs;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 0 var(--safe-r) var(--safe-b) var(--safe-l);
+  background: var(--raised);
+  border-top: 1px solid var(--rule);
+}
+
+.station {
+  min-width: 0;
+  max-width: none;
+  height: var(--tabs-h);
+  padding: 0 var(--s2) 0 var(--s3);
+  column-gap: var(--s2);
+  border-top: 3px solid transparent;
+  border-bottom: 0;
+  touch-action: manipulation;
+}
+
+.station[aria-current="page"] {
+  border-top-color: var(--ink);
+  border-bottom-color: transparent;
+  background: var(--panel);
+}
+
+.station + .station::before {
+  display: none;
+}
+
+.station__mark {
+  width: 24px;
+  height: 24px;
+}
+
+.station__name {
+  grid-row: auto;
+  align-self: end;
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.station__state {
+  display: block;
+  align-self: start;
+  font-size: var(--text-xs);
+}
+
+/* While a field is being typed in, the two bars at the bottom give their room to the screen. */
+:root[data-keyboard="open"] .next,
+:root[data-keyboard="open"] .stations {
+  display: none;
+}
+
+/* ───────── held sideways ───────── */
+
+@media (orientation: landscape) and (max-height: 560px) {
+  :root {
+    --bar-h: 42px;
+    --edge-l: var(--gutter);
+  }
+
+  .app {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas:
+      "tabs brand next end"
+      "tabs view view view";
+  }
+
+  .app::before {
+    grid-area: 1 / 2 / 2 / -1;
+  }
+
+  .stations {
+    grid-template-columns: none;
+    grid-auto-rows: minmax(0, 1fr);
+    width: calc(120px + var(--safe-l));
+    padding: var(--safe-t) 0 var(--safe-b) var(--safe-l);
+    border-top: 0;
+    border-right: 1px solid var(--rule);
+  }
+
+  .station {
+    height: auto;
+    padding: 0 var(--s1) 0 var(--s2);
+    border-top: 0;
+    border-left: 3px solid transparent;
+  }
+
+  .station[aria-current="page"] {
+    border-top-color: transparent;
+    border-left-color: var(--ink);
+  }
+
+  .next {
+    align-self: stretch;
+    flex-wrap: nowrap;
+    padding: var(--safe-t) var(--s2) 0;
+    border-top: 0;
+    background: none;
+    min-width: 0;
+  }
+
+  .next[data-tone] {
+    background: none;
+  }
+
+  .next__label {
+    display: none;
+  }
+
+  .next__text {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .next > .btn {
+    flex: none;
+    height: 34px;
+    font-size: var(--text-sm);
+  }
+
+  /* A coloured edge says what the washed background says upright. */
+  .next[data-tone="err"] .next__text {
+    color: var(--err);
+  }
+
+  .next[data-tone="warn"] .next__text {
+    color: var(--warn);
+  }
+
+  .next[data-tone="ok"] .next__text {
+    color: var(--ok);
+  }
+
+  .next > .btn {
+    height: 36px;
+  }
+
+  .station__state {
+    white-space: normal;
+  }
+
+  .conn {
+    min-width: var(--control-h);
+    justify-content: center;
+  }
+
+  .conn__text {
+    display: none;
+  }
+
+  .rail__end .btn {
+    display: none;
+  }
+
+  /* The screen area stays clear of the rounded corner and the home bar on its two free sides. */
+  .view {
+    padding: 0 var(--safe-r) var(--safe-b) 0;
+    background: var(--panel);
+  }
+}
+
+/* ───────── controls ───────── */
+
+.btn,
+.tab,
+.station,
+.conn,
+.switch,
+summary {
+  touch-action: manipulation;
+}
+
+.btn {
+  padding: 0 var(--s4);
+}
+
+.btn--sm {
+  height: var(--control-sm);
+  padding: 0 var(--s3);
+  font-size: var(--text-sm);
+}
+
+.btn--icon {
+  padding: 0;
+}
+
+.btn--icon.btn--sm {
+  width: var(--control-sm);
+}
+
+/* No hover on glass: the pressed state answers the finger instead. */
+.btn:hover {
+  background: var(--raised);
+}
+
+.btn:active {
+  background: color-mix(in srgb, var(--raised), var(--ink) 13%);
+}
+
+.btn--primary:hover,
+.btn[aria-pressed="true"]:hover {
+  background: var(--ink);
+}
+
+.btn--primary:active {
+  background: color-mix(in srgb, var(--ink), var(--paper) 28%);
+}
+
+.btn--quiet:hover {
+  background: transparent;
+}
+
+.btn--quiet:active {
+  background: var(--press);
+}
+
+.input,
+.select {
+  padding: 0 var(--s3);
+}
+
+.textarea {
+  padding: var(--s3);
+}
+
+/* A field whose text is smaller than 16px makes the phone zoom into the page when it is tapped, and the
+   page stays zoomed. So nothing that is typed in or picked from is smaller here: a path or another
+   monospaced value included (those are 0.93em of the text around them elsewhere). */
+:root input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]),
+:root select,
+:root textarea {
+  font-size: max(1rem, 16px);
+}
+
+/* The recipe's text is typed on a clear layer over its coloured copy, beside its line numbers. The three
+   share one size and one line height and must match exactly, so they grow together. */
+.src {
+  --src-lh: calc(1rem * 1.5);
+}
+
+.src__pre,
+.src__input,
+.src__lines {
+  font-size: 1rem;
+}
+
+.switch {
+  min-height: var(--control-h);
+  gap: var(--s3);
+}
+
+.switch__track {
+  width: 46px;
+  height: 28px;
+  border-radius: 14px;
+}
+
+.switch__track::after {
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+}
+
+.switch input:checked + .switch__track::after {
+  transform: translateX(18px);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+/* (the box inside a switch stays the hidden one it is) */
+.switch input {
+  width: 0;
+  height: 0;
+}
+
+input[type="range"] {
+  min-height: var(--control-h);
+}
+
+summary {
+  min-height: var(--control-h);
+}
+
+/* ───────── tabs ───────── */
+
+.tabs {
+  gap: 0;
+  padding: 0 var(--s2);
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  flex: none;
+  height: var(--control-h);
+  padding: 0 var(--s3);
+}
+
+.tab:hover {
+  background: none;
+}
+
+/* ───────── panes, tables, notices ───────── */
+
+.pane + .pane {
+  border-left: 0;
+}
+
+.pane__head {
+  min-height: 48px;
+  padding: var(--s1) var(--gutter);
+}
+
+.pane__body--pad {
+  padding: var(--gutter);
+}
+
+.pane__foot {
+  padding: var(--s2) var(--gutter);
+  flex-wrap: wrap;
+}
+
+.badge {
+  white-space: nowrap;
+}
+
+.notice {
+  padding: var(--s3) var(--gutter);
+}
+
+.empty {
+  padding: var(--s5) var(--gutter);
+}
+
+.empty__actions {
+  flex-wrap: wrap;
+}
+
+.empty__actions > .btn {
+  flex: 1 1 auto;
+}
+
+.row--wrap {
+  row-gap: var(--s2);
+}
+
+/* ───────── dialogs: sheets that rise from the bottom ───────── */
+
+.dialog {
+  inset: 0;
+  margin: auto 0 0;
+  width: 100% !important;
+  min-width: 0;
+  max-width: 100%;
+  max-height: calc(100dvh - var(--safe-t) - var(--s5));
+  border-width: 1px 0 0;
+  border-radius: 10px 10px 0 0;
+}
+
+.dialog__head {
+  min-height: 52px;
+  padding: var(--s2) var(--s2) var(--s2) var(--edge-l);
+}
+
+.dialog__body {
+  padding: var(--gutter) var(--edge-r) var(--gutter) var(--edge-l);
+  overscroll-behavior: contain;
+}
+
+.dialog__body--flush {
+  padding: 0;
+}
+
+.dialog__foot {
+  flex-wrap: wrap-reverse;
+  padding: var(--s3) var(--edge-r) max(var(--s3), var(--safe-b)) var(--edge-l);
+}
+
+.dialog__foot > .btn {
+  flex: 1 1 auto;
+}
+
+/* A sheet without buttons at its foot still clears the home bar. */
+.dialog > :last-child:not(.dialog__foot) {
+  padding-bottom: max(var(--gutter), var(--safe-b));
+}
+
+@media (orientation: landscape) and (max-height: 560px) {
+  .dialog {
+    margin: auto auto 0;
+    width: min(100%, 760px) !important;
+    max-height: calc(100dvh - var(--s2));
+    border-width: 1px 1px 0;
+  }
+}
+
+/* A sheet with a field in it rests on the keyboard instead of under it (--kb: what the keyboard covers,
+   --vvh: what is left, both from js/mobile.js). */
+:root[data-keyboard="open"] .dialog {
+  margin-bottom: var(--kb, 0px);
+  max-height: calc(var(--vvh, 100dvh) - var(--s2));
+}
+
+:root[data-keyboard="open"] .dialog__foot {
+  padding-bottom: var(--s3);
+}
+
+/* ───────── toasts: under the top bar, clear of the next step and the keyboard ───────── */
+
+.toast-host {
+  top: calc(var(--safe-t) + var(--bar-h) + var(--s2));
+  right: var(--edge-r);
+  bottom: auto;
+  left: var(--edge-l);
+  justify-items: stretch;
+}
+
+.toast {
+  max-width: none;
+  padding: var(--s3);
+}
+
+/* ───────── a value with known choices ───────── */
+
+.combo__option {
+  min-height: var(--control-h);
+}

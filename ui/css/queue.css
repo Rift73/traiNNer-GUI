@@ -1,0 +1,497 @@
+/* Training queue: summary block above the run list, queue view, entry detail, replay dialog.
+   js/runs/queue.js. Tokens only; selectors one class deep. */
+
+/* ───────── shared ───────── */
+
+.queue__btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.queue__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue__row {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--rule);
+  border-left: 3px solid transparent;
+}
+
+.queue__row:hover {
+  background: var(--hover);
+}
+
+.queue__row--current {
+  background: var(--raised);
+  border-left-color: var(--ink);
+}
+
+.queue__link {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.queue__link:hover {
+  text-decoration: underline;
+}
+
+.queue__name-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.queue__name {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Phase 2: <phase name>": wraps between words onto further lines instead of being cut. */
+.queue__phase-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  white-space: normal;
+}
+
+/* Arm and seed of a study cell beside the name ("Lower LR, seed 41"). */
+.queue__cell {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+/* Study name once above a consecutive run of its entries (queue view). */
+.queue__study-head {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* "and N more: …" under the summary rows. */
+.queue__more {
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* "Replay" beside a name: a word in a rule box, no colour (colour is for state and roles). */
+.queue__tag {
+  flex: none;
+  padding: 0 var(--s1);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--ink-2);
+  border: 1px solid var(--rule-strong);
+}
+
+.queue__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.queue__place {
+  font-stretch: var(--narrow);
+}
+
+.queue__time {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+}
+
+.queue__blocked {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.queue__row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+/* A refused action, written beside the button that was pressed (role="alert"; the word says it failed). */
+.queue__action-error {
+  margin: 0;
+  padding-left: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--err);
+  border-left: 2px solid var(--err);
+}
+
+/* Curriculum phases: link to the curriculum under a row, pinned handoff files in the entry detail. */
+.queue__curriculum-link {
+  justify-self: start;
+  font-size: var(--text-sm);
+}
+
+.queue__pinned {
+  display: grid;
+  gap: var(--s1);
+}
+
+.queue__pinned-summary {
+  cursor: pointer;
+}
+
+.queue__pinned-list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue__pinned-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+}
+
+.queue__empty {
+  margin: 0;
+  padding: var(--s3);
+  color: var(--ink-2);
+}
+
+.queue__paused {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-sm);
+  color: var(--ink);
+  background: var(--warn-wash);
+  border-left: 3px solid var(--warn);
+}
+
+.queue__problem:empty {
+  display: none;
+}
+
+.queue__problem {
+  padding: var(--s2) var(--s3);
+}
+
+.queue__count {
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.queue__kv {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.queue__wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ───────── summary block (left column) ───────── */
+
+.queue__summary {
+  display: grid;
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.queue__summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+}
+
+.queue__summary-title {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.queue__all {
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-sm);
+}
+
+/* ───────── queue view (main area) ───────── */
+
+.queue {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+}
+
+.queue__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.queue__head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2);
+  flex: none;
+}
+
+.queue__head-text {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.queue__title {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.queue__condition {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+.queue__body {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.queue__lists {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--rule);
+}
+
+.queue__section-title {
+  margin: 0;
+  padding: var(--s3) var(--s3) var(--s2);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.queue__finished {
+  border-top: 1px solid var(--rule);
+}
+
+.queue__finished-summary {
+  padding: var(--s3);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queue__detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.queue__intro {
+  display: grid;
+  gap: var(--s2);
+  max-width: 60ch;
+  padding: var(--s4);
+  color: var(--ink-2);
+}
+
+/* ───────── one entry ───────── */
+
+/* One column that never grows past the pane: long recipe lines scroll inside their own box. */
+.queue__entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s4);
+  min-width: 0;
+  padding: var(--s4);
+}
+
+.queue__facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.queue__entry-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.queue__entry-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  overflow-wrap: anywhere;
+}
+
+.queue__state-text {
+  margin: 0;
+  max-width: 70ch;
+}
+
+.queue__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.queue__run {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.queue__run-link {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.queue__part {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.queue__recipe-body {
+  min-width: 0;
+}
+
+.queue__part-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.queue__part-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.queue__lineage {
+  display: grid;
+  gap: var(--s3);
+}
+
+.queue__lineage-part {
+  display: grid;
+  gap: var(--s1);
+}
+
+.queue__lineage-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.queue__lineage-list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue__lineage-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  overflow-wrap: anywhere; /* archive run ids are long: archive-<64 hex>.<hex> */
+}
+
+.queue__lineage-self {
+  font-weight: 600;
+}
+
+.queue__yaml {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--s3);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.queue__yaml--dialog {
+  max-height: 46vh;
+}
+
+/* ───────── replay dialog ───────── */
+
+.queue__replay {
+  max-width: 100%;
+}
+
+.queue__replay-content {
+  display: grid;
+  gap: var(--s3);
+}
+
+.queue__replay-status:empty {
+  display: none;
+}
+
+/* ───────── narrow screens: panes stack ───────── */
+
+@media (max-width: 900px) {
+  .queue__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .queue__lists {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    overflow: visible;
+  }
+
+  .queue__detail {
+    overflow: visible;
+  }
+
+  .queue {
+    height: auto;
+  }
+}

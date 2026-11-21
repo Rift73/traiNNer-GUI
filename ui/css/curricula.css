@@ -1,0 +1,561 @@
+/* Curricula (one recipe trained in ordered phases): js/runs/curricula.js. Classes .curricula__*; one class
+   deep; tokens only. Same frame as studies.css: a side list and the detail, stacked below 720px. */
+
+.curricula {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+.curricula__side {
+  display: grid;
+  align-content: start;
+  gap: var(--s3);
+  padding: var(--s4) var(--s3);
+  border-right: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.curricula__side-head {
+  display: grid;
+  justify-items: start;
+  gap: var(--s2);
+}
+
+.curricula__main {
+  display: grid;
+  align-content: start;
+  gap: var(--s5);
+  padding: var(--s4);
+  min-width: 0;
+}
+
+.curricula__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.curricula__subtitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.curricula__muted {
+  margin: 0;
+  color: var(--ink-3);
+  max-width: 80ch;
+}
+
+.curricula__muted-inline {
+  color: var(--ink-3);
+}
+
+.curricula__hint {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.curricula__label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.curricula__status:empty,
+.curricula__alert:empty,
+.curricula__issues:empty {
+  display: none;
+}
+
+/* ───────── list ───────── */
+
+.curricula__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__item {
+  border-bottom: 1px solid var(--rule);
+}
+
+.curricula__link {
+  display: grid;
+  gap: 2px;
+  padding: var(--s2);
+  border-left: 3px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.curricula__link:hover {
+  background: var(--hover);
+}
+
+/* Same selected look as the run list and the studies list: raised paper and an ink rule. */
+.curricula__link[aria-current="page"] {
+  border-left-color: var(--ink);
+  background: var(--raised);
+}
+
+.curricula__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.curricula__meta {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+/* ───────── detail ───────── */
+
+.curricula__head {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.curricula__kv {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.curricula__schedule {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.curricula__yaml-box {
+  min-width: 0;
+}
+
+.curricula__yaml {
+  max-height: 360px;
+  margin: var(--s2) 0 0;
+  padding: var(--s2) var(--s3);
+  overflow: auto;
+  border: 1px solid var(--rule);
+  background: var(--sunk);
+  white-space: pre;
+}
+
+.curricula__section {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  min-width: 0;
+}
+
+/* The phases are a sequence: one row per phase, numbered in a rail on the left. */
+.curricula__phases {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__phase {
+  display: grid;
+  grid-template-columns: 2.5em minmax(0, 1fr);
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.curricula__phase-num {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.curricula__phase-body {
+  display: grid;
+  align-content: start;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.curricula__phase-name {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.curricula__phase-mode,
+.curricula__phase-clock,
+.curricula__gate {
+  margin: 0;
+  max-width: 80ch;
+}
+
+.curricula__phase-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+.curricula__gate {
+  font-weight: 600;
+}
+
+.curricula__phase-state {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.curricula__state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+}
+
+.curricula__revision {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.curricula__link-inline {
+  font-size: var(--text-sm);
+}
+
+.curricula__entry-error {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+.curricula__phase-changes,
+.curricula__handoff {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.curricula__changes {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__change {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.curricula__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.curricula__alert {
+  min-width: 0;
+}
+
+.curricula__details {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.curricula__revisions,
+.curricula__files {
+  display: grid;
+  gap: var(--s1);
+  margin: var(--s2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__revision-item,
+.curricula__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  min-width: 0;
+}
+
+.curricula__path {
+  overflow-wrap: anywhere;
+}
+
+/* ───────── dialogs ───────── */
+
+.curricula__form {
+  display: grid;
+  gap: var(--s3);
+}
+
+/* The planner's fields, set disabled as one while a save is in flight. */
+.curricula__lock {
+  display: grid;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.curricula__rules {
+  display: grid;
+  gap: var(--s1);
+}
+
+.curricula__rule {
+  margin: 0;
+}
+
+.curricula__plan {
+  display: grid;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__plan-phase {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s3);
+  border-left: 3px solid var(--rule-strong);
+  background: var(--sunk);
+}
+
+.curricula__plan-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.curricula__plan-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.curricula__choice {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.curricula__modes {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px var(--s3);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  max-width: 80ch;
+}
+
+.curricula__modes dt {
+  font-weight: 600;
+}
+
+.curricula__modes dd {
+  margin: 0;
+}
+
+.curricula__plan-changes {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.curricula__editor {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.curricula__edit-list {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.curricula__edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--s2) var(--s3);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+/* The checkbox and the remove button sit level with the two fields, one label line down. */
+.curricula__edit-end {
+  min-height: var(--control-h);
+  margin-top: calc(1.45rem + var(--s1));
+}
+
+.curricula__edit-field {
+  display: grid;
+  gap: var(--s1);
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.curricula__check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--control-h);
+}
+
+.curricula__reading {
+  min-height: 1em;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.curricula__row-error {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--err);
+}
+
+.curricula__row-error:empty {
+  display: none;
+}
+
+/* Under a change: why Continue restores this setting (a hint in the planner, a warning when revising). */
+.curricula__row-note {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.curricula__row-note:empty {
+  display: none;
+}
+
+.curricula__row-hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* Iterations: a short number field with its clock beside it when there is room. */
+.curricula__iter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+}
+
+.curricula__iter {
+  width: 12ch;
+  flex: 0 0 auto;
+}
+
+.curricula__iter-clock {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+.curricula__iter-clock:empty {
+  display: none;
+}
+
+.curricula__schedule-box {
+  display: grid;
+  gap: var(--s1);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+.curricula__hold {
+  margin: 0;
+  font-weight: 600;
+}
+
+.curricula__issues {
+  display: grid;
+  gap: var(--s1);
+}
+
+.curricula__issue {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.curricula__summary {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+  overflow-wrap: anywhere;
+}
+
+.curricula__fieldset {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.curricula__radio {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.curricula__radio input {
+  margin-top: 3px;
+}
+
+.curricula__choice-body {
+  display: grid;
+  gap: var(--s2);
+  margin-left: var(--s5);
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .curricula {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .curricula__side {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .curricula__phase {
+    grid-template-columns: 1.75em minmax(0, 1fr);
+    gap: var(--s2);
+  }
+
+  .curricula__choice-body {
+    margin-left: 0;
+  }
+}

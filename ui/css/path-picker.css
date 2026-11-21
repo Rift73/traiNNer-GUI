@@ -1,0 +1,730 @@
+/* Folder and file picker dialog (js/components/path-picker.js). */
+
+.picker {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.picker__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.picker__crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.picker__crumb {
+  padding: 2px 5px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.picker__crumb:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.picker__sep {
+  color: var(--ink-3);
+}
+
+.picker__crumb--here {
+  padding: 2px 5px;
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+}
+
+.picker__goto {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--s3);
+}
+
+.picker__pathfield {
+  min-width: 0;
+}
+
+.picker__pathinput {
+  width: 100%;
+}
+
+.picker__shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  padding-bottom: 22px; /* lines up with the input, above the help text */
+}
+
+.picker__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.picker__filterfield {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.picker__filter {
+  width: 100%;
+}
+
+.picker__note {
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--warn);
+  background: var(--warn-wash);
+  font-size: var(--text-sm);
+}
+
+.picker__error {
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--err);
+  background: var(--err-wash);
+  font-size: var(--text-sm);
+}
+
+.picker__list {
+  height: min(46vh, 420px);
+  overflow-y: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.picker__list[aria-busy="true"] {
+  opacity: 0.7;
+}
+
+.picker__row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s2);
+  padding: 3px var(--s3);
+  border-bottom: 1px solid var(--rule);
+  cursor: default;
+  user-select: none;
+}
+
+.picker__row:hover {
+  background: var(--hover);
+}
+
+.picker__row--active {
+  background: var(--selection);
+}
+
+.picker__row--active:hover {
+  background: var(--selection);
+}
+
+.picker__row--dim {
+  color: var(--ink-3);
+}
+
+.picker__kind {
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+}
+
+.picker__kind--folder {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.picker__name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.picker__more {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: var(--control-h);
+}
+
+.picker__status {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.picker__chosen {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.picker__chosenlabel {
+  color: var(--ink-3);
+}
+
+@media (max-width: 720px) {
+  .picker__goto {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .picker__shortcuts {
+    padding-bottom: 0;
+  }
+}
+
+/*
+  ───────── phone edition (mobile.html): a sheet browsed by touch ─────────
+
+  One tap opens a folder and one tap chooses a file (js/components/path-picker.js does that on this
+  edition only, and adds Back, the Go button and the mark at the end of a row). The layout follows:
+
+    top of the sheet     Back, Up and the path so far, held in place while the rest scrolls
+    the sheet's body     the one thing that scrolls: the typed path with Go, the places, the name filter
+                         and the switches, then the folder itself at its natural length, then the count
+                         and "Load more"
+    foot of the sheet    what the button will hand back, in full, and the two buttons
+
+  Every rule names the edition, so it outranks the phone stylesheets (which load after this file)
+  without being written into them. Sizes come from their tokens: --control-h (44px), --gutter and the
+  --safe-* insets.
+*/
+
+:root[data-edition="mobile"] .picker__dialog {
+  /* What the sheet keeps clear at its sides: the gutter, or the notch when the sheet reaches it. */
+  --picker-l: max(var(--gutter), var(--safe-l));
+  --picker-r: max(var(--gutter), var(--safe-r));
+  /* The height of the bar held at the top: a control, its padding and its rule. */
+  --picker-bar: calc(var(--control-h) + 2 * var(--s1) + 1px);
+  /* As tall as the phone edition lets a sheet be (its max-height keeps a sheet under the status bar,
+     and above the keyboard while a field is typed in), whatever the folder holds: the buttons at the
+     foot stay where they are from one folder to the next. */
+  height: 100vh;
+  height: 100dvh;
+  /* A fast second tap is a tap, not a zoom. */
+  touch-action: manipulation;
+}
+
+:root[data-edition="mobile"] .picker__dialog > .dialog__body {
+  display: block;
+  flex: 1 1 auto;
+  padding: 0;
+  /* a row or a field brought into view clears the bar */
+  scroll-padding-top: var(--picker-bar);
+}
+
+:root[data-edition="mobile"] .picker {
+  gap: 0;
+}
+
+/* ── top: Back, Up, the path so far ── */
+
+:root[data-edition="mobile"] .picker__bar {
+  position: sticky;
+  /* One pixel under the title's rule: where the sheet sits on a fraction of a pixel, what scrolls
+     behind the bar would otherwise show in a hairline above it. */
+  top: -1px;
+  z-index: 2;
+  gap: var(--s2);
+  padding: calc(var(--s1) + 1px) 0 var(--s1) var(--picker-l);
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+:root[data-edition="mobile"] .picker__bar > .btn {
+  flex: none;
+  height: var(--control-h);
+  min-width: var(--control-h);
+  padding: 0 var(--s3);
+  font-size: var(--text-md);
+}
+
+/* One line that scrolls sideways; the script keeps its end, the folder on screen, in view. */
+:root[data-edition="mobile"] .picker__crumbs {
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 0;
+  padding-right: var(--picker-r);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  font-size: var(--text-md);
+}
+
+:root[data-edition="mobile"] .picker__crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+:root[data-edition="mobile"] .picker__crumb,
+:root[data-edition="mobile"] .picker__crumb--here {
+  flex: none;
+  max-width: 62vw;
+  height: var(--control-h);
+  padding: 0 var(--s2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-edition="mobile"] .picker__crumb {
+  min-width: var(--control-h);
+  min-height: var(--control-h);
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 4px;
+}
+
+:root[data-edition="mobile"] .picker__crumb:hover {
+  background: none;
+  color: var(--ink-2);
+}
+
+:root[data-edition="mobile"] .picker__crumb:active {
+  background: var(--press);
+  color: var(--ink);
+}
+
+:root[data-edition="mobile"] .picker__crumb--here {
+  line-height: var(--control-h);
+}
+
+:root[data-edition="mobile"] .picker__sep {
+  flex: none;
+}
+
+/* ── the typed path, with its button ── */
+
+:root[data-edition="mobile"] .picker__goto {
+  order: 1;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  padding: var(--s3) var(--picker-r) 0 var(--picker-l);
+}
+
+/* Both fields say what they are for without a line of their own: the path field by its button and the
+   help under it, the filter by its placeholder. The labels stay for assistive technology. */
+:root[data-edition="mobile"] .picker__pathfield > .field__label,
+:root[data-edition="mobile"] .picker__filterfield > .field__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:root[data-edition="mobile"] .picker__pathrow {
+  display: flex;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+:root[data-edition="mobile"] .picker__pathinput {
+  flex: 1 1 auto;
+  /* 16px: the phone does not zoom into a field of this size */
+  font-size: 1rem;
+  /* brought into view with room under it for the help and a refusal */
+  scroll-margin-bottom: 96px;
+}
+
+:root[data-edition="mobile"] .picker__gobtn {
+  flex: none;
+  min-width: 68px;
+  font-weight: 600;
+}
+
+/* The places: one row that scrolls sideways, each as high as any other control. */
+:root[data-edition="mobile"] .picker__shortcuts {
+  flex-wrap: nowrap;
+  gap: var(--s2);
+  margin: 0 calc(-1 * var(--picker-r)) 0 calc(-1 * var(--picker-l));
+  padding: 0 var(--picker-r) 0 var(--picker-l);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:root[data-edition="mobile"] .picker__shortcuts::-webkit-scrollbar {
+  display: none;
+}
+
+:root[data-edition="mobile"] .picker__shortcuts > .btn {
+  flex: none;
+  height: var(--control-h);
+  border-color: var(--rule);
+}
+
+/* ── a refusal or a note: under the typed path, and held under the bar when the list is scrolled ── */
+
+:root[data-edition="mobile"] .picker__note,
+:root[data-edition="mobile"] .picker__error {
+  order: 2;
+  position: sticky;
+  top: var(--picker-bar);
+  z-index: 1;
+  margin: var(--s3) var(--picker-r) 0 var(--picker-l);
+  padding: var(--s3);
+}
+
+/* ── the name filter and the switches ── */
+
+:root[data-edition="mobile"] .picker__tools {
+  order: 3;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  margin-top: var(--s3);
+  padding: var(--s3) var(--picker-r) var(--s1) var(--picker-l);
+}
+
+:root[data-edition="mobile"] .picker__filterfield {
+  grid-column: 1 / -1;
+}
+
+:root[data-edition="mobile"] .picker__filter {
+  font-size: 1rem;
+  /* brought into view with rows under it: what is typed filters them */
+  scroll-margin-bottom: 160px;
+}
+
+/* ── the folder: rows from edge to edge, as long as the folder is ── */
+
+:root[data-edition="mobile"] .picker__list {
+  order: 4;
+  height: auto;
+  overflow: visible;
+  border-width: 1px 0;
+  border-radius: 0;
+}
+
+:root[data-edition="mobile"] .picker__list:empty {
+  border-bottom-width: 0;
+}
+
+/* The list reaches both edges of the sheet: its focus ring (a keyboard attached to the phone) is drawn
+   inside it. */
+:root[data-edition="mobile"] .picker__list:focus-visible {
+  outline-offset: -2px;
+}
+
+:root[data-edition="mobile"] .picker__row {
+  grid-template-columns: 44px minmax(0, 1fr) 24px;
+  gap: var(--s3);
+  min-height: 52px;
+  padding: var(--s2) var(--picker-r) var(--s2) var(--picker-l);
+  cursor: pointer;
+  -webkit-touch-callout: none;
+}
+
+:root[data-edition="mobile"] .picker__row:last-child {
+  border-bottom-width: 0;
+}
+
+/* No hover on glass: the pressed state answers the finger, and a folder being opened keeps it. */
+:root[data-edition="mobile"] .picker__row:hover {
+  background: none;
+}
+
+:root[data-edition="mobile"] .picker__row:active,
+:root[data-edition="mobile"] .picker__row--opening:hover,
+:root[data-edition="mobile"] .picker__row--opening:active {
+  background: var(--press);
+}
+
+:root[data-edition="mobile"] .picker__row--active:hover,
+:root[data-edition="mobile"] .picker__row--active:active {
+  background: var(--selection);
+}
+
+/* A file in a folder picker is listed for orientation: it does not answer a tap. */
+:root[data-edition="mobile"] .picker__row[aria-disabled="true"],
+:root[data-edition="mobile"] .picker__row[aria-disabled="true"]:active {
+  background: none;
+  cursor: default;
+}
+
+:root[data-edition="mobile"] .picker__kind {
+  font-size: var(--text-xs);
+}
+
+/* The whole name, on as many lines as it takes: names often differ only at their end. */
+:root[data-edition="mobile"] .picker__name {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  font-size: var(--text-md);
+  line-height: 1.3;
+}
+
+:root[data-edition="mobile"] .picker__row--folder > .picker__name,
+:root[data-edition="mobile"] .picker__row--active > .picker__name {
+  font-weight: 600;
+}
+
+/* What a tap does, at the end of the row: an arrow (the folder opens) or a ring (the file is chosen). */
+:root[data-edition="mobile"] .picker__mark {
+  position: relative;
+  justify-self: end;
+  width: 24px;
+  height: 24px;
+}
+
+:root[data-edition="mobile"] .picker__mark::before {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+}
+
+:root[data-edition="mobile"] .picker__row--folder > .picker__mark::before {
+  top: 7px;
+  right: 8px;
+  width: 10px;
+  height: 10px;
+  border: solid var(--ink-3);
+  border-width: 2px 2px 0 0;
+  transform: rotate(45deg);
+}
+
+:root[data-edition="mobile"] .picker__row--file > .picker__mark::before {
+  inset: 1px;
+  border: 2px solid var(--rule-strong);
+  border-radius: 50%;
+}
+
+:root[data-edition="mobile"] .picker__row--active > .picker__mark::before {
+  border-color: var(--ink);
+  background: radial-gradient(circle, var(--ink) 0 5px, transparent 6px);
+}
+
+/* A folder being opened: the arrow becomes a turning ring until the trainer machine answers. */
+:root[data-edition="mobile"] .picker__row--opening > .picker__mark::before {
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--rule-strong);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  transform: none;
+  animation: picker-turn 700ms linear infinite;
+}
+
+@keyframes picker-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-edition="mobile"] .picker__row--opening > .picker__mark::before {
+    animation: none;
+  }
+}
+
+/* ── the count and the next page ── */
+
+:root[data-edition="mobile"] .picker__more {
+  order: 5;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  min-height: 0;
+  padding: var(--s3) var(--picker-r) var(--s4) var(--picker-l);
+}
+
+:root[data-edition="mobile"] .picker__status {
+  flex: 1 1 100%;
+}
+
+:root[data-edition="mobile"] .picker__more > .btn {
+  flex: 1 1 100%;
+  height: var(--control-h);
+  font-size: var(--text-md);
+}
+
+/* ── foot: what the button hands back, then Cancel and the button ── */
+
+:root[data-edition="mobile"] .picker__dialog > .dialog__foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
+  align-items: end;
+  gap: var(--s2) var(--s3);
+  padding-right: var(--picker-r);
+  padding-left: var(--picker-l);
+}
+
+:root[data-edition="mobile"] .picker__dialog > .dialog__foot > .btn {
+  height: 48px;
+}
+
+:root[data-edition="mobile"] .picker__chosen {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  white-space: normal;
+}
+
+:root[data-edition="mobile"] .picker__chosenlabel {
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+:root[data-edition="mobile"] .picker__chosenpath {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.35;
+}
+
+:root[data-edition="mobile"] .picker__chosenhint {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+/* ── while a field is typed in: the sheet rests on the keyboard, and the foot takes less of it ── */
+
+/* A refusal stays in its place under the typed path, where it is read; held under the bar it would
+   lie over the field being typed in. */
+:root[data-edition="mobile"][data-keyboard="open"] .picker__note,
+:root[data-edition="mobile"][data-keyboard="open"] .picker__error {
+  position: static;
+}
+
+:root[data-edition="mobile"][data-keyboard="open"] .picker__chosenlabel {
+  display: none;
+}
+
+:root[data-edition="mobile"][data-keyboard="open"] .picker__chosenpath {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+}
+
+:root[data-edition="mobile"][data-keyboard="open"] .picker__dialog > .dialog__foot > .btn {
+  height: var(--control-h);
+}
+
+/* ── held sideways: the height is short, so each part takes one line ── */
+
+@media (orientation: landscape) and (max-height: 560px) {
+  /* The phone edition centres a sheet here (at most 760px wide): only what the notch still reaches
+     inside it is kept clear. */
+  :root[data-edition="mobile"] .picker__dialog {
+    --picker-side: calc((100vw - min(100vw, 760px)) / 2);
+    --picker-l: max(var(--gutter), calc(var(--safe-l) - var(--picker-side)));
+    --picker-r: max(var(--gutter), calc(var(--safe-r) - var(--picker-side)));
+  }
+
+  :root[data-edition="mobile"] .picker__dialog > .dialog__head {
+    min-height: var(--control-h);
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-left: var(--picker-l);
+  }
+
+  :root[data-edition="mobile"] .picker__goto {
+    grid-template-columns: minmax(240px, 1fr) minmax(0, auto);
+    align-items: start;
+    padding-top: var(--s2);
+  }
+
+  /* The help comes with the keyboard, not before it. */
+  :root[data-edition="mobile"] .picker__pathfield > .field__help {
+    display: none;
+  }
+
+  :root[data-edition="mobile"] .picker__pathfield:focus-within > .field__help {
+    display: block;
+  }
+
+  :root[data-edition="mobile"] .picker__shortcuts {
+    margin: 0;
+    padding: 0;
+  }
+
+  :root[data-edition="mobile"] .picker__note,
+  :root[data-edition="mobile"] .picker__error {
+    margin-top: var(--s2);
+    padding: var(--s2) var(--s3);
+  }
+
+  :root[data-edition="mobile"] .picker__tools {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    margin-top: var(--s2);
+    padding-top: var(--s2);
+  }
+
+  :root[data-edition="mobile"] .picker__filterfield {
+    grid-column: auto;
+  }
+
+  :root[data-edition="mobile"] .picker__row {
+    min-height: 48px;
+  }
+
+  :root[data-edition="mobile"] .picker__dialog > .dialog__foot {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    padding-top: var(--s2);
+    padding-bottom: max(var(--s2), var(--safe-b));
+  }
+
+  :root[data-edition="mobile"] .picker__dialog > .dialog__foot > .btn {
+    height: var(--control-h);
+    min-width: 128px;
+  }
+
+  :root[data-edition="mobile"] .picker__chosen {
+    grid-column: auto;
+  }
+
+  :root[data-edition="mobile"] .picker__chosenpath {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  /* With the keyboard up there is room for the field and little else: the title and the foot step
+     aside until the keyboard goes (Go, the keyboard's own key, or a tap on a row puts it away). */
+  :root[data-edition="mobile"][data-keyboard="open"] .picker__dialog > .dialog__head,
+  :root[data-edition="mobile"][data-keyboard="open"] .picker__dialog > .dialog__foot {
+    display: none;
+  }
+
+  :root[data-edition="mobile"][data-keyboard="open"] .picker__dialog > .dialog__body {
+    scroll-padding-top: 0;
+  }
+
+  :root[data-edition="mobile"][data-keyboard="open"] .picker__bar {
+    position: static;
+  }
+}

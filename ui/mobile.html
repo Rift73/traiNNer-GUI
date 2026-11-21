@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en" data-edition="mobile">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The phone edition: the same application as index.html (same modules, same stores, same /api),
+         with its own shell and layout (css/mobile.css, js/mobile.js). viewport-fit=cover lets the page
+         reach under the notch and the home indicator; the stylesheet keeps content out of both. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="traiNNer" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>traiNNer GUI</title>
+    <link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
+    <script src="js/mobile-boot.js"></script>
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/base.css" />
+    <link rel="stylesheet" href="css/combobox.css" />
+    <link rel="stylesheet" href="css/compare.css" />
+    <link rel="stylesheet" href="css/data.css" />
+    <link rel="stylesheet" href="css/recipe.css" />
+    <link rel="stylesheet" href="css/recipe-form.css" />
+    <link rel="stylesheet" href="css/recipe-source.css" />
+    <link rel="stylesheet" href="css/runs.css" />
+    <link rel="stylesheet" href="css/queue.css" />
+    <link rel="stylesheet" href="css/validation.css" />
+    <link rel="stylesheet" href="css/evaluation.css" />
+    <link rel="stylesheet" href="css/path-picker.css" />
+    <link rel="stylesheet" href="css/weights.css" />
+    <link rel="stylesheet" href="css/environment.css" />
+    <link rel="stylesheet" href="css/analysis.css" />
+    <link rel="stylesheet" href="css/studies.css" />
+    <link rel="stylesheet" href="css/curricula.css" />
+    <link rel="stylesheet" href="css/drift.css" />
+    <link rel="stylesheet" href="css/taskdata.css" />
+    <link rel="stylesheet" href="css/holdout.css" />
+    <link rel="stylesheet" href="css/samples.css" />
+    <link rel="stylesheet" href="css/registration.css" />
+    <link rel="stylesheet" href="css/runfile.css" />
+    <link rel="stylesheet" href="css/split.css" />
+    <link rel="stylesheet" href="css/difference.css" />
+    <link rel="stylesheet" href="css/patches.css" />
+    <link rel="stylesheet" href="css/convert.css" />
+    <link rel="stylesheet" href="css/storage.css" />
+    <link rel="stylesheet" href="css/frontier.css" />
+    <link rel="stylesheet" href="css/average.css" />
+    <link rel="stylesheet" href="css/parameters.css" />
+    <link rel="stylesheet" href="css/lossreport.css" />
+    <link rel="stylesheet" href="css/timing.css" />
+    <!-- Last, so that it decides: the phone's shell and the one-column layout of every screen. -->
+    <link rel="stylesheet" href="css/mobile.css" />
+    <link rel="stylesheet" href="css/mobile-screens.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#view">Skip to content</a>
+    <div class="app">
+      <!-- js/main.js fills these three exactly as on the desktop page. css/mobile.css places the rail's
+           parts: the name and the connection in a bar at the top, the three stations in a bar at the
+           bottom, the next step right above them. -->
+      <header class="rail" id="rail"></header>
+      <main class="view" id="view" tabindex="-1"></main>
+      <div class="next" id="next" role="status" aria-live="polite"></div>
+    </div>
+    <noscript>
+      <p style="padding: 16px">traiNNer GUI needs JavaScript to talk to the trainer service.</p>
+    </noscript>
+    <script type="module" src="js/mobile.js"></script>
+  </body>
+</html>

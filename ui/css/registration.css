@@ -1,0 +1,129 @@
+/* Pair alignment check result: js/runs/registration.js (analysis job page and Data screen).
+   Tokens only; selectors one class deep. */
+
+.registration {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.registration__lead {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.registration__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.registration__muted {
+  color: var(--ink-3);
+}
+
+.registration__counts {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.registration__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.registration__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.registration__caption {
+  padding-bottom: var(--s2);
+  font-size: var(--text-sm);
+  text-align: left;
+  color: var(--ink-2);
+}
+
+.registration__pair {
+  vertical-align: top;
+  min-width: 12ch;
+}
+
+.registration__name {
+  display: block;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.registration__cell {
+  vertical-align: top;
+}
+
+.registration__shift {
+  display: block;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.registration__evidence {
+  display: block;
+  max-width: 28ch;
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+  color: var(--ink-2);
+}
+
+.registration__reason {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.registration__files {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.registration__caveat {
+  margin: 0;
+  padding-top: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  border-top: 1px solid var(--rule);
+}
+
+/* "How to read the table": closed by default, one term per line */
+.registration__legend {
+  min-width: 0;
+  max-width: 82ch;
+  font-size: var(--text-sm);
+}
+
+.registration__legendhead {
+  cursor: pointer;
+  width: fit-content;
+  font-weight: 500;
+}
+
+.registration__legendlist {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s1) var(--s3);
+  margin: var(--s2) 0 0;
+  color: var(--ink-2);
+}
+
+.registration__legendlist dt {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.registration__legendlist dd {
+  margin: 0;
+}

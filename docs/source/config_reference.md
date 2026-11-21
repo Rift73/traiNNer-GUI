@@ -1,0 +1,700 @@
+# Config file reference
+
+DUAL's automatic attention/checkpoint execution, its neighborhood switches,
+and RDUAL clip-training options are described in [DUAL and RDUAL](../RDUAL.md).
+The generated schema includes these factory options and rejects removed DUAL
+backend switches. See [VOSR teacher integration](../VOSR_loss.md) for the
+distinct `train.vosr_target` and `vosrloss` modes and their runtime assets.
+
+## Top level options
+
+### name
+
+  Name of the experiment. It should be a unique name if you want to run a new experiment. If you enable auto resume, the experiment with this name will be resumed instead of starting a new training run.
+
+  Type: str
+### scale
+
+  Scale of the model. Most architectures support a scale of 1, 2, 3, 4, or 8. A scale of 1 can be used for restoration models that don't change the resolution of the input image. A scale of 2 means the width and height of the input image are doubled, so a 640x480 input will be upscaled to 1280x960.
+
+  Type: int
+### num_gpu
+
+  The number of GPUs to use for training, if using multiple GPUs.
+
+  Type: Literal, int
+
+### input_pixel_format
+
+  Input pixel format.
+
+  Options: rgb, y, uv, yuv444, gray
+### output_pixel_format
+
+  Output pixel format.
+
+  Options: rgb, y, uv, yuv444, gray
+### network_g
+
+  The options for the generator model.
+
+  Type: dict
+### network_g_teacher
+
+  The options for the teacher generator model.
+
+  Type: dict
+### network_d
+
+  The options for the discriminator model.
+
+  Type: dict
+
+  `type: mcd` selects the medium-conditioned DUnet discriminator. It adds six
+  condition channels derived from the target (four band energies and two
+  orientations), shared by the generator-adversarial, real, and fake passes.
+  Optional `input_conditioning: true` also adds the degraded RGB input, resized
+  to the target size. The default is `false`.
+
+  ```yaml
+  network_d:
+    type: mcd
+    num_feat: 64
+  ```
+
+  RGB DUnet weights can initialize MC-D through `path.pretrain_network_d`; new
+  input-channel weights start at zero. Nine-channel MC-D can similarly initialize
+  input-conditioned MC-D. These are **weight-only warm starts for a new run**,
+  not optimizer resumes: leave `path.resume_state` unset when changing modes.
+  Resume an existing MC-D run with its original mode. MC-D weights cannot be
+  loaded back into RGB DUnet, even with `strict_load_d: false`.
+
+  `type: lqd` selects LQ-only conditioning: candidate RGB plus the same resized,
+  detached degraded RGB for the generator-adversarial, real, and fake passes.
+  It never computes HR-derived medium statistics. Use `num_feat` as with DUnet.
+
+  ```yaml
+  network_d:
+    type: lqd
+    num_feat: 64
+  ```
+
+  LQ-D loads only native six-channel LQ-D v1 checkpoints, even with
+  `strict_load_d: false`. Switching between LQ-D, MC-D and RGB DUnet requires a
+  new run with a fresh compatible discriminator; do not reuse discriminator
+  optimizer state. Generator pretrained weights can still be reused.
+
+### network_ae
+
+  The options for the autoencoder model.
+
+  Type: dict
+### manual_seed
+
+  Random seed for training, useful for removing randomness when testing the effect of different settings.
+
+  Type: int
+### deterministic
+
+  Enables torch.use_deterministic_algorithms. Slows down training, only use when reproducibility is critical.
+
+  Type: bool
+
+
+
+
+
+
+
+
+
+
+### use_amp
+
+  Speed up training and reduce VRAM usage. NVIDIA only.
+
+  Type: bool
+### amp_bf16
+
+  Use bf16 instead of fp16 for AMP, RTX 3000 series or newer only. Only recommended if fp16 doesn't work.
+
+  Type: bool
+### use_channels_last
+
+  Enable channels last memory format while using AMP. Reduces VRAM and speeds up training for most architectures, but some architectures are slower with channels last.
+
+  Type: bool
+### fast_matmul
+
+  Trade precision for performance.
+
+  Type: bool
+### use_compile
+
+  Enable torch.compile for the generator model. The first matching graph pays compilation and autotuning cost. Architectures with precompile-cache support persist compiled forward/backward artifacts for much faster matching resumes. Cache reuse requires a compatible PyTorch/compiler environment, graph, precision, layout and training geometry; it does not promise an instant start for changed configurations.
+
+  Type: bool
+### compile_ldl_ema
+
+  Default: `true`. With LDL, EMA, CUDA and `use_compile` enabled, replay DUAL's
+  EMA prediction using the non-fusing `cudagraphs` backend. The callable uses the
+  live EMA model without folding weights, forcing eval mode or replacing its
+  checkpoint state. Other architectures retain eager EMA execution.
+
+  `compile_mode: max-autotune-no-cudagraphs` disables this path. Set
+  `compile_ldl_ema: false` to keep eager LDL EMA execution explicitly. This does
+  not enable compiled validation.
+
+  Type: bool
+### compile_mode
+
+  Mode to use with torch.compile. See https://docs.pytorch.org/docs/stable/generated/torch.compile.html for more info.
+
+  Options: default, reduce-overhead, max-autotune, max-autotune-no-cudagraphs
+### detect_anomaly
+
+  Whether or not to enable anomaly detection, which can be useful for debugging NaNs that occur during training. Has a significant performance hit and should be disabled when not debugging.
+
+  Type: bool
+### high_order_degradation
+
+  Whether or not to enable OTF (on the fly) degradations, which generates LRs on the fly.
+
+  Type: bool
+### dvd_prob and dvd_strength
+
+For 2× on-the-fly still-image training with `RealESRGANDataset`, `dvd_prob`
+selects the fraction of batches that use the aligned DVD response. The default
+is `0`. The response mixes centered Catmull–Rom halving with a filtered
+luma/chroma response according to `dvd_strength` (0 to 1, default `1`).
+A selected batch uses original image context and matching LQ/GT crop geometry.
+A batch with insufficient context takes the ordinary degradation chain. Use
+`dvd_prob: 0` for clip and mixed paired/OTF datasets.
+
+### shift_yuv_y, shift_yuv_u and shift_yuv_v
+
+YUV shift preserves BT.2020 luma so outlines stay registered with GT.
+`shift_yuv_y` remains readable in old configs and a nonzero range produces a warning.
+U and V accept independent horizontal and vertical ranges. With `shift_percent`,
+horizontal offsets use the image width and vertical offsets use its height.
+
+### compress_video_approx_prob and compress_webp_approx
+
+Eligible CUDA float32 RGB video-codec calls in either degradation stage use
+a fitted approximation with probability `0.5` by default, including existing
+recipes that omit this key. Set `compress_video_approx_prob: 0` for genuine
+codec round trips throughout. At `1`, every supported call uses the
+approximation. Routing uses a separate random generator seeded from
+`manual_seed`; resuming restarts that stream. `compress_webp_approx` defaults
+to `false`. Eligible genuine WebP calls can use the native method-0
+reconstruction library built by `traiNNer/csrc/webp_reconstruct/build.sh`.
+
+### high_order_degradations_debug
+
+  Whether or not to enable debugging for OTF, which saves the OTF generated LR images so they can be inspected to view the effect of different OTF settings.
+
+  Type: bool
+### high_order_degradations_debug_limit
+
+  The maximum number of OTF images to save when debugging is enabled.
+
+  Type: int
+### dataroot_lq_prob
+
+  Probability of using paired LR data instead of OTF LR data.
+
+  Type: float
+### lq_usm
+
+  Whether to enable unsharp mask on the LQ image.
+
+  Type: bool
+### lq_usm_radius_range
+
+  For the unsharp mask of the LQ image, use a radius randomly selected from this range.
+
+  Type: tuple
+### blur_prob
+
+  Probability of applying the first blur to the LQ, between 0 and 1.
+
+  Type: float
+### thicklines_prob
+
+  Probability of applying custom ThickLines filter to the LQ, between 0 and 1.
+
+  Type: float
+### resize_prob
+
+  List of 3 probabilities for the first resize which should add up to 1: the probability of upscaling, the probability of downscaling, and the probability of no resize.
+
+  Type: list
+### resize_mode_list
+
+  List of possible resize modes to use for the first resize.
+
+  Type: list
+### resize_mode_prob
+
+  List of probabilities for the first resize of selecting the corresponding resize mode in `resize_mode_list`.
+
+  Type: list
+### resize_range
+
+  The resize range for the first resize, in the format `[min_resize, max_resize]`.
+
+  Type: tuple
+### gaussian_noise_prob
+
+  The probability of applying the first gaussian noise to the LQ, between 0 and 1.
+
+  Type: float
+
+
+
+### jpeg_prob
+
+  The probability of applying the first JPEG degradation to the LQ, between 0 and 1.
+
+  Type: float
+### jpeg_range
+
+  The range of JPEG quality to apply for the first JPEG degradation, in the format `[min_quality, max_quality]`.
+
+  Type: tuple
+### blur_prob2
+
+  Probability of applying the second blur to the LQ, between 0 and 1.
+
+  Type: float
+### resize_prob2
+
+  List of 3 probabilities for the second resize which should add up to 1: the probability of upscaling, the probability of downscaling, and the probability of no resize.
+
+  Type: list
+### resize_mode_list2
+
+  List of possible resize modes to use for the second resize.
+
+  Type: list
+### resize_mode_prob2
+
+  List of probabilities for the second resize of selecting the corresponding resize mode in `resize_mode_list2`.
+
+  Type: list
+### resize_range2
+
+  The resize range for the second resize, in the format `[min_resize, max_resize]`.
+
+  Type: tuple
+### gaussian_noise_prob2
+
+  The probability of applying the second gaussian noise to the LQ, between 0 and 1.
+
+  Type: float
+
+
+
+### jpeg_prob2
+
+  The probability of applying the second JPEG degradation to the LQ, between 0 and 1.
+
+  Type: float
+### jpeg_range2
+
+  The range of JPEG quality to apply for the second JPEG degradation, in the format `[min_quality, max_quality]`.
+
+  Type: list
+### resize_mode_list3
+
+  List of possible resize modes to use for the final resize.
+
+  Type: list
+### resize_mode_prob3
+
+  List of probabilities for the final resize of selecting the corresponding resize mode in `resize_mode_list3`.
+
+  Type: list
+### queue_size
+
+  Queue size for OTF processing, must be a multiple of `batch_size_per_gpu`.
+
+  Type: int
+
+
+
+
+
+
+
+
+## Dataset options (`datasets.train` and `datasets.val`)
+
+### name
+
+  Name of the dataset. It should be unique compared to other datasets in this config, but the exact name isn't very important.
+
+  Type: str
+
+
+### num_worker_per_gpu
+
+  Number of subprocesses to use for data loading with PyTorch dataloader.
+
+  Type: int
+### batch_size_per_gpu
+
+  Increasing stabilizes training but going too high can cause issues. Use multiple of 8 for best performance with AMP. A higher batch size, like 32 or 64 is more important when training from scratch, while smaller batches like 8 can be used when training with a quality pretrain model.
+
+  Type: int
+### accum_iter
+
+  Using values larger than 1 simulates higher batch size by trading performance for reduced VRAM usage. If accum_iter = 4 and batch_size_per_gpu = 6 then effective batch size = 4 * 6 = 24 but performance may be as much as 4 times as slow.
+
+  Type: int
+### use_hflip
+
+  Randomly flip the images horizontally.
+
+  Type: bool
+### use_rot
+
+  Randomly rotate the images.
+
+  Type: bool
+
+
+
+### lq_size
+
+  During training, a square of this size is cropped from LR images. Larger is usually better but uses more VRAM. Previously gt_size, use lq_size = gt_size / scale to convert. Use multiple of 8 for best performance with AMP.
+
+  Type: int
+
+### downsample_input
+
+  Halve the HR source on CPU before augmentation, cropping, and LR degradation.
+  This applies to `RealESRGANDataset` and the OTF source branch of
+  `RealESRGANPairedDataset`. An optional aligned target is reduced together with
+  the source. Dimensions are floored with a minimum of one pixel; existing
+  padding handles images smaller than the required crop.
+
+  This does not modify image files, dataset length, model scale, or the paired
+  LR/GT branch. It changes the HR training target, not merely the degradation.
+
+  Type: bool. Default: `false`.
+
+### downscale_algorithm
+
+  Filter used only when `downsample_input: true`. Options are `catrom` (default),
+  `mitchell`, `hermite`, and detail-preserving `dpid` (fixed lambda 1.0). All run
+  on CPU in encoded RGB at a fixed half scale, independently of the configured
+  LR degradation filters.
+
+  ```yaml
+  datasets:
+    train:
+      # Other dataset settings remain unchanged.
+      downsample_input: true
+      downscale_algorithm: dpid
+  ```
+
+
+
+### dataset_enlarge_ratio
+
+  Increase if the dataset is less than 1000 images to avoid slowdowns. Auto will automatically enlarge small datasets only.
+
+  Type: Literal, int
+
+
+
+
+
+### clip_size
+
+  Number of frames per clip in `PairedVideoDataset`. Must match the `clip_size` option for video generator networks such as `tscunet`.
+
+  Type: int
+### dataroot_gt
+
+  Path to the HR (high res) images in your training dataset. Specify one or multiple folders, separated by commas.
+
+  Type: str, list
+### dataroot_lq
+
+  Path to the LR (low res) images in your training dataset. Specify one or multiple folders, separated by commas.
+
+  Type: str, list
+
+### filename_tmpl
+
+  Filename template to use for LR images. Commonly used values might be `{}x2` or `{}x4`, which should be used if the LR dataset filename is in the format filename.png while the LR dataset filename is in the format `filename_x2.png` or `filename_x4.png`. This is common on some research datasets such as DIV2K or DF2K.
+
+  Type: str
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Path options (`path`)
+
+
+
+
+
+
+
+
+### pretrain_network_g
+
+  Path to the pretrain model for the generator. `pth` and `safetensors` formats are supported.
+
+  Type: str
+### pretrain_network_g_teacher
+
+  Path to the pretrain model for the teacher of the generator. `pth` and `safetensors` formats are supported.
+
+  Type: str
+
+
+
+### strict_load_g
+
+  Whether to load the pretrain model for the generator in strict mode. It should be enabled in most cases, unless you want to partially load a pretrain of a different scale or with slightly different hyperparameters.
+
+  Type: bool
+
+
+### pretrain_network_d
+
+  Path to the pretrain model for the discriminator. `pth` and `safetensors` formats are supported.
+
+  Type: str
+
+### strict_load_d
+
+  Whether to load the pretrain model for the discriminator in strict mode. It should be enabled in most cases.
+
+  Type: bool
+### pretrain_network_ae
+
+  Path to the pretrain model for the autoencoder. `pth` and `safetensors` formats are supported.
+
+  Type: str
+
+### pretrain_network_ae_decoder
+
+  Path to the pretrain model for the decoder of the autoencoder. `pth` and `safetensors` formats are supported.
+
+  Type: str
+
+
+## Train options (`train`)
+
+### total_iter
+
+  The total number of iterations to train.
+
+  Type: int
+### adaptive_d
+
+  Whether the discriminator updates adaptively. That is, discriminator updates are paused whenever the generator falls behind the discriminator (whenever smoothed l_g_gan increases). Can mitigate GAN collapse by preventing the discriminator from overpowering the generator.
+
+  Type: bool
+
+
+### optim_g
+
+  The optimizer to use for the generator model.
+
+  Type: dict
+### ema_decay
+
+  The decay factor to use for EMA (exponential moving average). Set to 0 to disable EMA.
+
+  Type: float
+### ema_switch_iter
+
+  How often to switch EMA model to online model, in iterations. Set to 0 to disable.
+
+  Type: float
+
+
+### ema_foreach
+
+Ordinary EMA updates use a batched interpolation over the model weights.
+`ema_foreach` controls the remaining update paths delegated to the EMA library.
+
+### grad_clip
+
+  Whether or not to enable gradient clipping, which can improve stability when using higher learning rates, but can also cause issues if the grad clip max norm is too small.
+
+  Type: bool
+### grad_clip_max_norm
+
+  Max norm of gradients for gradient clipping. Default: `1.0`. This applies only when `grad_clip: true`; an explicit YAML value overrides the default.
+
+  Type: float
+### warmup_iter
+
+  Gradually ramp up learning rates until this iteration, to stabilize early training. Use -1 to disable.
+
+  Type: int
+### restart_scheduler
+
+  When resuming, if restart_scheduler is true then the scheduler is recreated using the schedule in the training config. If restart_scheduler is false then scheduler is read from saved state and training config schedule is ignored.
+
+  Type: bool
+### scheduler
+
+  Options for the optimizer scheduler. If there are multiple optimizers, both will use the same scheduler options.
+
+  Type: dict
+### optim_d
+
+  The optimizer to use for the discriminator model.
+
+  Type: dict
+### optim_ae
+
+  The optimizer to use for the autoencoder model.
+
+  Type: dict
+### losses
+
+  The list of loss functions to optimize.
+
+  Type: list
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### use_moa
+
+  Whether to enable mixture of augmentations, which augments the dataset on the fly to create more variety and help the model generalize.
+
+  Type: bool
+### moa_augs
+
+  The list of augmentations to choose from, only one is selected per iteration.
+
+  Type: list
+### moa_probs
+
+  The probability each augmentation in moa_augs will be applied. Total should add up to 1.
+
+  Type: list
+### moa_debug
+
+  Save images before and after augment to debug/moa folder inside of the root training directory.
+
+  Type: bool
+### moa_debug_limit
+
+  The max number of iterations to save augmentation images for.
+
+  Type: int
+## Validation options (`val`)
+
+### val_enabled
+
+  Whether to enable validations. If disabled, all validation settings below are ignored.
+
+  Type: bool
+### save_img
+
+  Whether to save the validation images during validation, in the experiments/<name>/visualization folder.
+
+  Type: bool
+### save_img_freq
+
+  Optional image-saving interval in absolute training iterations. Save at interval multiples OR at `save_img_iters`. This does not change `val_freq`: validation must actually run at that iteration. Omit both filters to save on every validation. Each validation dataset may independently override `save_img_freq` and `save_img_iters`; omitted dataset fields inherit their global counterpart. `val.save_img: false` disables all image saving. Standalone testing is not filtered by training iteration schedules.
+
+  Type: positive int or null
+### save_img_iters
+
+  Optional explicit training iterations for image saving, in addition to the interval. A dataset's `[]` suppresses inherited explicit iterations, but does not disable its inherited interval.
+
+  Type: list of int or null
+### tile_size
+
+  Tile size of input to use during validation, reduce VRAM usage but slower inference. 0 to disable.
+
+  Type: int
+### tile_overlap
+
+  Tile overlap to use during validation, larger is slower but reduces tile seams.
+
+  Type: int
+### val_freq
+
+  How often to run validations, in iterations.
+
+  Type: int
+### suffix
+
+  Optional suffix to append to saved filenames.
+
+  Type: str
+### metrics_enabled
+
+  Whether to run metrics calculations during validation.
+
+  Type: bool
+
+
+## Logging options (`logger`)
+
+### print_freq
+
+  How often to print logs to the console, in iterations.
+
+  Type: int
+### save_checkpoint_freq
+
+  How often to save model checkpoints and training states, in iterations.
+
+  Type: int
+### save_checkpoint_keep
+
+  Number of complete regular checkpoint sets to retain after a successful refreshed save. Default `0` disables pruning. A set includes the training state, raw generator, EMA generator when enabled, and discriminator when configured. Pruning is permanent and starts only after the retained set is complete and synced. Non-periodic manual saves, backups and configured pretrained files are protected. Existing files are not pruned merely by starting training.
+
+  Type: non-negative int
+### use_tb_logger
+
+  Whether or not to enable TensorBoard logging.
+
+  Type: bool
+### save_checkpoint_format
+
+  Format to save model checkpoints.
+
+  Options: safetensors, pth

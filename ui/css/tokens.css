@@ -1,0 +1,135 @@
+/*
+  traiNNer GUI design tokens.
+
+  Chrome is neutral gray (R = G = B) on purpose: the app exists to judge images,
+  and a tinted surround shifts how their colour is perceived. Colour is reserved
+  for meaning:
+    --gt   ground truth / reference   (cyan)
+    --lq   low-quality input          (yellow)
+    --out  model output / training    (magenta)
+  plus ok / warn / err for check results.
+*/
+
+:root {
+  color-scheme: light;
+
+  /* surfaces */
+  --paper: #e6e6e6;
+  --panel: #f2f2f2;
+  --raised: #ffffff;
+  --sunk: #dadada;
+  --hover: rgba(0, 0, 0, 0.06);
+  --press: rgba(0, 0, 0, 0.11);
+
+  /* ink */
+  --ink: #141414;
+  --ink-2: #474747;
+  --ink-3: #696969;
+  --ink-inverse: #ffffff;
+
+  /* rules */
+  --rule: #c6c6c6;
+  --rule-strong: #8f8f8f;
+
+  /* the image stage is the same neutral booth in both themes */
+  --stage: #474747;
+  --stage-deep: #3a3a3a;
+  --stage-ink: #f1f1f1;
+  --stage-ink-2: #c2c2c2;
+  --stage-rule: #6b6b6b;
+  --gt-on-stage: #5fd0ee;
+  --lq-on-stage: #ecd955;
+  --out-on-stage: #f283d6;
+
+  /* roles */
+  --gt: #006d8c;
+  --gt-wash: #d9eef4;
+  --lq: #756300;
+  --lq-wash: #f1ebc4;
+  --out: #a01f7c;
+  --out-wash: #f6dcee;
+
+  /* check results */
+  --ok: #19703f;
+  --ok-wash: #d9eee1;
+  --warn: #a84a00;
+  --warn-wash: #f8e3cf;
+  --err: #b3161b;
+  --err-wash: #f8dada;
+
+  --focus: #0050d0;
+  --selection: #bcd3ff;
+
+  /* YAML text. Deliberately not the role colours: in code, colour means token type, nothing else. */
+  --syn-string: #3a3f9f;
+  --syn-number: #8a4a10;
+  --syn-const: #0f6a5d;
+
+  /* type */
+  --font-ui: "Bahnschrift", "DIN Alternate", "DIN 2014", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, "SF Mono", Menlo, monospace;
+  --text-xs: 0.786rem;  /* 11 */
+  --text-sm: 0.893rem;  /* 12.5 */
+  --text-md: 1rem;      /* 14 */
+  --text-lg: 1.143rem;  /* 16 */
+  --text-xl: 1.429rem;  /* 20 */
+  --text-2xl: 2rem;     /* 28 */
+  --narrow: 87.5%;      /* Bahnschrift width axis, used for dense data */
+
+  /* space: 4px grid */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  --radius: 3px;
+  --control-h: 30px;
+  --rail-h: 62px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper: #1e1e1e;
+  --panel: #262626;
+  --raised: #303030;
+  --sunk: #171717;
+  --hover: rgba(255, 255, 255, 0.07);
+  --press: rgba(255, 255, 255, 0.13);
+
+  --ink: #ededed;
+  --ink-2: #bababa;
+  --ink-3: #929292;
+  --ink-inverse: #141414;
+
+  --rule: #3c3c3c;
+  --rule-strong: #666666;
+
+  --stage: #3d3d3d;
+  --stage-deep: #2f2f2f;
+
+  --gt: #5fd0ee;
+  --gt-wash: #123742;
+  --lq: #e6d24b;
+  --lq-wash: #3a3410;
+  --out: #f283d6;
+  --out-wash: #43183a;
+
+  --ok: #62cd8f;
+  --ok-wash: #153524;
+  --warn: #ffa25c;
+  --warn-wash: #44260e;
+  --err: #ff807a;
+  --err-wash: #471817;
+
+  --focus: #79acff;
+  --selection: #2d4d8a;
+
+  --syn-string: #aab0ff;
+  --syn-number: #e6a971;
+  --syn-const: #6fd0bd;
+}

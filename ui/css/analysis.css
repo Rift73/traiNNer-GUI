@@ -1,0 +1,677 @@
+/* Analysis jobs: list, job detail, result, start dialog. js/runs/analysis.js.
+   Tokens only; selectors one class deep. */
+
+.analysis__btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+/* ───────── frame ───────── */
+
+.analysis {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.analysis__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.analysis__head-text {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.analysis__title {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.analysis__lead {
+  margin: 0;
+  max-width: 80ch;
+  color: var(--ink-2);
+}
+
+.analysis__body {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.analysis__lists {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--rule);
+}
+
+.analysis__detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.analysis__problem:empty {
+  display: none;
+}
+
+.analysis__problem {
+  padding: var(--s2) var(--s3);
+}
+
+.analysis__intro {
+  display: grid;
+  gap: var(--s2);
+  max-width: 64ch;
+  padding: var(--s4);
+  color: var(--ink-2);
+}
+
+.analysis__section-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ───────── list ───────── */
+
+.analysis__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis__row {
+  border-bottom: 1px solid var(--rule);
+  border-left: 3px solid transparent;
+}
+
+.analysis__row:hover {
+  background: var(--hover);
+}
+
+.analysis__row--current {
+  background: var(--raised);
+  border-left-color: var(--ink);
+}
+
+.analysis__link {
+  display: grid;
+  gap: 3px;
+  padding: var(--s2) var(--s3);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.analysis__row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.analysis__kind {
+  font-weight: 600;
+}
+
+.analysis__what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.analysis__time {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+}
+
+.analysis__empty {
+  padding: var(--s3);
+}
+
+/* ───────── one job ───────── */
+
+/* One column that never grows past the pane: long log lines and paths wrap or scroll in their own box. */
+.analysis__job {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s4);
+  min-width: 0;
+  padding: var(--s4);
+}
+
+.analysis__facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.analysis__job-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.analysis__job-title {
+  margin: 0;
+  font-size: var(--text-xl);
+}
+
+.analysis__kv {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.analysis__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.analysis__part {
+  display: grid;
+  gap: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.analysis__part-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.analysis__sub-title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.analysis__log {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.analysis__result {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.analysis__items {
+  display: grid;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis__item {
+  display: grid;
+  gap: var(--s1);
+  padding-left: var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.analysis__item-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.analysis__table-wrap {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.analysis__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dataset packing: progress, paths with copy buttons, recipe lines. */
+.analysis__progress {
+  display: grid;
+  gap: var(--s2);
+}
+
+.analysis__part-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.analysis__path-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  overflow-wrap: anywhere;
+}
+
+.analysis__yaml {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: var(--s3);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.analysis__paths {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+
+/* Classification: predicted classes and raw logits. */
+.analysis__classes {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.analysis__single-class {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 1fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.analysis__input {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  min-width: 0;
+}
+
+.analysis__input-img {
+  width: 100%;
+  max-height: 50vh;
+  object-fit: contain;
+  background: var(--stage);
+}
+
+.analysis__logits {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The comparison stage needs a definite height. */
+.analysis__stage {
+  height: 60vh;
+  min-height: 320px;
+}
+
+.analysis__outputs {
+  display: grid;
+  gap: var(--s3);
+}
+
+.analysis__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis__thumb {
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--text-xs);
+}
+
+.analysis__thumb-btn {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s1);
+  color: var(--ink);
+  text-align: left;
+  background: var(--stage);
+  border: 1px solid var(--rule);
+  cursor: pointer;
+}
+
+.analysis__thumb-btn:hover {
+  border-color: var(--rule-strong);
+}
+
+.analysis__thumb-img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+
+.analysis__thumb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--stage-ink);
+}
+
+.analysis__files {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One file: its download link with "Copy path" beside it. */
+.analysis__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+/* ───────── start dialog ───────── */
+
+.analysis__dialog {
+  min-width: 0;
+}
+
+.analysis__kinds {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* The kinds by what they work on: the group's name, then its kinds side by side (names only). */
+.analysis__kind-group {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: var(--s1) var(--s3);
+  align-items: baseline;
+}
+
+.analysis__kind-grouptitle {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.analysis__kind-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: var(--s1) var(--s3);
+}
+
+.analysis__kind-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* The chosen kind's description, once, under the list. */
+.analysis__kind-note > p {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .analysis__kind-group {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.analysis__source {
+  margin: 0;
+}
+
+.analysis__field-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.analysis__grow {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.analysis__inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+}
+
+.analysis__optional {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.analysis__error:empty {
+  display: none;
+}
+
+.analysis__gate:empty {
+  display: none;
+}
+
+/* A job kind this screen does not know: its id, as a detail beside "Analysis job". */
+.analysis__kind-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.analysis__raw {
+  display: grid;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+}
+
+/* "Open every file" under the number field of the data audit. */
+.analysis__check {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+}
+
+/* "Checkpoints to average": one line per checkpoint, the file name beside its iteration; a long list scrolls. */
+.analysis__steps {
+  display: grid;
+  gap: var(--s2);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.analysis__step-file {
+  min-width: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* A group of fields under one legend: "Also keep" of an evaluation, "Part of the image" of an image difference. */
+.analysis__exports,
+.analysis__region {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* A number field takes the room of a number, so its unit ("%") stands beside it instead of under it. */
+.analysis__field-row > .input--num {
+  flex: 0 1 16ch;
+  width: 16ch;
+}
+
+/* The unit after a number field ("%"). */
+.analysis__unit {
+  color: var(--ink-2);
+}
+
+/* "Saved image: <label>" in place of a path field; a long label wraps instead of widening the dialog. */
+.analysis__saved {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* "Chosen as a saved image." after a path in the job's parameters. */
+.analysis__pinned {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+/* ───────── weight drift and data audit (drawn by drift.js / taskdata.js) ───────── */
+
+.analysis__progress-text {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.analysis__part-result {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+/* ───────── detection result ───────── */
+
+.analysis__detect-line {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis__detect-list {
+  display: grid;
+  gap: var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis__detect-image {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+.analysis__detect-dims {
+  font-weight: 400;
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+}
+
+.analysis__boxes-host:empty {
+  display: none;
+}
+
+.analysis__boxes-figure {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  min-width: 0;
+}
+
+/* The SVG's viewBox is the original image's pixel grid; the preview is drawn into it at that size. */
+.analysis__boxes-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 60vh;
+  background: var(--stage);
+}
+
+.analysis__box {
+  fill: none;
+  stroke: var(--stage-ink);
+  stroke-width: 2px;
+}
+
+/* Font size and outline width are set per image in image pixels (attributes), not here. */
+.analysis__box-label {
+  fill: var(--stage-ink);
+  stroke: var(--stage-deep);
+  paint-order: stroke;
+  font-family: var(--font-ui);
+}
+
+/* ───────── narrow screens: panes stack ───────── */
+
+@media (max-width: 900px) {
+  /* Stacked, every block takes the height of its content and the part scrolls as one page. Without
+     flex: none and the automatic minimum heights, the frame shrinks to the visible area and the list and
+     the open job are drawn over each other. */
+  .analysis {
+    flex: none;
+    grid-template-rows: auto auto;
+    height: auto;
+    min-height: auto;
+  }
+
+  .analysis__body {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: auto;
+  }
+
+  .analysis__lists,
+  .analysis__detail {
+    min-height: auto;
+  }
+
+  .analysis__single-class {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .analysis__lists {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    overflow: visible;
+  }
+
+  .analysis__detail {
+    overflow: visible;
+  }
+}

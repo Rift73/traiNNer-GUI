@@ -1,0 +1,32 @@
+SparK feature encoder attribution
+
+Adapted from https://github.com/umzi2/SparK, commit
+73fd06a43785599552f005c62073f648966d78d8, pretrain/encoder.py and
+pretrain/models/convnext.py. These files carry the notice:
+Copyright (c) ByteDance, Inc. and its affiliates. All rights reserved.
+
+The fork builds on SparK (Keyu Tian et al.), ConvNeXt, and InceptionNeXt-style
+token mixing. The released encoder is used without its masked-pretraining
+decoder. The following is the SparK repository's license, preserved verbatim.
+
+MIT License
+
+Copyright (c) 2023 Keyu Tian
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,0 +1,482 @@
+/* Two sides (training runs or evaluation jobs) side by side: js/runs/evaluation.js. Classes
+   .evaluation__*; one class deep; tokens only.
+   Left and right keep their sides everywhere: --series-1 (left) and --series-2 (right) from runs.css. */
+
+.evaluation {
+  display: grid;
+  gap: var(--s4);
+  padding: var(--s4);
+  min-width: 0;
+  align-content: start;
+}
+
+.evaluation__body {
+  display: grid;
+  gap: var(--s5);
+  min-width: 0;
+}
+
+/* ───────── run pickers ───────── */
+
+.evaluation__picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s3);
+}
+
+.evaluation__pick {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+  flex: 1 1 240px;
+  max-width: 420px;
+}
+
+.evaluation__label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.evaluation__select {
+  min-width: 0;
+}
+
+.evaluation__swap {
+  flex: none;
+}
+
+.evaluation__swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: baseline;
+  background: var(--ink-3);
+}
+
+.evaluation__swatch--left {
+  background: var(--series-1);
+}
+
+.evaluation__swatch--right {
+  background: var(--series-2);
+}
+
+/* ───────── facts row ───────── */
+
+.evaluation__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.evaluation__facts:empty {
+  display: none;
+}
+
+.evaluation__fact {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3) var(--s3) var(--s3) var(--s4);
+  border-top: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-strong);
+  min-width: 0;
+}
+
+.evaluation__fact--left {
+  border-left-color: var(--series-1);
+}
+
+.evaluation__fact--right {
+  border-left-color: var(--series-2);
+}
+
+.evaluation__fact-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.evaluation__side-word {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.evaluation__fact-name {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.evaluation__kv {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+}
+
+/* ───────── sections ───────── */
+
+.evaluation__section {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.evaluation__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.evaluation__subtitle {
+  margin: 0 0 var(--s2);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.evaluation__lead {
+  margin: 0;
+  color: var(--ink-2);
+  max-width: 80ch;
+}
+
+.evaluation__status:empty,
+.evaluation__result:empty {
+  display: none;
+}
+
+.evaluation__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s3) var(--s5);
+}
+
+.evaluation__controls:empty {
+  display: none;
+}
+
+.evaluation__fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.evaluation__legend {
+  padding: 0;
+  margin-bottom: var(--s1);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.evaluation__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--control-h);
+}
+
+.evaluation__steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  flex: 1 1 100%;
+}
+
+.evaluation__result {
+  display: grid;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+/* a quiet line: how a side was measured, or why a side has no iteration to choose */
+
+.evaluation__quiet {
+  flex: 1 1 100%;
+  margin: 0;
+  max-width: 90ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.evaluation__measured {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.evaluation__table {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.evaluation__caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: var(--s2);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.evaluation__hint {
+  display: block;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.evaluation__json {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-xs);
+}
+
+/* a nested setting that differs: leaf table, then the full values folded away */
+
+.evaluation__setting {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.evaluation__details {
+  min-width: 0;
+}
+
+.evaluation__summary-toggle {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.evaluation__full {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s3);
+  margin-top: var(--s2);
+}
+
+.evaluation__full-side {
+  display: grid;
+  gap: var(--s1);
+  align-content: start;
+  min-width: 0;
+}
+
+/* ───────── summary ───────── */
+
+.evaluation__summary {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.evaluation__sentence {
+  margin: 0;
+  max-width: 80ch;
+}
+
+.evaluation__split {
+  display: grid;
+  gap: var(--s2);
+  max-width: 640px;
+}
+
+.evaluation__bar {
+  display: flex;
+  height: 22px;
+  gap: 1px; /* the strip behind shows through as a rule between parts */
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--rule-strong);
+  overflow: hidden;
+}
+
+.evaluation__bar-part {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-basis: 0;
+  min-width: 2px;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.evaluation__bar-part--improved,
+.evaluation__bar-mark--improved {
+  background: var(--ok-wash);
+}
+
+.evaluation__bar-part--tied,
+.evaluation__bar-mark--tied {
+  background: var(--sunk);
+}
+
+.evaluation__bar-part--regressed,
+.evaluation__bar-mark--regressed {
+  background: var(--err-wash);
+}
+
+.evaluation__bar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+}
+
+.evaluation__bar-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.evaluation__bar-mark {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+}
+
+/* ───────── per-sample tables ───────── */
+
+.evaluation__samples {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.evaluation__tables {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.evaluation__table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.evaluation__sample {
+  padding: 2px var(--s1);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.evaluation__sample:hover {
+  background: var(--hover);
+}
+
+.evaluation__sample[aria-pressed="true"] {
+  border-color: var(--rule-strong);
+  background: var(--selection);
+  text-decoration: none;
+}
+
+/* ───────── outputs on the stage ───────── */
+
+.evaluation__a-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.evaluation__a-label {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.evaluation__stage {
+  display: grid;
+  height: clamp(360px, 62vh, 760px);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ───────── logged history ───────── */
+
+.evaluation__chart {
+  min-width: 0;
+}
+
+.evaluation__notes {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.evaluation__notes:empty {
+  display: none;
+}
+
+.evaluation__note {
+  max-width: 90ch;
+}
+
+/* ───────── recipe differences ───────── */
+
+.evaluation__scroll {
+  max-height: 480px;
+  overflow: auto;
+  min-width: 0;
+}
+
+.evaluation__value {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 960px) {
+  .evaluation__tables {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .evaluation {
+    padding: var(--s3);
+  }
+
+  .evaluation__facts,
+  .evaluation__full {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evaluation__pick {
+    max-width: none;
+  }
+}

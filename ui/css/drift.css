@@ -1,0 +1,185 @@
+/* Weight drift result: how far a candidate checkpoint's values moved from a baseline. js/runs/drift.js.
+   Sits inside the analysis job result (analysis.css). Tokens only; selectors one class deep. No hue:
+   the bars are neutral ink, colour stays reserved for meaning (warnings use the shared notice). */
+
+.drift {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.drift__files {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.drift__folder {
+  color: var(--ink-2);
+}
+
+.drift__lead {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.drift__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.drift__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* ───────── the five measures ───────── */
+
+.drift__measures {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--s3) var(--s4);
+  margin: 0;
+}
+
+.drift__measure {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding-left: var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.drift__label {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.drift__value {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.drift__absent {
+  color: var(--ink-3);
+}
+
+.drift__explain {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* ───────── tensor counts ───────── */
+
+.drift__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.drift__count {
+  padding-left: var(--s2);
+  border-left: 1px solid var(--rule);
+}
+
+/* ───────── tensors that moved most ───────── */
+
+.drift__table-wrap {
+  max-width: 100%;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+}
+
+.drift__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.drift__caption {
+  caption-side: top;
+  padding: var(--s2) var(--s3);
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.drift__name {
+  min-width: 14ch;
+  max-width: 40ch;
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.drift__shape {
+  white-space: nowrap;
+  font-stretch: var(--narrow);
+}
+
+.drift__type {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+}
+
+.drift__rms {
+  min-width: 96px;
+  white-space: nowrap;
+}
+
+.drift__rms-value {
+  display: block;
+}
+
+/* Thin bar: this row's RMS change against the largest listed one. */
+.drift__track {
+  display: block;
+  height: 3px;
+  margin-top: 3px;
+  background: var(--sunk);
+}
+
+.drift__bar {
+  display: block;
+  height: 100%;
+  background: var(--ink-2);
+}
+
+.drift__files-out {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.drift__closing {
+  margin: 0;
+  max-width: 80ch;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  color: var(--ink-2);
+}
+
+@media (max-width: 720px) {
+  .drift__measures {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (forced-colors: active) {
+  .drift__bar {
+    background: CanvasText;
+  }
+}

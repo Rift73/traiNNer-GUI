@@ -1,0 +1,115 @@
+/* Checkpoint averaging result: several checkpoints of one run saved as one averaged safetensors file.
+   js/runs/average.js. Sits inside the analysis job result (analysis.css). Tokens only; selectors one
+   class deep. */
+
+.average {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.average__lead {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.average__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.average__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.average__muted {
+  color: var(--ink-3);
+}
+
+.average__facts {
+  font-variant-numeric: tabular-nums;
+}
+
+.average__run {
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.average__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.average__table {
+  width: auto;
+  min-width: min(100%, 36ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.average__download {
+  text-underline-offset: 2px;
+}
+
+/* A path with its "Copy path" button. */
+.average__path-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.average__path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+/* The place of the follow-up jobs: empty, and so not drawn, until the run's recipe was read. */
+.average__next:empty {
+  display: none;
+}
+
+.average__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.average__raw {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.average__raw-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.average__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}

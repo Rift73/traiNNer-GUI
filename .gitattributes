@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+# Preserve the exact bytes of these inputs in the checksummed desktop bundle.
+LICENSE/LICENSE-Omnisr -text
+traiNNer/csrc/dvd_coefficients.hpp -text
+traiNNer/csrc/effect_cuda.ptx -text
+traiNNer/csrc/training_cuda.ptx -text
+
+/tests.zip binary linguist-detectable=false

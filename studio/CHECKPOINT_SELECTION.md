@@ -1,0 +1,28 @@
+# Select a measured checkpoint
+
+Call `select_checkpoints(runs, run_id, dataset=None, metric=None, direction=None, limit=50)` from `studio.checkpoint_selection`. A route can pass `id`, `dataset`, `metric`, `direction` and `limit` from the query. The limit accepts 1–250 points. Both series fields are required to request a ranking.
+
+With the series fields omitted, the result has `runId`, `series` and `history`. Each series has `dataset`, `metric`, `direction` and `directionSource`.
+
+With the series selected, the result has `runId`, `dataset`, `metric`, `direction`, `directionSource`, `points`, `observedCount`, `rankableCount`, `availableCount`, `unplacedLogCount`, `history`, `bestObserved` and `bestAvailable`. A point has `step`, `value`, `nonfinite`, `source`, and `checkpoint`. Native summary points carry `evaluation` and `attempt`. Text points carry `log` and `line`. The two best fields also carry `tieCount`. A tie picks the earliest step for the representative and counts all equally scored eligible observations, including those outside the displayed page.
+
+Direction is `higher`, `lower` or null. `directionSource` is `stored`, `evaluator`, `recipe`, `explicit`, `unknown` or `conflicting`. A supplied direction fills missing metadata. Selecting an opposite recorded direction returns an error. Unknown or conflicting direction leaves both best fields null. Point values use JSON null and a `nonfinite` marker of `nan`, `inf` or `-inf` as applicable. NaN and absent scores are unranked. Reported infinities are ordered endpoints, including positive infinite PSNR.
+
+Discovery reads the SQLite catalogs when present. Ranking uses scalar summary rows for the selected dataset and metric first, then means calculated from measured native per-image scores, then legacy text. Native summary values are evaluator outputs. A `sampleMean` is a derived aggregate. Text observations retain printed precision and require an identifiable step. The trainer's rolling `Best` step does not date the current score.
+
+`history` contains `source`, `logCoverage`, `logPurpose`, `logBytesRead`, `logByteLimit` and `unindexedLogs`. `source` is `indexed`, `summary`, `sampleMean`, `log` or `none`. `logCoverage` is `notSearched`, `complete`, `partial` or `unavailable`. `logPurpose` distinguishes `observations` from `saveEvidence`. When SQLite supplies scores the legacy log is evidence of numbered saves only. Earlier text-only observations may be outside those indexed results. Text reads share a 4 MiB per-request cap. A log that exceeds the cap cannot establish a complete trajectory for a checkpoint match. The result leaves unplaced text observations outside the ranking and reports their count.
+
+`bestObserved` is the highest-ranked measured point even if its weights are absent. `bestAvailable` requires a structurally valid numbered inference artifact. Checkpoint status is `available`, `missing`, `invalid` or `unverified`. Available entries include `artifact` with `name`, `path`, `role` and `version`. The role is `net_g`, `net_g_ema`, `net_ae` or `net_ae_ema`. A numbered file can be missing after pruning or when an archive was copied.
+
+- `evidence: "recordedSaveId"` means the evaluation references the save ID embedded in the current file. The artifact also reports `saveId`. The selector uses this evidence for repeated steps and performs zero text reads when every selected observation has an association record.
+- `evidence: "uniqueLoggedSave"` is the weaker legacy match. It uses a uniquely logged numbered save in a single completed trajectory and the evaluator’s supported native role. Repeated steps or ambiguous legacy attempts leave the attachment unverified. The record cannot attest to file replacement performed outside that trajectory.
+
+Pass the artifact's `version` as `weightsVersion` when admitting an offline job. For a direct artifact stream, compare it to `artifact_version(os.fstat(stream.fileno()))` from `studio.paths` on the opened file and reject a stale selection.
+
+## Recorded weight identities
+
+Training with `val.record_samples: true` records a portable per-save ID for numbered inference weights. Safetensors uses the `trainner_save_id` header key. Native PTH uses a 32-byte record in the Torch ZIP, preserving both flat state dicts and existing metadata wrappers. The SQLite `validation_checkpoint` table links the save ID, scoped relative path and actual inference role to the summary evaluation within the same attempt and step. It also records explicit uncertainty. Paths retained in copied archives are verified by the embedded ID before the reader returns a local artifact version. The ID records a save event and does not authenticate arbitrary modifications to tensor data.
+
+Either save/validation order works. A later process at the same step gets a fresh save ID. Replacing the file at the old path yields `weightIdentityMismatch` for an evaluation from the previous attempt. Managed final numbered saves can pair with off-cadence final validation. The `latest` file and any off-cadence point without a corresponding numbered save are outside the association.
+
+The writer compares model and tensor metadata at the native save and evaluation boundaries. It records uncertainty for a different inference object, changed weight metadata, custom mode transforms, an executed optimized wrapper whose weight state is unproven, or optimizer eval/train transforms that affect the selected network. An EMA network can still be linked when it is independent of the switching optimizer’s weights. Task evaluators without an instrumented inference boundary publish an unverified receipt. The summary hook inserts this one table row after task and scalar evidence; the table uses the evaluation row as its foreign key.

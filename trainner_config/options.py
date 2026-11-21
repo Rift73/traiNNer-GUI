@@ -1,0 +1,1810 @@
+from typing import Annotated, Any, Literal
+
+from msgspec import Meta, Struct, field
+
+PixelFormat = Literal["rgb", "y", "uv", "yuv444"]
+OTFResizeMode = Literal["bilinear", "bicubic", "nearest-exact", "lanczos", "area",
+                        "aa_box", "aa_bilinear", "aa_bicubic", "aa_mitchell", "aa_lanczos2", "aa_lanczos3"]
+Probability = Annotated[float, Meta(ge=0, le=1)]
+
+# Examples advertise names to recipe editors while preserving the existing string contracts.
+ChromaResizeFilter = Annotated[str, Meta(examples=[
+    "nearest", "box", "hermite", "linear", "lagrange", "cubic_catrom",
+    "cubic_mitchell", "cubic_bspline", "lanczos", "gauss",
+])]
+CompressionAlgorithm = Annotated[str, Meta(examples=["jpeg", "webp", "h264", "hevc", "mpeg2", "mpeg4", "vp9"])]
+VideoSampling = Annotated[str, Meta(examples=["444", "422", "420"])]
+BLUR_KERNELS = ("iso", "aniso", "generalized_iso", "generalized_aniso", "plateau_iso", "plateau_aniso")
+BlurKernel = Annotated[str, Meta(examples=list(BLUR_KERNELS))]
+
+
+class StrictStruct(Struct, forbid_unknown_fields=True):
+    pass
+
+
+class WandbOptions(StrictStruct):
+    resume_id: str | None = None
+    project: str | None = None
+
+
+class DatasetOptions(StrictStruct):
+    name: Annotated[
+        str,
+        Meta(
+            description="Name of the dataset. It should be unique compared to other datasets in this config, but the exact name isn't very important."
+        ),
+    ]
+    type: str
+    io_backend: Annotated[
+        dict[str, Any],
+        Meta(extra_json_schema={"properties": {"type": {"type": "string", "examples": ["disk", "lmdb"]}}}),
+    ] = field(default_factory=lambda: {"type": "disk"})
+    native_paired_crop: Annotated[
+        bool, Meta(description="Use the LLVM RGB patch packer for paired image training with 8-bit sources. Uses the same shared crop, flip and rotation as the ordinary loader. Prepare the native data tools first."),
+    ] = False
+
+    save_img_freq: Annotated[
+        Annotated[int, Meta(ge=1)] | None,
+        Meta(
+            description="Validation image saving interval for this dataset, in absolute training iterations. Omit to inherit val.save_img_freq. This only filters image saving; validation must still run and val.save_img must be enabled.",
+        ),
+    ] = None
+    save_img_iters: Annotated[
+        list[int] | None,
+        Meta(
+            description="Explicit validation image saving iterations for this dataset, in addition to its saving interval. Omit to inherit val.save_img_iters; use [] to disable inherited explicit iterations."
+        ),
+    ] = None
+
+    num_worker_per_gpu: Annotated[
+        Annotated[int, Meta(ge=0)] | Literal["auto"] | None,
+        Meta(
+            description="Loader subprocesses. Training integers are per GPU, validation/test integers are per process and default to zero. Auto shares the CPU affinity budget across training processes, reserving one CPU per process, with at least one worker."
+        ),
+    ] = None
+    batch_size_per_gpu: Annotated[
+        int | None,
+        Meta(
+            description="Samples per GPU in each training microbatch. Classification and numeric CSV validation/test splits can set their own evaluation batch size. Evaluation defaults to one."
+        ),
+    ] = None
+    accum_iter: Annotated[
+        int,
+        Meta(
+            description="Using values larger than 1 simulates higher batch size by trading performance for reduced VRAM usage. If accum_iter = 4 and batch_size_per_gpu = 6 then effective batch size = 4 * 6 = 24 but performance may be as much as 4 times as slow."
+        ),
+    ] = 1
+
+    use_hflip: Annotated[
+        bool, Meta(description="Randomly flip the images horizontally.")
+    ] = True
+    use_rot: Annotated[bool, Meta(description="Randomly rotate the images.")] = True
+    mean: list[float] | None = None
+    std: list[float] | None = None
+    gt_size: int | None = None
+    lq_size: Annotated[
+        int | None,
+        Meta(
+            description="During training, a square of this size is cropped from LR images. Larger is usually better but uses more VRAM. Previously gt_size, use lq_size = gt_size / scale to convert. Use multiple of 8 for best performance with AMP."
+        ),
+    ] = None
+    otf_canvas: Annotated[
+        Literal["trainer", "neosr", "neosr_tight"],
+        Meta(description="RealESRGAN training canvas. Trainer uses centered mirror padding and a 32 px margin. "
+             "NeoSR uses bottom/right reflect-101 padding and random aligned crops over a canvas of at least "
+             "512 GT pixels. NeoSR tight uses a 32 px margin. Both NeoSR sizes round up to a multiple of scale."),
+    ] = "trainer"
+    downsample_input: Annotated[
+        bool,
+        Meta(
+            description="Halve the source GT and optional aligned target GT on CPU with downscale_algorithm before augmentation, cropping, and LR degradation. Applies to RealESRGANDataset and the OTF source branch of RealESRGANPairedDataset, not the LR degradation filters. Dimensions are floored, with a minimum of one pixel. Does not modify files, epoch length, or existing paired LR/GT images."
+        ),
+    ] = False
+    downscale_algorithm: Annotated[
+        Literal["catrom", "mitchell", "hermite", "dpid"],
+        Meta(
+            description="HR source pre-downscaling filter, used only when downsample_input is true. Scale stays fixed at 0.5. catrom (default), mitchell, and hermite are antialiased cubic filters; dpid is detail-preserving downscaling with fixed lambda=1.0. All run on CPU in encoded RGB, not in the OTF LR degradation pipeline."
+        ),
+    ] = "catrom"
+    color: Annotated[
+        Literal["y", "luma601"] | None,
+        Meta(description="Still-image channel encoding. Omit for RGB, choose y for studio-range BT.601, or luma601 for full-range NeoSR grayscale."),
+    ] = None
+    phase: str | None = None
+    scale: int | None = None
+    # Copied from the top-level dvd_prob; arms the DVD geometry of image samples.
+    dvd_prob: float = 0.0
+    # Copied from the top-level blur_prob and blur_prob2; a blur kernel is built
+    # only when its stage can apply it. The default builds both.
+    blur_prob: float = 1.0
+    blur_prob2: float = 1.0
+    dataset_enlarge_ratio: Annotated[
+        Literal["auto"] | int,
+        Meta(
+            description="Increase if the dataset is less than 1000 images to avoid slowdowns. Auto will automatically enlarge small datasets only."
+        ),
+    ] = "auto"
+    prefetch_mode: Annotated[str, Meta(examples=["cpu", "cuda"])] | None = None
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    num_prefetch_queue: int = 1
+    prefetch_factor: int | None = 2
+
+    clip_size: Annotated[
+        int | None,
+        Meta(
+            description="Number of frames per clip in `PairedVideoDataset`. Must match the `clip_size` option for video generator networks such as `tscunet`."
+        ),
+    ] = None
+
+    video_scene_manifest: Annotated[
+        str | None,
+        Meta(description="PairedVideoDataset scene selection JSON. Uses ordered root slots and pins frame names, eligible centers and clip_size."),
+    ] = None
+
+    clip_lengths: Annotated[
+        list[int],
+        Meta(
+            description="Clip lengths for `VideoClipDataset`; one is drawn per batch."
+        ),
+    ] = field(default_factory=lambda: [8, 12, 16, 20])
+    descale_size: Annotated[
+        tuple[int, int],
+        Meta(
+            description="`VideoClipDataset`: width and height the source frames are descaled to."
+        ),
+    ] = (1488, 837)
+    descale_kernel: Annotated[
+        Literal[
+            "bilinear", "bicubic", "lanczos", "spline16", "spline36", "spline64", "point"
+        ],
+        Meta(description="`VideoClipDataset`: kernel of the upscale being undone."),
+    ] = "bilinear"
+    descale_border: Annotated[
+        Literal["mirror", "zero", "extend"],
+        Meta(description="`VideoClipDataset`: border of the upscale being undone."),
+    ] = "zero"
+    descale_linear_light: Annotated[
+        Literal["gamma24", "srgb", "gamma22", "bt709"] | None,
+        Meta(
+            description="`VideoClipDataset`: transfer curve to descale in linear light with; null descales the stored values."
+        ),
+    ] = None
+    hr_size: Annotated[
+        tuple[int, int],
+        Meta(
+            description="`VideoClipDataset`: width and height of the HR frames, resized from the descaled frames with downscale_algorithm."
+        ),
+    ] = (960, 540)
+    hr_linear_light: Annotated[
+        Literal["gamma24", "srgb", "gamma22", "bt709"] | None,
+        Meta(
+            description="`VideoClipDataset`: transfer curve to resize to hr_size in linear light with; null resizes the stored values."
+        ),
+    ] = "gamma24"
+    descale_error_threshold: Annotated[
+        float,
+        Meta(
+            description="`VideoClipDataset`: shots with a sampled frame whose luma re-upscale error (99.9th percentile, 0..1) is above this are skipped."
+        ),
+    ] = 0.035
+    motion_weight_floor: Annotated[
+        float,
+        Meta(
+            description="`VideoClipDataset`: lowest sampling weight factor of a shot with little motion, relative to the median shot."
+        ),
+    ] = 0.25
+    cut_clip_prob: Annotated[
+        float,
+        Meta(
+            description="`VideoClipDataset`: share of clips that cross a cut between two clean shots."
+        ),
+    ] = 0.05
+    use_time_reverse: Annotated[
+        bool,
+        Meta(description="`VideoClipDataset`: randomly reverse clips in time."),
+    ] = True
+
+    dataroot_gt: Annotated[
+        str | list[str] | None,
+        Meta(
+            description="Path to the HR (high res) images in your training dataset. Specify one or multiple folders, separated by commas."
+        ),
+    ] = None
+    target_dataroot_gt: Annotated[
+        str | list[str] | None,
+        Meta(
+            description="Optional path to aligned target HR images used as supervision targets while `dataroot_gt` remains the source for OTF LR synthesis. Must match `dataroot_gt` one-to-one in relative paths."
+        ),
+    ] = None
+    dataroot_lq: Annotated[
+        str | list[str] | None,
+        Meta(
+            description="Path to the LR (low res) images in your training dataset. Specify one or multiple folders, separated by commas."
+        ),
+    ] = None
+    paired_dataroot_gt: Annotated[
+        str | list[str] | None,
+        Meta(
+            description="Path to paired HR images for RealESRGANPairedDataset. When set, the paired sub-dataset uses this instead of dataroot_gt, allowing separate folders for OTF and paired training."
+        ),
+    ] = None
+    annotation_file: Annotated[
+        str | None,
+        Meta(description="COCO image and box annotation JSON for CocoDetectionDataset."),
+    ] = None
+    meta_info: str | None = None
+    filename_tmpl: Annotated[
+        str,
+        Meta(
+            description="Filename template to use for LR images. Commonly used values might be `{}x2` or `{}x4`, which should be used if the LR dataset filename is in the format filename.png while the LR dataset filename is in the format `filename_x2.png` or `filename_x4.png`. This is common on some research datasets such as DIV2K or DF2K."
+        ),
+    ] = "{}"
+
+    blur_kernel_size: int = 12
+    kernel_list: list[BlurKernel] = field(default_factory=lambda: list(BLUR_KERNELS))
+    kernel_prob: list[float] = field(
+        default_factory=lambda: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    )
+    kernel_range: tuple[int, int] = (5, 17)
+    sinc_prob: float = 0
+    blur_sigma: tuple[float, float] = (0.2, 2)
+    blur_sigmay: tuple[float, float] | None = None
+    blur_rotation: Annotated[tuple[float, float] | None, Meta(description="Angle range in radians for anisotropic blur kernels in both stages. Omit for a full rotation.")] = None
+    sample_blur_prob: Annotated[float, Meta(ge=0, le=1, description="Per-image probability of applying the first blur kernel, inside the batch blur gate. For independent image gates, set the top-level blur_prob to 1.")] = 1.0
+    betag_range: tuple[float, float] = (0.5, 4)
+    betap_range: tuple[float, float] = (1, 2)
+
+    blur_kernel_size2: int = 12
+    kernel_list2: list[BlurKernel] = field(default_factory=lambda: list(BLUR_KERNELS))
+    kernel_prob2: list[float] = field(
+        default_factory=lambda: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    )
+    kernel_range2: tuple[int, int] = (5, 17)
+    sinc_prob2: float = 0
+    blur_sigma2: tuple[float, float] = (0.2, 1)
+    blur_sigmay2: tuple[float, float] | None = None
+    betag_range2: tuple[float, float] = (0.5, 4)
+    betap_range2: tuple[float, float] = (1, 2)
+
+    final_sinc_prob: float = 0
+    final_kernel_range: tuple[int, int] = (5, 17)
+
+    def __post_init__(self) -> None:
+        from math import isfinite
+
+        # The built-in registry resolves this class by its bare name.
+        if self.type.lower() == "realesrgandataset_trainner":
+            self.type = "RealESRGANDataset"
+        for key in ("blur_sigmay", "blur_sigmay2", "blur_rotation"):
+            bounds = getattr(self, key)
+            if bounds is not None and (not all(map(isfinite, bounds)) or bounds[0] >= bounds[1]
+                                       or (key != "blur_rotation" and bounds[0] <= 0)):
+                raise ValueError(f"{key} requires finite increasing bounds and blur sigma must be positive.")
+
+
+class GeneratorTransfer(StrictStruct):
+    exclude: Annotated[
+        list[Annotated[str, Meta(min_length=1)]],
+        Meta(description="Exact destination state-dict keys to keep at initialization, including a same-sized head."),
+    ] = field(default_factory=list)
+
+
+class PathOptions(StrictStruct):
+    experiments_root: str | None = None
+    models: str | None = None
+    resume_models: str | None = None
+    training_states: str | None = None
+    log: str | None = None
+    visualization: str | None = None
+    results_root: str | None = None
+
+    pretrain_network_g: Annotated[
+        str | None,
+        Meta(
+            description="Path to the pretrain model for the generator. `pth` and `safetensors` formats are supported."
+        ),
+    ] = None
+    pretrain_network_g_teacher: Annotated[
+        str | None,
+        Meta(
+            description="Path to the pretrain model for the teacher of the generator. `pth` and `safetensors` formats are supported."
+        ),
+    ] = None
+    pretrain_network_g_path: str | None = None
+    pretrain_network_ae_path: str | None = None
+    transfer_g: Annotated[
+        GeneratorTransfer | None,
+        Meta(description="Opt into name- and shape-compatible initial generator weights for training. Use {} to copy all compatible tensors. Class rows are never remapped. Full-state resume uses its normal checkpoint loader."),
+    ] = None
+    param_key_g: str | None = None
+    strict_load_g: Annotated[
+        bool,
+        Meta(
+            description="Whether to load the pretrain model for the generator in strict mode. It should be enabled in most cases, unless you want to partially load a pretrain of a different scale or with slightly different hyperparameters."
+        ),
+    ] = True
+    resume_state: str | None = None
+    pretrain_network_g_ema: str | None = None
+
+    pretrain_network_d: Annotated[
+        str | None,
+        Meta(
+            description="Path to the pretrain model for the discriminator. `pth` and `safetensors` formats are supported."
+        ),
+    ] = None
+    param_key_d: str | None = None
+    strict_load_d: Annotated[
+        bool,
+        Meta(
+            description="Whether to load the pretrain model for the discriminator in strict mode. It should be enabled in most cases."
+        ),
+    ] = True
+    pretrain_network_ae: Annotated[
+        str | None,
+        Meta(
+            description="Path to the pretrain model for the autoencoder. `pth` and `safetensors` formats are supported."
+        ),
+    ] = None
+    pretrain_network_ae_ema: str | None = None
+    pretrain_network_ae_decoder: Annotated[
+        str | None,
+        Meta(
+            description="Path to the pretrain model for the decoder of the autoencoder. `pth` and `safetensors` formats are supported."
+        ),
+    ] = None
+    pretrain_network_ae_decoder_ema: str | None = None
+    ignore_resume_networks: list[str] | None = None
+
+
+class OnnxOptions(StrictStruct):
+    dynamo: bool = False
+    opset: int = 20
+    shape: str = "1x3xHxW"
+    verify: bool = True
+    dtype: Literal["fp32", "fp16", "bf16"] = "fp16"
+    bf16_exclude_depthwise: bool = True
+    optimize: bool = True
+    wrap_5d_to_4d: bool = True
+
+
+class DistillationOptions(StrictStruct):
+    """Offline knowledge distillation from an immutable pretrained teacher."""
+
+    enabled: bool = False
+    output_weight: Annotated[
+        float,
+        Meta(
+            description="Weight of student regression toward the frozen teacher output."
+        ),
+    ] = 0.5
+    feature_weight: Annotated[
+        float,
+        Meta(
+            description="Weight of sparse block-feature distillation. Set to 0 for output-only distillation."
+        ),
+    ] = 0.0
+    start_iter: Annotated[
+        int,
+        Meta(description="First iteration at which output distillation is active."),
+    ] = 0
+    warmup_iters: Annotated[
+        int,
+        Meta(description="Linear ramp length for output distillation."),
+    ] = 0
+    feature_start_iter: Annotated[
+        int,
+        Meta(
+            description="First iteration at which block-feature distillation is active."
+        ),
+    ] = 0
+    feature_warmup_iters: Annotated[
+        int,
+        Meta(description="Linear ramp length for block-feature distillation."),
+    ] = 0
+    decay_start_iter: Annotated[
+        int | None,
+        Meta(
+            description="Optional iteration at which distillation begins decaying linearly."
+        ),
+    ] = None
+    end_iter: Annotated[
+        int | None,
+        Meta(
+            description="Optional iteration at which all distillation weights reach zero."
+        ),
+    ] = None
+    output_loss: Literal["charbonnier", "l1", "mse"] = "l1"
+    feature_loss: Literal["charbonnier", "l1", "mse"] = "l1"
+    feature_transform: Annotated[
+        Literal["spatial_affinity", "channel_l2", "none"],
+        Meta(
+            description="Feature representation to distill. spatial_affinity implements FAKD-style second-order structural transfer."
+        ),
+    ] = "spatial_affinity"
+    feature_pool_size: Annotated[
+        int,
+        Meta(
+            description="Average-pooling factor applied before spatial-affinity matrices are formed."
+        ),
+    ] = 4
+    epsilon: Annotated[
+        float,
+        Meta(description="Numerical epsilon for loss and feature normalization."),
+    ] = 1e-6
+    compile_teacher: Annotated[
+        bool,
+        Meta(
+            description="Compile the frozen teacher whenever use_compile is enabled for the student."
+        ),
+    ] = True
+
+
+class VosrTargetOptions(StrictStruct):
+    """VOSR 2.0 restorations of the degraded LR as the HR target (on-the-fly degradations only)."""
+
+    engine_dir: Annotated[
+        str,
+        Meta(description="Folder with VOSR 2.0's 512 px FP8 TensorRT stage engines."),
+    ]
+    plugin: Annotated[
+        str,
+        Meta(description="The vosr2_qkv TensorRT plugin library."),
+    ]
+    lanes: Annotated[
+        int,
+        Meta(description="VOSR windows run side by side."),
+    ] = 2
+
+
+class ValidationMonitor(StrictStruct):
+    dataset: Annotated[str, Meta(min_length=1)]
+    metric: Annotated[str, Meta(min_length=1)]
+
+
+class EarlyStoppingOptions(StrictStruct):
+    monitor: ValidationMonitor
+    mode: Literal["min", "max"]
+    patience: Annotated[int, Meta(ge=1, description="Stop after this many consecutive finite validation observations without a qualifying improvement.")]
+    min_delta: Annotated[float, Meta(ge=0, description="Required absolute improvement over the last patience-resetting score.")] = 0.0
+
+
+class QATOptions(StrictStruct):
+    """AetherNet eager INT8 fake quantization. Boundaries count accepted updates."""
+    type: Literal["int8"] = "int8"
+    calibration_iters: Annotated[int, Meta(ge=0)] = 0
+    freeze_norm_iter: Annotated[int, Meta(ge=-1)] | None = None
+    freeze_observers_iter: Annotated[int, Meta(ge=-1)] | None = None
+    quantize_residual: bool | None = None
+
+    def schedule(self, total_iter: int) -> tuple[int, int, int]:
+        calib = self.calibration_iters
+        norm = int(0.7 * total_iter) if self.freeze_norm_iter is None else self.freeze_norm_iter
+        obs = int(0.8 * total_iter) if self.freeze_observers_iter is None else self.freeze_observers_iter
+        if calib < 0 or (norm != -1 and norm <= calib) or (obs != -1 and obs <= max(1, calib)):
+            raise ValueError("train.qat freeze updates must follow calibration, with at least one observed update before observers freeze. Use -1 for never.")
+        if -1 not in (norm, obs) and norm > obs:
+            raise ValueError("train.qat.freeze_norm_iter must be at or before freeze_observers_iter.")
+        return calib, norm, obs
+
+
+class TrainOptions(StrictStruct):
+    total_iter: Annotated[
+        int, Meta(description="The total number of iterations to train.")
+    ]
+    qat: QATOptions | None = None
+    loss_output_clamp: Annotated[
+        Literal["none", "restore", "hard"],
+        Meta(
+            description="Image SR training prediction for ordinary generator and GAN losses. Restore clamps to [0, 1] with inward gradients outside the interval. Hard clamps to [1/255, 1]."
+        ),
+    ] = "none"
+    gan_wavelet_start_iter: Annotated[
+        Annotated[int, Meta(ge=0)] | None,
+        Meta(
+            description="First candidate update using the sym19 luma detail bands for all image GAN discriminator passes. Omit or set null for ordinary discriminator inputs."
+        ),
+    ] = None
+    adaptive_d: Annotated[
+        bool,
+        Meta(
+            description="Whether the discriminator updates adaptively. That is, discriminator updates are paused whenever the generator falls behind the discriminator (whenever smoothed l_g_gan increases). Can mitigate GAN collapse by preventing the discriminator from overpowering the generator."
+        ),
+    ] = False
+    adaptive_d_ema_decay: float = 0.999
+    adaptive_d_threshold: float = 1.02
+    optim_g: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The optimizer to use for the generator model."),
+    ] = None
+    distillation: Annotated[
+        DistillationOptions | None,
+        Meta(
+            description="Frozen-teacher output and sparse block-feature distillation settings."
+        ),
+    ] = None
+    vosr_target: Annotated[
+        VosrTargetOptions | None,
+        Meta(
+            description="Replace the HR target with VOSR 2.0's restoration of each degraded LR (full distillation). Needs on-the-fly degradations; all losses and the discriminator then train against VOSR's output."
+        ),
+    ] = None
+    ema_decay: Annotated[
+        float,
+        Meta(
+            description="The decay factor to use for EMA (exponential moving average). Set to 0 to disable EMA."
+        ),
+    ] = 0
+    ema_mode: Annotated[
+        Literal["native", "neosr"],
+        Meta(description="Averaging policy for image restoration and supervised networks. NeoSR copies the first applied update, then averages parameters and copies buffers on each applied update."),
+    ] = "native"
+    ema_switch_iter: Annotated[
+        float,
+        Meta(
+            description="How often to switch EMA model to online model, in iterations. Set to 0 to disable."
+        ),
+    ] = 0
+    ema_update_after_step: int = 0  # no warmup
+    ema_power: Annotated[
+        float | None,
+        Meta(description="Power for EMA warm-up. Omission uses the historical power of 10 in native mode and fixed decay in NeoSR mode."),
+    ] = None
+    ema_foreach: Annotated[
+        bool,
+        Meta(
+            description="Use PyTorch foreach kernels for EMA updates handled by ema_pytorch (the first update, warm-up copies, ignored names). Regular EMA updates always run as one foreach update with identical results."
+        ),
+    ] = False
+    rollback_buffers_on_reject: Annotated[
+        bool,
+        Meta(description="Restore online G/D registered buffers when the still-image SR finite guard rejects an accumulation window. Requires single-device, non-QAT training."),
+    ] = False
+    grad_clip: Annotated[
+        bool | Literal["spike"],
+        Meta(
+            description="False disables clipping. True uses grad_clip_max_norm. In G/D restoration training, spike clips above three times each optimizer's moving average of applied, capped gradient norms."
+        ),
+    ] = False
+    grad_clip_max_norm: Annotated[
+        float, Meta(description="Max norm of gradients for gradient clipping.")
+    ] = 1.0
+    warmup_iter: Annotated[
+        int,
+        Meta(
+            description="Gradually ramp up learning rates until this iteration, to stabilize early training. Use -1 to disable."
+        ),
+    ] = -1
+    early_stopping: EarlyStoppingOptions | None = None
+    restart_scheduler: Annotated[
+        bool,
+        Meta(
+            description="When resuming, if restart_scheduler is true then the scheduler is recreated using the schedule in the training config. If restart_scheduler is false then scheduler is read from saved state and training config schedule is ignored."
+        ),
+    ] = False
+    scheduler: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Options for the optimizer scheduler. If there are multiple optimizers, both will use the same scheduler options."
+        ),
+    ] = None
+    schedulers: Annotated[
+        dict[str, dict[str, Any]] | None,
+        Meta(description="Per-optimizer LR schedules keyed by g, d or ae. Omitted optimizers keep their learning rate. Use this or the shared scheduler."),
+    ] = None
+    optim_include_params_g: Annotated[
+        list[str] | None,
+        Meta(
+            description="Optional regex patterns for generator parameter names to include in the optimizer. If set, only matching trainable parameters are optimized."
+        ),
+    ] = None
+    optim_exclude_params_g: Annotated[
+        list[str] | None,
+        Meta(
+            description="Optional regex patterns for generator parameter names to exclude from the optimizer after inclusion filtering."
+        ),
+    ] = None
+    optim_d: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The optimizer to use for the discriminator model."),
+    ] = None
+    optim_ae: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The optimizer to use for the autoencoder model."),
+    ] = None
+
+    # new losses format
+    losses: Annotated[
+        list[dict[str, Any]] | None,
+        Meta(description="The list of loss functions to optimize."),
+    ] = None
+
+    # old losses format
+    pixel_opt: dict[str, Any] | None = None
+    mssim_opt: dict[str, Any] | None = None
+    ms_ssim_l1_opt: dict[str, Any] | None = None
+    perceptual_opt: dict[str, Any] | None = None
+    contextual_opt: dict[str, Any] | None = None
+    dists_opt: dict[str, Any] | None = None
+    hr_inversion_opt: dict[str, Any] | None = None
+    dinov2_opt: dict[str, Any] | None = None
+    topiq_opt: dict[str, Any] | None = None
+    pd_opt: dict[str, Any] | None = None
+    fd_opt: dict[str, Any] | None = None
+    ldl_opt: dict[str, Any] | None = None
+    hsluv_opt: dict[str, Any] | None = None
+    gan_opt: dict[str, Any] | None = None
+    color_opt: dict[str, Any] | None = None
+    luma_opt: dict[str, Any] | None = None
+    avg_opt: dict[str, Any] | None = None
+    bicubic_opt: dict[str, Any] | None = None
+
+    use_moa: Annotated[
+        bool,
+        Meta(
+            description="Whether to enable mixture of augmentations, which augments the dataset on the fly to create more variety and help the model generalize."
+        ),
+    ] = False
+    moa_mode: Literal["native", "neosr"] = "native"
+    moa_multi_prob: Annotated[float, Meta(ge=0, le=1, description="NeoSR probability of drawing multiple augmentation slots.")] = 0.3
+    moa_antialias: Annotated[bool, Meta(description="Use antialiased NeoSR ResizeMix interpolation.")] = False
+    moa_augs: Annotated[
+        list[str],
+        Meta(
+            description="Candidate batch augmentations. Native mode selects one per batch."
+        ),
+    ] = field(default_factory=lambda: ["none", "mixup", "cutmix", "resizemix", "cutblur"])
+    moa_probs: Annotated[
+        list[float],
+        Meta(
+            description="Relative selection weight for each entry in moa_augs."
+        ),
+    ] = field(default_factory=lambda: [0.4, 0.084, 0.084, 0.084, 0.348])
+    moa_debug: Annotated[
+        bool,
+        Meta(
+            description="Save images before and after augment to debug/moa folder inside of the root training directory."
+        ),
+    ] = False
+    moa_debug_limit: Annotated[
+        int,
+        Meta(
+            description="The max number of iterations to save augmentation images for."
+        ),
+    ] = 100
+
+
+class ValOptions(StrictStruct):
+    val_enabled: Annotated[
+        bool,
+        Meta(
+            description="Whether to enable validations. If disabled, all validation settings below are ignored."
+        ),
+    ]
+    save_img: Annotated[
+        bool,
+        Meta(
+            description="Whether to save the validation images during validation, in the experiments/<name>/visualization folder."
+        ),
+    ]
+    save_best: Annotated[
+        str | None,
+        Meta(description="Save the inference weights when this validation metric strictly improves. Each validation dataset and training attempt keeps its own winner."),
+    ] = None
+    cache_metric_models_on_device: Annotated[
+        bool,
+        Meta(description="Keep learned validation metrics such as TOPIQ on the accelerator between images of the same dataset. This trades extra validation-time device memory for fewer weight loads. CPU validation always reuses these weights."),
+    ] = False
+    save_img_freq: Annotated[
+        Annotated[int, Meta(ge=1)] | None,
+        Meta(
+            description="Optional validation image saving interval, in absolute training iterations. Save on multiples of this interval or at save_img_iters. Validation must still run according to val_freq. Datasets can override this interval.",
+        ),
+    ] = None
+    save_img_iters: Annotated[
+        list[int] | None,
+        Meta(
+            description="Optional explicit training iterations at which validation images are saved, in addition to save_img_freq. This filters image saving only; validation must still run according to val_freq. Omit both filters to save at every validation when save_img is enabled."
+        ),
+    ] = None
+    tile_size: Annotated[
+        int,
+        Meta(
+            description="Tile size of input to use during validation, reduce VRAM usage but slower inference. 0 to disable."
+        ),
+    ] = 0
+    tile_overlap: Annotated[
+        int,
+        Meta(
+            description="Input pixels shared by adjacent windows in blend mode, or context discarded on each interior side in context mode."
+        ),
+    ] = 0
+    tile_mode: Annotated[
+        Literal["blend", "context"],
+        Meta(description="Blend combines overlapping predictions. Context stitches disjoint tile interiors on CPU; tile_size must exceed twice tile_overlap."),
+    ] = "blend"
+    training_precision: Annotated[
+        Literal["inherit", "float32"],
+        Meta(description="Still-image validation during training can use float32 with AMP disabled, or inherit the training AMP settings."),
+    ] = "inherit"
+    complementary_planes: Annotated[
+        Literal["target", "input_bicubic"],
+        Meta(description="For a Y-only or UV-only restoration model, supply the other RGB reconstruction planes from the ground truth or the bicubic-upscaled input. Input bicubic also supports prediction without a target."),
+    ] = "target"
+    val_freq: Annotated[
+        int | None, Meta(description="How often to run validations, in iterations.")
+    ] = None
+    suffix: Annotated[
+        str | None, Meta(description="Optional suffix to append to saved filenames.")
+    ] = None
+
+    metrics_enabled: Annotated[
+        bool, Meta(description="Whether to run metrics calculations during validation.")
+    ] = False
+    metrics: dict[str, Any] | None = None
+    pbar: bool = True
+
+    def should_save_img(
+        self, current_iter: int, dataset_opt: DatasetOptions | None = None
+    ) -> bool:
+        """Return whether this validation should write images.
+
+        Each dataset filter independently overrides its global counterpart when
+        set. Interval multiples and explicit iterations are combined with OR.
+        Negative iterations are standalone test runs, where an optional training
+        schedule should not suppress explicitly enabled image output.
+        """
+        if not self.save_img:
+            return False
+        if current_iter < 0:
+            return True
+
+        save_img_freq = self.save_img_freq
+        save_img_iters = self.save_img_iters
+        if dataset_opt is not None:
+            if dataset_opt.save_img_freq is not None:
+                save_img_freq = dataset_opt.save_img_freq
+            if dataset_opt.save_img_iters is not None:
+                save_img_iters = dataset_opt.save_img_iters
+
+        return (
+            (save_img_freq is None and save_img_iters is None)
+            or (save_img_freq is not None and current_iter % save_img_freq == 0)
+            or (save_img_iters is not None and current_iter in save_img_iters)
+        )
+
+    record_samples: Annotated[
+        bool,
+        Meta(description="Record restoration scores per image, or the actual members of a pooled supervised evaluation, so runs can be compared on matching data."),
+    ] = False
+
+
+class LogOptions(StrictStruct):
+    print_freq: Annotated[
+        int, Meta(ge=1,description="How often to print logs to the console, in iterations.")
+    ]
+    save_checkpoint_freq: Annotated[
+        int,
+        Meta(
+            ge=1, description="How often to save model checkpoints and training states, in iterations."
+        ),
+    ]
+    use_tb_logger: Annotated[
+        bool, Meta(description="Whether or not to enable TensorBoard logging.")
+    ]
+    save_checkpoint_format: Annotated[
+        Literal["safetensors", "pth"],
+        Meta(description="Format to save model checkpoints."),
+    ] = "safetensors"
+    save_checkpoint_keep: Annotated[
+        int,
+        Meta(
+            ge=0,
+            description="Keep this many complete regular checkpoint sets after a successful save. Zero disables pruning. Non-periodic manual saves, backups, and configured pretrained files are never pruned.",
+        ),
+    ] = 0
+    training_sample_steps: Annotated[
+        list[Annotated[int, Meta(ge=1)]] | None,
+        Meta(description="Record the first sample of the first microbatch supplied for these candidate updates. Saves observed tensors and previews on rank zero. Disabled by default."),
+    ] = None
+    wandb: WandbOptions | None = None
+    gan_health: Annotated[
+        bool,
+        Meta(description="On printed updates of eager single-device still-image GAN training, log final-microbatch SR-image gradient norms and discriminator decision statistics."),
+    ] = False
+
+
+class NeoSRSampleOptions(StrictStruct):
+    """Independent still-image gates within a synthetic training batch."""
+
+    noise_prob: Probability = 1.0
+    noise_prob2: Probability = 1.0
+    jpeg_prob: Probability = 1.0
+    jpeg_prob2: Probability = 1.0
+    clean_prob: Probability = 0.0
+    clean_mode: list[OTFResizeMode] = field(default_factory=lambda: ["aa_bicubic"])
+    clean_mode_prob: list[float] | None = None
+    sharpen_prob: Probability = 0.0
+    sharpen_sigma: tuple[float, float] = (0.5, 2.0)
+    sharpen_amount: tuple[float, float] = (0.3, 1.5)
+
+    def __post_init__(self) -> None:
+        from math import isfinite
+
+        if not self.clean_mode or any(m in ("nearest-exact", "lanczos") for m in self.clean_mode):
+            raise ValueError("clean_mode requires at least one NeoSR interpolation method.")
+        weights = self.clean_mode_prob
+        if weights is not None and (len(weights) != len(self.clean_mode)
+                or any(not isfinite(w) or w < 0 for w in weights) or not any(weights)):
+            raise ValueError("clean_mode_prob requires one finite nonnegative weight per method and a positive total.")
+        for name, low, high in (("sharpen_sigma", 0.1, 3.0), ("sharpen_amount", 0.0, 5.0)):
+            a, b = getattr(self, name)
+            if not low <= a <= b <= high:
+                raise ValueError(f"{name} requires increasing or equal bounds within [{low}, {high}].")
+
+
+class ReduxOptions(StrictStruct):
+    name: Annotated[
+        str,
+        Meta(
+            description="Name of the experiment. It should be a unique name if you want to run a new experiment. If you enable auto resume, the experiment with this name will be resumed instead of starting a new training run."
+        ),
+    ]
+    scale: Annotated[
+        int,
+        Meta(
+            description="Scale of the model. Most architectures support a scale of 1, 2, 3, 4, or 8. A scale of 1 can be used for restoration models that don't change the resolution of the input image. A scale of 2 means the width and height of the input image are doubled, so a 640x480 input will be upscaled to 1280x960."
+        ),
+    ]
+    num_gpu: Annotated[
+        Literal["auto"] | int,
+        Meta(
+            description="The number of GPUs to use for training, if using multiple GPUs."
+        ),
+    ]
+    path: PathOptions
+
+    task: Annotated[
+        str | None,
+        Meta(
+            description="Registered training task. Omit to select the trainer using the legacy network and degradation options."
+        ),
+    ] = None
+    task_options: Annotated[
+        dict[str, Any] | None,
+        Meta(description="Options defined and validated by the selected task."),
+    ] = None
+
+    input_pixel_format: Annotated[
+        PixelFormat, Meta(description="Input pixel format.")
+    ] = "rgb"
+    output_pixel_format: Annotated[
+        PixelFormat, Meta(description="Output pixel format.")
+    ] = "rgb"
+
+    network_g: Annotated[
+        dict[str, Any] | None, Meta(description="The options for the generator model.")
+    ] = None
+    network_g_teacher: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The options for the teacher generator model."),
+    ] = None
+    network_d: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The options for the discriminator model."),
+    ] = None
+    network_ae: Annotated[
+        dict[str, Any] | None,
+        Meta(description="The options for the autoencoder model."),
+    ] = None
+
+    manual_seed: Annotated[
+        int | None,
+        Meta(
+            description="Random seed for training, useful for removing randomness when testing the effect of different settings."
+        ),
+    ] = None
+    checkpoint_rng: Annotated[
+        bool,
+        Meta(description="Save and replay training random streams at an accepted update. Uses prepared data and one training process. Prepared image pairs, class folders, image masks and COCO boxes support position-seeded data workers. Other datasets use zero workers for replay."),
+    ] = False
+    deterministic: Annotated[
+        bool,
+        Meta(
+            description="Enables torch.use_deterministic_algorithms. Slows down training, only use when reproducibility is critical."
+        ),
+    ] = False
+    deterministic_warn_only: Annotated[
+        bool,
+        Meta(
+            description="When deterministic mode is enabled, warn instead of failing on an operation without a deterministic implementation."
+        ),
+    ] = True
+    dist: bool | None = None
+    launcher: str | None = None
+    rank: int | None = None
+    world_size: int | None = None
+    auto_resume: bool | None = None
+    watch: bool = False
+    start_iter: int = 0
+    is_train: bool | None = None
+    root_path: str | None = None
+    switch_iter_per_epoch: int = 1
+
+    use_amp: Annotated[
+        bool, Meta(description="Speed up training and reduce VRAM usage. NVIDIA only.")
+    ] = False
+    amp_bf16: Annotated[
+        bool,
+        Meta(
+            description="Use bf16 instead of fp16 for AMP, RTX 3000 series or newer only. Only recommended if fp16 doesn't work."
+        ),
+    ] = False
+    use_channels_last: Annotated[
+        bool,
+        Meta(
+            description="Enable channels last memory format while using AMP. Reduces VRAM and speeds up training for most architectures, but some architectures are slower with channels last."
+        ),
+    ] = True
+    fast_matmul: Annotated[
+        bool, Meta(description="Trade precision for performance.")
+    ] = False
+    use_compile: Annotated[
+        bool,
+        Meta(
+            description="Enable torch.compile for the generator model. The first matching graph still pays compilation and autotuning cost, while architectures with precompile-cache support persist compiled forward/backward artifacts for much faster matching resumes."
+        ),
+    ] = False
+    compile_discriminator: Annotated[
+        bool,
+        Meta(
+            description="Compile the GAN discriminator with compile_mode. This is independent of use_compile so the generator and discriminator can be controlled separately."
+        ),
+    ] = False
+    compile_ldl_ema: Annotated[
+        bool,
+        Meta(
+            description="Replay DUAL's LDL EMA forward with the non-fusing cudagraphs backend when use_compile is enabled on CUDA. Other architectures keep eager EMA execution. Preserves the EMA model and loss arithmetic. Disabled by max-autotune-no-cudagraphs; set false to retain the original eager EMA forward."
+        ),
+    ] = True
+    compile_mode: Annotated[
+        Literal[
+            "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"
+        ],
+        Meta(
+            description="Mode to use with torch.compile. See https://docs.pytorch.org/docs/stable/generated/torch.compile.html for more info."
+        ),
+    ] = "max-autotune-no-cudagraphs"
+    detect_anomaly: Annotated[
+        bool,
+        Meta(
+            description="Whether or not to enable anomaly detection, which can be useful for debugging NaNs that occur during training. Has a significant performance hit and should be disabled when not debugging."
+        ),
+    ] = False
+
+    clip_keep: Annotated[
+        Literal["none", "reverse", "both"],
+        Meta(
+            description="Video clip models (rdual): which per-frame graphs a training clip holds instead of recomputing. none recomputes every frame's graph for its backward (least memory; the mode supported under CUDA graphs), reverse holds the reverse sweep's graphs, both holds every graph (fastest, most memory)."
+        ),
+    ] = "none"
+
+    high_order_degradation: Annotated[
+        bool,
+        Meta(
+            description="Whether or not to enable OTF (on the fly) degradations, which generates LRs on the fly."
+        ),
+    ] = False
+    dvd_prob: Annotated[
+        float,
+        Meta(
+            ge=0,
+            le=1,
+            description="Probability per OTF batch of replacing the random degradation chain with the aligned x2 DVD response (centred Catmull-Rom halving plus symmetric 17x17 luma and chroma filters, float LQ, no other artifacts on selected batches), run on the GPU. Requires scale 2 and an image dataset; LQ is made from the source in its original orientation with real image context around the patch, then flipped and rotated with GT. A batch with an image too small for that context takes the ordinary chain (one warning per run). Not supported for clip training. Default 0 leaves existing behavior and RNG unchanged.",
+        ),
+    ] = 0.0
+    dvd_strength: Annotated[
+        float,
+        Meta(
+            ge=0,
+            le=1,
+            description="Strength of the DVD response on batches dvd_prob selects: 0 is the plain centred x2 Catmull-Rom halving, 1 the full response, values between mix the two.",
+        ),
+    ] = 1.0
+    high_order_degradations_debug: Annotated[
+        bool,
+        Meta(
+            description="Whether or not to enable debugging for OTF, which saves the OTF generated LR images so they can be inspected to view the effect of different OTF settings."
+        ),
+    ] = False
+    high_order_degradations_debug_limit: Annotated[
+        int,
+        Meta(
+            description="The maximum number of OTF images to save when debugging is enabled."
+        ),
+    ] = 100
+    dataroot_lq_prob: Annotated[
+        float,
+        Meta(description="Probability of using paired LR data instead of OTF LR data."),
+    ] = 0
+
+    otf_resize_policy: Annotated[
+        Literal["trainer", "neosr"],
+        Meta(description="OTF interpolation policy. NeoSR uses unfiltered PyTorch area, bilinear or bicubic and the sampled first-stage scale factor."),
+    ] = "trainer"
+    neosr_samples: Annotated[
+        NeoSRSampleOptions | None,
+        Meta(description="NeoSR still-image degradation controls. Select independent noise, JPEG, clean-resize and final sharpening probabilities per image within the training batch."),
+    ] = None
+
+    # ── Degradation Combo System ─────────────────────────────────────────────
+    otf_degradation_combos: Annotated[
+        list[list[str]] | None,
+        Meta(
+            description="List of degradation combinations. Each combo is a list of degradation names. "
+            "One combo is selected per iteration (mutually exclusive). "
+            "Valid names: ntsc, rainbow, ghosting, interlace, scanline, lowpass, overshoot, "
+            "shift, subsampling, dithering, compress, hf_noise, nlmeans. "
+            "If null, all degradations are eligible independently (default behavior)."
+        ),
+    ] = None
+    otf_degradation_combo_weights: Annotated[
+        list[float] | None,
+        Meta(
+            description="Relative weights for each combo in otf_degradation_combos. "
+            "Higher weight = more likely to be selected. Does not need to sum to 1. "
+            "Must match length of otf_degradation_combos. Null = equal weights."
+        ),
+    ] = None
+    otf_no_combo_weight: Annotated[
+        float,
+        Meta(
+            description="Probability (0-1) that no combo is selected and only global degradations apply. "
+            "0 = always pick a combo, 0.5 = 50% chance of no combo, 1.0 = never pick a combo."
+        ),
+    ] = 0.5
+    otf_global_degradations: Annotated[
+        list[str] | None,
+        Meta(
+            description="Degradations that are always eligible regardless of which combo is selected. "
+            "Valid names: same as otf_degradation_combos. "
+            "If null, no degradations are globally enabled (only combo degradations apply). "
+            "Upstream degradations (blur, resize, noise, jpeg) are always active."
+        ),
+    ] = None
+
+    otf_hf_noise_normalize: Annotated[
+        bool,
+        Meta(
+            description="Whether to zero-center and normalize the high-frequency noise field before scaling it. Disable to use the raw `(beta - 0.5) * 2 * alpha` style field."
+        ),
+    ] = True
+    otf_hf_noise_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of adding the same shared high-frequency noise field to both GT and LQ after the final OTF crop, between 0 and 1."
+        ),
+    ] = 0
+    otf_hf_noise_alpha_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Amplitude range for the high-frequency noise field, in the format `[min_alpha, max_alpha]`."
+        ),
+    ] = (0.01, 0.05)
+    otf_hf_noise_beta_shape_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Range used to sample the beta `a` shape parameter, and also the `b` shape parameter when no `otf_hf_noise_beta_offset_range` is set."
+        ),
+    ] = (2, 5)
+    otf_hf_noise_beta_offset_range: Annotated[
+        tuple[float, float] | None,
+        Meta(
+            description="Optional positive offset range used to derive `b = a + offset` instead of sampling `b` independently. Use `[1, 5]` to approximate the external hf_noise snippet more closely."
+        ),
+    ] = None
+    otf_hf_noise_gray_prob: Annotated[
+        float,
+        Meta(
+            description="Probability that the high-frequency noise field is grayscale and broadcast to all channels, between 0 and 1."
+        ),
+    ] = 1
+    otf_hf_noise_denoise_lq: Annotated[
+        bool,
+        Meta(
+            description="Whether to apply GPU Non-Local Means denoising to the LQ before the final resize. Removes existing noise so the model learns to produce clean output with HF texture from GT."
+        ),
+    ] = False
+    otf_hf_noise_denoise_strength: Annotated[
+        float,
+        Meta(
+            description="NLMeans filter strength (h parameter) on a 0-255 scale. Higher = more smoothing. Only used when otf_hf_noise_denoise_lq is true."
+        ),
+    ] = 30.0
+
+    # ── Dithering (applied after crop, before dequeue — last degradation) ──────
+    dithering_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying dithering to the LQ, between 0 and 1. Applied after crop as the last degradation step."
+        ),
+    ] = 0
+    dithering_types: Annotated[
+        list[Annotated[str, Meta(examples=["quantize", "floydsteinberg", "jarvisjudiceninke", "stucki", "atkinson", "burkes", "sierra", "tworowsierra", "sierralite", "order", "riemersma"])]],
+        Meta(
+            description="List of dithering algorithms to choose from. Options: quantize, floydsteinberg, jarvisjudiceninke, stucki, atkinson, burkes, sierra, tworowsierra, sierralite, order, riemersma."
+        ),
+    ] = field(default_factory=lambda: ["quantize"])
+    dithering_quantize_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="Range of quantization levels per channel for dithering, in the format `[min_levels, max_levels]`."
+        ),
+    ] = (2, 10)
+    dithering_map_size: Annotated[
+        list[int],
+        Meta(description="List of map sizes to choose from for ordered dithering."),
+    ] = field(default_factory=lambda: [4, 8])
+    dithering_history_range: Annotated[
+        tuple[int, int],
+        Meta(description="Range of history values for Riemersma dithering."),
+    ] = (10, 15)
+    dithering_ratio_range: Annotated[
+        tuple[float, float],
+        Meta(description="Range of decay ratio values for Riemersma dithering."),
+    ] = (0.1, 0.9)
+    dithering_palette_mode: Annotated[
+        float,
+        Meta(
+            description="Probability of using palette-based (indexed color) quantization instead of uniform per-channel. "
+            "0.0 = always uniform, 1.0 = always palette, 0.5 = 50/50 mix. "
+            "Palette mode extracts a content-adaptive palette via median cut, like GIF/PNG8. "
+            "When palette mode fires, dithering_palette_size controls the number of colors instead of dithering_quantize_range."
+        ),
+    ] = 0.0
+    dithering_palette_size: Annotated[
+        tuple[int, int],
+        Meta(
+            description="Range of palette colors (2-256) when palette mode is enabled. "
+            "E.g. [64, 256] for 64-256 color indexed dithering."
+        ),
+    ] = (8, 64)
+
+    # ── Channel Shift (applied before resize1) ────────────────────────────────
+    shift_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying channel shift to the LQ, between 0 and 1. Applied before the first resize."
+        ),
+    ] = 0
+    shift_types: Annotated[
+        list[Annotated[str, Meta(examples=["rgb", "yuv", "cmyk"])]],
+        Meta(
+            description="List of color spaces to apply shift in. One is randomly selected. Options: rgb, yuv, cmyk."
+        ),
+    ] = field(default_factory=lambda: ["rgb"])
+    shift_percent: Annotated[
+        bool,
+        Meta(
+            description="If true, shift amounts are percentages of the image width (x) and height (y). If false, shift amounts are in pixels."
+        ),
+    ] = False
+    shift_rgb_r: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for R channel: [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_rgb_g: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for G channel: [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_rgb_b: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for B channel: [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_yuv_y: Annotated[
+        list[list[int]],
+        Meta(
+            description="Ignored: the YUV shift moves chroma (U, V) only and keeps BT.2020 luma, so the LQ stays aligned with the HR. A non-zero range logs a warning."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_yuv_u: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for the U (Cb) chroma plane (YUV, BT.2020): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_yuv_v: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for the V (Cr) chroma plane (YUV, BT.2020): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_cmyk_c: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for C channel (CMYK): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_cmyk_m: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for M channel (CMYK): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_cmyk_y: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for Y channel (CMYK): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+    shift_cmyk_k: Annotated[
+        list[list[int]],
+        Meta(
+            description="Shift range for K channel (CMYK): [[x_min, x_max], [y_min, y_max]]."
+        ),
+    ] = field(default_factory=lambda: [[0, 0], [0, 0]])
+
+    # ── Chroma Subsampling (applied before resize1, after shift) ──────────────
+    subsampling_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying chroma subsampling to the LQ, between 0 and 1. Applied before the first resize."
+        ),
+    ] = 0
+    subsampling_down_algorithms: Annotated[
+        list[ChromaResizeFilter],
+        Meta(
+            description="List of downscaling algorithms to choose from for subsampling. Options: nearest, box, hermite, linear, lagrange, cubic_catrom, cubic_mitchell, cubic_bspline, lanczos, gauss."
+        ),
+    ] = field(default_factory=lambda: ["nearest"])
+    subsampling_up_algorithms: Annotated[
+        list[ChromaResizeFilter],
+        Meta(
+            description="List of upscaling algorithms to choose from for subsampling."
+        ),
+    ] = field(default_factory=lambda: ["nearest"])
+    subsampling_formats: Annotated[
+        list[Annotated[str, Meta(examples=["4:4:4", "4:2:2", "4:1:1", "4:2:0", "4:1:0", "4:4:0", "4:2:1", "4:1:2", "4:1:3"])]],
+        Meta(
+            description="List of chroma subsampling formats to choose from. Options: 4:4:4, 4:2:2, 4:1:1, 4:2:0, 4:1:0, 4:4:0, 4:2:1, 4:1:2, 4:1:3."
+        ),
+    ] = field(default_factory=lambda: ["4:4:4"])
+    subsampling_blur_range: Annotated[
+        tuple[float, float] | None,
+        Meta(
+            description="Optional Gaussian blur sigma range for chroma channels after subsampling, in the format `[min_sigma, max_sigma]`. Null to disable."
+        ),
+    ] = None
+    subsampling_ycbcr_type: Annotated[
+        list[Annotated[str, Meta(examples=["601", "709", "2020", "240"])]],
+        Meta(
+            description="List of YCbCr standards to choose from. Options: 601, 709, 2020, 240."
+        ),
+    ] = field(default_factory=lambda: ["601"])
+
+    # ── Ghosting (temporal ghost, before blur1) ──────────────────────────────
+    ghosting_prob: Annotated[
+        float,
+        Meta(description="Probability of applying temporal ghosting, between 0 and 1."),
+    ] = 0
+    ghosting_shift_x: Annotated[
+        list[int],
+        Meta(description="Horizontal ghost displacement range [min, max] pixels."),
+    ] = field(default_factory=lambda: [1, 8])
+    ghosting_shift_y: Annotated[
+        list[int],
+        Meta(description="Vertical ghost displacement range [min, max] pixels."),
+    ] = field(default_factory=lambda: [0, 2])
+    ghosting_opacity: Annotated[
+        list[float],
+        Meta(description="Ghost opacity range [min, max]."),
+    ] = field(default_factory=lambda: [0.05, 0.25])
+
+    # ── Interlace (combing artifact, before blur1) ───────────────────────────
+    interlace_prob: Annotated[
+        float,
+        Meta(description="Probability of applying interlace combing, between 0 and 1."),
+    ] = 0
+    interlace_field_shift: Annotated[
+        list[int],
+        Meta(description="Horizontal pixel shift range between fields [min, max]."),
+    ] = field(default_factory=lambda: [1, 5])
+    interlace_dominant_field: Annotated[
+        list[Annotated[str, Meta(examples=["top", "bottom"])]],
+        Meta(
+            description="Field dominance options. One is randomly selected. Options: top, bottom."
+        ),
+    ] = field(default_factory=lambda: ["top", "bottom"])
+
+    # ── Lowpass (Butterworth, after blur1 before shift) ──────────────────────
+    lowpass_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying Butterworth lowpass filter, between 0 and 1."
+        ),
+    ] = 0
+    lowpass_cutoff: Annotated[
+        list[float],
+        Meta(
+            description="Cutoff frequency range as fraction of Nyquist [min, max]. 1.0 = barely any filtering, 0.3 = heavy."
+        ),
+    ] = field(default_factory=lambda: [0.3, 0.8])
+    lowpass_order: Annotated[
+        list[int],
+        Meta(
+            description="Butterworth filter order range [min, max]. Higher = sharper rolloff = more ringing."
+        ),
+    ] = field(default_factory=lambda: [1, 5])
+    lowpass_detail_mask: Annotated[
+        bool,
+        Meta(
+            description="If true, protect edges/detail from lowpass using a detail mask computed from HQ."
+        ),
+    ] = False
+    lowpass_mask_lines_brz: Annotated[
+        float,
+        Meta(
+            description="Binarize threshold for the edge/lines component of the detail mask."
+        ),
+    ] = 0.08
+
+    # ── NTSC Composite (full simulation, before blur1) ───────────────────────
+    ntsc_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying NTSC composite simulation, between 0 and 1."
+        ),
+    ] = 0
+    ntsc_preset: Annotated[
+        list[Annotated[str, Meta(examples=["broadcast", "vhs_sp", "vhs_ep"])]],
+        Meta(
+            description="NTSC preset(s) to randomly select from. Options: broadcast, vhs_sp, vhs_ep."
+        ),
+    ] = field(default_factory=lambda: ["broadcast"])
+    ntsc_comb_mode: Annotated[
+        str,
+        Meta(
+            examples=["2sample", "1h"],
+            description="Comb filter mode for luma/chroma separation. Options: 2sample, 1h."
+        ),
+    ] = "2sample"
+    ntsc_enable_vhs: Annotated[
+        bool,
+        Meta(description="Enable VHS color-under + luma bandwidth limiting."),
+    ] = False
+    ntsc_noise: Annotated[
+        list[float],
+        Meta(description="Gaussian noise amplitude range [min, max] (0-0.3)."),
+    ] = field(default_factory=lambda: [0.03, 0.03])
+    ntsc_luma_noise: Annotated[
+        list[float],
+        Meta(description="Luminance-dependent noise range [min, max] (0-0.15)."),
+    ] = field(default_factory=lambda: [0.0, 0.0])
+    ntsc_ghost_amplitude: Annotated[
+        list[float],
+        Meta(description="Multipath ghost strength range [min, max] (0-0.5)."),
+    ] = field(default_factory=lambda: [0.0, 0.0])
+    ntsc_ghost_delay_us: Annotated[
+        list[float],
+        Meta(description="Ghost delay range in microseconds [min, max] (0.5-10)."),
+    ] = field(default_factory=lambda: [1.5, 1.5])
+    ntsc_ghost_phase: Annotated[
+        list[float],
+        Meta(description="Ghost phase range in degrees [min, max] (0-360)."),
+    ] = field(default_factory=lambda: [180.0, 180.0])
+    ntsc_jitter: Annotated[
+        list[float],
+        Meta(
+            description="Per-line timing jitter range in subcarrier cycles [min, max] (0-3)."
+        ),
+    ] = field(default_factory=lambda: [0.0, 0.0])
+    ntsc_edge_ringing: Annotated[
+        list[float],
+        Meta(description="Edge ringing (unsharp mask gain) range [min, max] (0-3)."),
+    ] = field(default_factory=lambda: [0.0, 0.0])
+    ntsc_vhs_luma_bw: Annotated[
+        list[float],
+        Meta(description="VHS luma bandwidth range in MHz [min, max] (1.5-4.2)."),
+    ] = field(default_factory=lambda: [4.2, 4.2])
+    ntsc_color_under_bw: Annotated[
+        list[float],
+        Meta(
+            description="VHS color-under bandwidth range in kHz [min, max] (200-600)."
+        ),
+    ] = field(default_factory=lambda: [500.0, 500.0])
+    ntsc_tape_trailing: Annotated[
+        list[float],
+        Meta(description="Tape trailing IIR strength range [min, max] (0-1)."),
+    ] = field(default_factory=lambda: [0.0, 0.0])
+    ntsc_intensity: Annotated[
+        list[float],
+        Meta(
+            description="NTSC effect blend intensity range [min, max] (0=none, 1=full)."
+        ),
+    ] = field(default_factory=lambda: [1.0, 1.0])
+
+    # ── Overshoot (edge ringing, after blur1 before shift) ───────────────────
+    overshoot_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying edge overshoot/undershoot, between 0 and 1."
+        ),
+    ] = 0
+    overshoot_amount: Annotated[
+        list[float],
+        Meta(
+            description="Sharpening strength range [min, max]. 0 = no effect, 2+ = aggressive."
+        ),
+    ] = field(default_factory=lambda: [0.5, 2.0])
+    overshoot_cutoff: Annotated[
+        list[float],
+        Meta(description="Butterworth cutoff range as fraction of Nyquist [min, max]."),
+    ] = field(default_factory=lambda: [0.2, 0.5])
+    overshoot_order: Annotated[
+        list[int],
+        Meta(description="Butterworth filter order range [min, max]."),
+    ] = field(default_factory=lambda: [1, 3])
+
+    # ── Rainbow (NTSC chroma dot crawl, before blur1) ────────────────────────
+    rainbow_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying composite rainbow artifact, between 0 and 1."
+        ),
+    ] = 0
+    rainbow_subcarrier_freq: Annotated[
+        list[float],
+        Meta(
+            description="Subcarrier frequency range in cycles/pixel [min, max] (0.15-0.35 typical)."
+        ),
+    ] = field(default_factory=lambda: [0.20, 0.30])
+    rainbow_chroma_bandwidth: Annotated[
+        list[float],
+        Meta(
+            description="Chroma demodulation bandwidth range in cycles/pixel [min, max]."
+        ),
+    ] = field(default_factory=lambda: [0.04, 0.12])
+    rainbow_intensity: Annotated[
+        list[float],
+        Meta(description="Rainbow effect intensity range [min, max] (0-1 blend)."),
+    ] = field(default_factory=lambda: [0.3, 1.0])
+    rainbow_phase_alternation: Annotated[
+        bool,
+        Meta(
+            description="If true, subcarrier phase alternates per scanline (NTSC behavior)."
+        ),
+    ] = True
+
+    # ── Scanline (CRT darkening, before blur1) ──────────────────────────────
+    scanline_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying CRT scanline darkening, between 0 and 1."
+        ),
+    ] = 0
+    scanline_strength: Annotated[
+        list[float],
+        Meta(
+            description="Scanline darkening strength range [min, max] (0 = none, 1 = full black)."
+        ),
+    ] = field(default_factory=lambda: [0.1, 0.5])
+    scanline_even_lines: Annotated[
+        bool,
+        Meta(description="If true, darken even rows. If false, darken odd rows."),
+    ] = True
+
+    lq_usm: Annotated[
+        bool, Meta(description="Whether to enable unsharp mask on the LQ image.")
+    ] = False
+    lq_usm_radius_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="For the unsharp mask of the LQ image, use a radius randomly selected from this range."
+        ),
+    ] = (1, 25)
+
+    blur_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying the first blur to the LQ, between 0 and 1."
+        ),
+    ] = 0
+    thicklines_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying custom ThickLines filter to the LQ, between 0 and 1."
+        ),
+    ] = 0
+    resize_prob: Annotated[
+        list[float],
+        Meta(
+            description="List of 3 probabilities for the first resize which should add up to 1: the probability of upscaling, the probability of downscaling, and the probability of no resize."
+        ),
+    ] = field(default_factory=lambda: [0.2, 0.7, 0.1])
+    resize_mode_list: Annotated[
+        list[OTFResizeMode],
+        Meta(description="List of possible resize modes to use for the first resize."),
+    ] = field(
+        default_factory=lambda: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+    )
+    resize_mode_prob: Annotated[
+        list[float],
+        Meta(
+            description="List of probabilities for the first resize of selecting the corresponding resize mode in `resize_mode_list`."
+        ),
+    ] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25])
+    resize_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="The resize range for the first resize, in the format `[min_resize, max_resize]`."
+        ),
+    ] = (0.4, 1.5)
+    gaussian_noise_prob: Annotated[
+        float,
+        Meta(
+            description="The probability of applying the first gaussian noise to the LQ, between 0 and 1."
+        ),
+    ] = 0
+    noise_range: tuple[float, float] = (0, 0)
+    poisson_scale_range: tuple[float, float] = (0, 0)
+    gray_noise_prob: float = 0
+    compress_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying compression in stage 1, between 0 and 1."
+        ),
+    ] = 1
+    compress_algorithms: Annotated[
+        list[CompressionAlgorithm],
+        Meta(
+            description="List of compression algorithms to choose from in stage 1. One is randomly selected per iteration. Options: jpeg, webp, h264, hevc, mpeg2, mpeg4, vp9."
+        ),
+    ] = field(default_factory=lambda: ["jpeg"])
+    compress_algorithm_probs: Annotated[
+        list[float],
+        Meta(
+            description="Probability weights for each algorithm in compress_algorithms. Must match length of compress_algorithms."
+        ),
+    ] = field(default_factory=lambda: [1.0])
+    compress_jpeg_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for JPEG compression in stage 1 (0-100)."),
+    ] = (75, 95)
+    compress_webp_range: Annotated[
+        tuple[int, int],
+        Meta(description="Quality range for WebP compression in stage 1 (1-100)."),
+    ] = (50, 95)
+    compress_h264_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="CRF range for H.264 compression in stage 1 (0-51, lower = better)."
+        ),
+    ] = (20, 40)
+    compress_hevc_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="CRF range for HEVC compression in stage 1 (0-51, lower = better)."
+        ),
+    ] = (20, 40)
+    compress_mpeg2_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="qscale range for MPEG-2 compression in stage 1 (1-31, lower = better)."
+        ),
+    ] = (2, 20)
+    compress_mpeg4_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="qscale range for MPEG-4 compression in stage 1 (1-31, lower = better)."
+        ),
+    ] = (2, 20)
+    compress_vp9_range: Annotated[
+        tuple[int, int],
+        Meta(
+            description="CRF range for VP9 compression in stage 1 (0-63, lower = better)."
+        ),
+    ] = (20, 50)
+    compress_video_sampling: Annotated[
+        list[VideoSampling],
+        Meta(
+            description="List of video chroma subsampling options for video codecs in stage 1. Options: 444, 422, 420."
+        ),
+    ] = field(default_factory=lambda: ["444", "422", "420"])
+    compress_video_sampling_weights: Annotated[
+        list[float] | None,
+        Meta(
+            description="Relative weights for each option in compress_video_sampling. "
+            "Must match length. Null = equal weights (uniform random)."
+        ),
+    ] = None
+    compress_video_approx_prob: Annotated[
+        float,
+        Meta(
+            description="Probability, between 0 and 1, that a video codec call (h264, hevc, mpeg2, mpeg4, vp9) in either stage runs the GPU approximation of the codec instead of the real encode and decode, for the calls the approximation covers (CUDA float32 RGB). 0 keeps every call genuine. The decision draws from its own generator, seeded from manual_seed, so the other random draws of a run do not depend on this option; like the project RNG it is not saved and restarts from its seed when a run is resumed."
+        ),
+    ] = 0.5
+    compress_webp_approx: Annotated[
+        bool,
+        Meta(
+            description="Whether WebP calls in either stage run the GPU approximation of WebP instead of the real encode and decode, for the calls the approximation covers (CUDA float32 RGB)."
+        ),
+    ] = False
+
+    blur_prob2: Annotated[
+        float,
+        Meta(
+            description="Probability of applying the second blur to the LQ, between 0 and 1."
+        ),
+    ] = 0
+    resize_prob2: Annotated[
+        list[float],
+        Meta(
+            description="List of 3 probabilities for the second resize which should add up to 1: the probability of upscaling, the probability of downscaling, and the probability of no resize."
+        ),
+    ] = field(default_factory=lambda: [0.3, 0.4, 0.3])
+    resize_mode_list2: Annotated[
+        list[OTFResizeMode],
+        Meta(description="List of possible resize modes to use for the second resize."),
+    ] = field(
+        default_factory=lambda: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+    )
+    resize_mode_prob2: Annotated[
+        list[float],
+        Meta(
+            description="List of probabilities for the second resize of selecting the corresponding resize mode in `resize_mode_list2`."
+        ),
+    ] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25])
+    resize_range2: Annotated[
+        tuple[float, float],
+        Meta(
+            description="The resize range for the second resize, in the format `[min_resize, max_resize]`."
+        ),
+    ] = (0.6, 1.2)
+    gaussian_noise_prob2: Annotated[
+        float,
+        Meta(
+            description="The probability of applying the second gaussian noise to the LQ, between 0 and 1."
+        ),
+    ] = 0
+    noise_range2: tuple[float, float] = (0, 0)
+    poisson_scale_range2: tuple[float, float] = (0, 0)
+    gray_noise_prob2: float = 0
+    compress_prob2: Annotated[
+        float,
+        Meta(
+            description="Probability of applying compression in stage 2, between 0 and 1."
+        ),
+    ] = 1
+    compress_algorithms2: Annotated[
+        list[CompressionAlgorithm],
+        Meta(
+            description="List of compression algorithms to choose from in stage 2. Same options as compress_algorithms."
+        ),
+    ] = field(default_factory=lambda: ["jpeg"])
+    compress_algorithm_probs2: Annotated[
+        list[float],
+        Meta(
+            description="Probability weights for each algorithm in compress_algorithms2."
+        ),
+    ] = field(default_factory=lambda: [1.0])
+    compress_jpeg_range2: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for JPEG compression in stage 2 (0-100)."),
+    ] = (75, 95)
+    compress_webp_range2: Annotated[
+        tuple[int, int],
+        Meta(description="Quality range for WebP compression in stage 2 (1-100)."),
+    ] = (50, 95)
+    compress_h264_range2: Annotated[
+        tuple[int, int],
+        Meta(description="CRF range for H.264 compression in stage 2."),
+    ] = (20, 40)
+    compress_hevc_range2: Annotated[
+        tuple[int, int],
+        Meta(description="CRF range for HEVC compression in stage 2."),
+    ] = (20, 40)
+    compress_mpeg2_range2: Annotated[
+        tuple[int, int],
+        Meta(description="qscale range for MPEG-2 compression in stage 2."),
+    ] = (2, 20)
+    compress_mpeg4_range2: Annotated[
+        tuple[int, int],
+        Meta(description="qscale range for MPEG-4 compression in stage 2."),
+    ] = (2, 20)
+    compress_vp9_range2: Annotated[
+        tuple[int, int],
+        Meta(description="CRF range for VP9 compression in stage 2."),
+    ] = (20, 50)
+    compress_video_sampling2: Annotated[
+        list[VideoSampling],
+        Meta(
+            description="List of video chroma subsampling options for video codecs in stage 2."
+        ),
+    ] = field(default_factory=lambda: ["444", "422", "420"])
+    compress_video_sampling_weights2: Annotated[
+        list[float] | None,
+        Meta(
+            description="Relative weights for each option in compress_video_sampling2. "
+            "Must match length. Null = equal weights (uniform random)."
+        ),
+    ] = None
+
+    resize_mode_list3: Annotated[
+        list[OTFResizeMode],
+        Meta(description="List of possible resize modes to use for the final resize."),
+    ] = field(
+        default_factory=lambda: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+    )
+    resize_mode_prob3: Annotated[
+        list[float],
+        Meta(
+            description="List of probabilities for the final resize of selecting the corresponding resize mode in `resize_mode_list3`."
+        ),
+    ] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25])
+
+    queue_size: Annotated[
+        int,
+        Meta(
+            description="Queue size for OTF processing, must be a multiple of `batch_size_per_gpu`."
+        ),
+    ] = 120
+    queue_lq_uint8: Annotated[
+        bool,
+        Meta(description=(
+            "Store eligible FP32 still RealESRGAN replay LQ as byte codes. "
+            "Exact reconstruction is checked on the producer device. DVD, post-crop dither "
+            "or an unrepresentable batch uses full precision for the rest of the pool. "
+            "Saves 3 bytes per LQ element less a 1024-byte decode table while compact. GT keeps its dtype."
+        )),
+    ] = False
+    datasets: dict[str, DatasetOptions] = {}
+    train: TrainOptions | None = None
+    val: ValOptions | None = None
+    logger: LogOptions | None = None
+    dist_params: dict[str, Any] | None = field(
+        default_factory=lambda: {"backend": "nccl", "port": 29500}
+    )
+    onnx: OnnxOptions | None = None
+
+    find_unused_parameters: bool = False
+    contents: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.train is not None and self.train.rollback_buffers_on_reject:
+            from trainner_config.objectives import validate_buffer_rollback
+
+            validate_buffer_rollback(self)
+
+
+def initial_g_transfer(opt: ReduxOptions) -> GeneratorTransfer | None:
+    transfer = opt.path.transfer_g
+    if transfer is None or not opt.is_train or opt.path.resume_state:
+        return None
+    if not opt.network_g or not opt.path.pretrain_network_g:
+        raise ValueError(
+            "path.transfer_g requires network_g and path.pretrain_network_g."
+        )
+    if opt.task not in (
+        None,
+        "image_restoration",
+        "recurrent_restoration",
+        "image_classification",
+        "semantic_segmentation",
+        "object_detection",
+    ):
+        raise ValueError(
+            f"Initial generator transfer is unavailable for task {opt.task!r}."
+        )
+    if len(set(transfer.exclude)) != len(transfer.exclude) or any(
+        not k.strip() for k in transfer.exclude
+    ):
+        raise ValueError(
+            "path.transfer_g.exclude requires distinct, non-empty destination keys."
+        )
+    return transfer

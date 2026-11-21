@@ -1,0 +1,693 @@
+/* YAML pane (editor, changes, compare, issues) and the recipe chooser.
+   js/recipe/source-pane.js, library.js, yaml-highlight.js, diff.js */
+
+/* ───────── pane and tabs ───────── */
+
+.src {
+  /* one line height shared by the textarea, the highlighted <pre> and the gutter: they must match exactly */
+  --src-lh: calc(var(--text-sm) * 1.6);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.src__panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.src__toolbar,
+.src__head,
+.src__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  min-height: 36px;
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.src__status {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.src__status--err {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.src__headtext {
+  flex: 1 1 160px;
+}
+
+.src__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.src__subhead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  flex: none;
+}
+
+.src__pad {
+  padding: var(--s3);
+}
+
+.src__none {
+  padding: var(--s4);
+  color: var(--ink-2);
+}
+
+/* ───────── editor: transparent textarea over a highlighted <pre> ───────── */
+
+.src__editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  background: var(--raised);
+}
+
+.src__gutter {
+  position: relative;
+  overflow: hidden;
+  background: var(--panel);
+  border-right: 1px solid var(--rule);
+  user-select: none;
+}
+
+.src__lines {
+  padding: var(--s2) 0;
+  min-width: 5ch;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--src-lh);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  text-align: right;
+  will-change: transform;
+}
+
+.src__ln {
+  height: var(--src-lh);
+  padding: 0 var(--s2) 0 var(--s2);
+  border-left: 3px solid transparent;
+}
+
+.src__ln--err {
+  border-left-color: var(--err);
+  background: var(--err-wash);
+  color: var(--err);
+  font-weight: 600;
+  cursor: help;
+}
+
+.src__ln--warn {
+  border-left-color: var(--warn);
+  background: var(--warn-wash);
+  color: var(--warn);
+  font-weight: 600;
+  cursor: help;
+}
+
+.src__ln--flash {
+  background: var(--selection);
+  color: var(--ink);
+}
+
+.src__code {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* identical metrics on both layers: font, size, line height, padding, tab size, no ligatures */
+.src__pre,
+.src__input {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: var(--src-lh);
+  letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-variant-numeric: normal;
+  font-stretch: normal;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.src__pre {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 100%;
+  color: var(--ink);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.src__pre--wrap {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.src__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+}
+
+.src__input--wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.src__input:focus-visible {
+  outline-offset: -2px;
+}
+
+.src__input::selection {
+  background: color-mix(in srgb, var(--selection) 70%, transparent);
+  color: transparent;
+}
+
+/* ───────── highlight classes (editor and read-only blocks) ───────── */
+
+.yaml__pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: pre;
+  tab-size: 2;
+}
+
+.yaml__line {
+  display: block;
+  min-height: 1lh;
+}
+
+.yaml__line--flash {
+  background: var(--selection);
+}
+
+.yaml__comment {
+  color: var(--ink-3);
+}
+
+.yaml__key {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.yaml__str {
+  color: var(--syn-string);
+}
+
+.yaml__num {
+  color: var(--syn-number);
+}
+
+.yaml__bool,
+.yaml__null {
+  color: var(--syn-const);
+}
+
+.yaml__tag,
+.yaml__anchor,
+.yaml__punct {
+  color: var(--ink-2);
+}
+
+/* ───────── line diff ───────── */
+
+.diff {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.diff__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 5ch 5ch 2ch minmax(0, 1fr);
+}
+
+.diff__row--add {
+  background: var(--ok-wash);
+}
+
+.diff__row--del {
+  background: var(--err-wash);
+}
+
+.diff__num {
+  padding-right: var(--s2);
+  text-align: right;
+  color: var(--ink-3);
+  user-select: none;
+}
+
+.diff__sign {
+  font-weight: 600;
+  text-align: center;
+  user-select: none;
+}
+
+.diff__row--add > .diff__sign {
+  color: var(--ok);
+}
+
+.diff__row--del > .diff__sign {
+  color: var(--err);
+}
+
+.diff__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-right: var(--s3);
+}
+
+.diff__hunk {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  background: var(--sunk);
+  border-block: 1px solid var(--rule);
+  font-family: var(--font-ui);
+}
+
+.diff__range {
+  margin-right: auto;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.diff__gap {
+  display: block;
+  width: 100%;
+  padding: var(--s1) var(--s3);
+  border: 0;
+  border-block: 1px dashed var(--rule);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.diff__gap:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.diff__counts {
+  display: inline-flex;
+  gap: var(--s2);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff__added {
+  color: var(--ok);
+}
+
+.diff__removed {
+  color: var(--err);
+}
+
+/* ───────── compare table ───────── */
+
+.src__search {
+  flex: 1 1 160px;
+  max-width: 300px;
+  height: 24px;
+}
+
+.src__table {
+  font-size: var(--text-sm);
+  table-layout: fixed;
+}
+
+/* Option names are long and must stay readable; values get the rest and wrap. */
+.src__table th:nth-child(1),
+.src__table td:nth-child(1) {
+  width: 38%;
+}
+
+.src__table th:nth-child(4),
+.src__table td:nth-child(4) {
+  width: 168px;
+}
+
+.src__path {
+  overflow-wrap: break-word;
+}
+
+/* element + class (same weight as base's `.table th`, later file wins) */
+th.src__colhead {
+  position: static;
+}
+
+th.src__group {
+  top: 0;
+  z-index: 2;
+  background: var(--sunk);
+  color: var(--ink);
+  font-family: var(--font-mono);
+}
+
+.src__path,
+.src__val {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.src__row--same {
+  color: var(--ink-2);
+}
+
+.src__act {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.src__state {
+  margin-right: var(--s2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* ───────── recipe chooser ───────── */
+
+.lib {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+}
+
+.lib--full {
+  height: 100%;
+}
+
+.lib--dialog {
+  height: min(680px, 78vh);
+}
+
+.lib__intro {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s4) var(--s5) var(--s3);
+  background: var(--raised);
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+}
+
+.lib__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+}
+
+.lib__col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--rule);
+}
+
+.lib__controls {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+}
+
+.lib__filters {
+  display: grid;
+  gap: var(--s2);
+}
+
+.lib__tasks {
+  flex-wrap: wrap;
+}
+
+.lib__count {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  min-height: 1lh;
+}
+
+.lib__listhost {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.lib__grouphead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  background: var(--sunk);
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.lib__groupcount {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.lib__item {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px var(--s3);
+  border-left: 3px solid transparent;
+  cursor: pointer;
+}
+
+.lib__item:hover {
+  background: var(--hover);
+}
+
+.lib__item[aria-selected="true"] {
+  background: var(--selection);
+  border-left-color: var(--ink);
+}
+
+.lib__item:focus-visible {
+  outline-offset: -2px;
+}
+
+.lib__name {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* Architecture, scale and task, straight from the list */
+.lib__meta {
+  display: flex;
+  flex: none;
+  gap: var(--s2);
+  margin-left: auto;
+  padding-left: var(--s2);
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.lib__item--broken {
+  cursor: default;
+  color: var(--ink-3);
+}
+
+.lib__error {
+  color: var(--err);
+  white-space: normal;
+}
+
+.lib__more {
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.lib__family {
+  width: 100%;
+}
+
+/* neosr import */
+.lib__importbtn {
+  justify-self: start;
+}
+
+/* The two ways to bring a recipe in from outside (a neosr config, a run file) share one line. */
+.lib__imports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+}
+
+.lib__file {
+  font-size: var(--text-sm);
+}
+
+.lib__review {
+  display: grid;
+  gap: 2px var(--s3);
+  margin: 0;
+}
+
+.lib__reviewkey {
+  overflow-wrap: anywhere;
+}
+
+.lib__reviewwhy {
+  margin: 0 0 var(--s2);
+  color: var(--ink-2);
+}
+
+.lib__notes {
+  margin: 0;
+  padding-left: var(--s4);
+}
+
+.lib__importresult:empty {
+  display: none;
+}
+
+.lib__none {
+  padding: var(--s4);
+  color: var(--ink-2);
+}
+
+.lib__pad {
+  padding: var(--s3);
+}
+
+.lib__paste {
+  min-height: 280px;
+  white-space: pre;
+}
+
+.lib__inspect {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: var(--s3);
+  align-content: start;
+  padding: var(--s4) var(--s5);
+}
+
+.lib__head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.lib__title {
+  flex: 1 1 auto;
+  font-size: var(--text-xl);
+  font-stretch: var(--narrow);
+}
+
+.lib__path {
+  font-size: var(--text-xs);
+}
+
+.lib__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+}
+
+.lib__subtitle {
+  margin-top: var(--s2);
+  font-size: var(--text-md);
+}
+
+.lib__kv {
+  font-size: var(--text-sm);
+  white-space: pre-line;
+}
+
+.lib__losses {
+  display: grid;
+  gap: 2px;
+}
+
+.lib__details {
+  border-left: 3px solid var(--rule-strong);
+  padding-left: var(--s2);
+}
+
+.lib__yamlhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.lib__yaml {
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+@media (max-width: 860px) {
+  .lib__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 45%) minmax(0, 1fr);
+  }
+
+  .lib__col {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .lib__inspect {
+    padding: var(--s3);
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "trainner-gui-ui",
+  "private": true,
+  "type": "module",
+  "description": "Static frontend for traiNNer GUI. No build step and no dependencies: serve this folder as it is, on the same origin as /api."
+}

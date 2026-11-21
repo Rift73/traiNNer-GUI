@@ -1,0 +1,59 @@
+# Copy to options/train/ and point each split at a directory of images and a
+# COCO JSON file with images, categories, and annotations arrays.
+# image.file_name is relative to dataroot_lq and width/height match the file.
+# annotation.bbox is [x, y, width, height] in pixels from the top left.
+# A box crossing the image edge is clipped. Images may have no annotations.
+# iscrowd: 1 or ignore: 1 excludes a box from training and regular AP50 matching.
+# categories order maps COCO IDs to foreground labels 1, 2, ... . 0 is background.
+# The detector resizes the whole image and boxes together. No crop sizes are used.
+name: object_detection_fasterrcnn_mobilenet320
+task: object_detection
+task_options:
+  categories:
+    - {id: 7, name: vehicle}
+    - {id: 12, name: person}
+
+scale: 1
+num_gpu: 0
+network_g:
+  type: fasterrcnn_mobilenet_v3_large_320_fpn
+  num_classes: 3  # Foreground classes plus background. Both sets of weights start from scratch.
+path: {}
+
+datasets:
+  train:
+    name: detection train
+    type: cocodetectiondataset
+    dataroot_lq: datasets/detection/train/images
+    annotation_file: datasets/detection/train/annotations.json
+    batch_size_per_gpu: 2
+    num_worker_per_gpu: 0
+    persistent_workers: false
+    prefetch_factor: null
+    pin_memory: false
+    dataset_enlarge_ratio: 1
+    use_hflip: true
+    use_rot: false
+  val:
+    name: detection val
+    type: cocodetectiondataset
+    dataroot_lq: datasets/detection/val/images
+    annotation_file: datasets/detection/val/annotations.json
+    pin_memory: false
+
+train:
+  total_iter: 1000
+  optim_g:
+    type: AdamW
+    lr: 0.0003
+
+val:
+  val_enabled: true
+  metrics_enabled: true  # AP50 and recall50 over retained detections at IoU >= 0.50.
+  save_img: false
+  val_freq: 100
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: 100
+  use_tb_logger: true

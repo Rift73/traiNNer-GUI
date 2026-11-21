@@ -1,0 +1,260 @@
+/* Network parameters result: js/runs/parameters.js (analysis job page).
+   Tokens only; selectors one class deep. */
+
+.parameters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.parameters__lead {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.parameters__text {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.parameters__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.parameters__muted {
+  color: var(--ink-3);
+}
+
+.parameters__facts {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A remark after a value: what buffers are. */
+.parameters__aside {
+  margin-left: var(--s2);
+  color: var(--ink-2);
+}
+
+.parameters__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* The file the weights are copied from: its name, the whole path in the title. */
+.parameters__source {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+/* The three counts of the transfer, one per line. */
+.parameters__counts {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "Skipped tensors": read from the receipt when opened. */
+.parameters__names {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.parameters__names-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.parameters__names-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+.parameters__names-box {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 32vh;
+  overflow: auto;
+  padding: var(--s2) var(--s3);
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.parameters__skipped {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.parameters__key {
+  font-family: var(--font-mono);
+}
+
+/* The line above the table with "Show all", then the filter field. */
+.parameters__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.parameters__filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.parameters__filter-input {
+  width: 32ch;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.parameters__load {
+  min-width: 0;
+}
+
+.parameters__load:empty {
+  display: none;
+}
+
+/* The table scrolls inside its own box, both ways. */
+.parameters__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.parameters__table {
+  width: auto;
+  min-width: min(100%, 60ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.parameters__name {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  white-space: nowrap;
+}
+
+.parameters__shape {
+  white-space: nowrap;
+}
+
+.parameters__copy {
+  white-space: nowrap;
+}
+
+/* One file of the job: its name and download, what it is, where it is. */
+.parameters__file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.parameters__file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s4);
+}
+
+.parameters__file-name {
+  font-weight: 600;
+}
+
+.parameters__file-facts {
+  font-size: var(--text-sm);
+}
+
+/* Narrow window: the label goes above its value, so a long path keeps the whole width. */
+@media (max-width: 760px) {
+  .parameters__file-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.parameters__download {
+  text-underline-offset: 2px;
+}
+
+.parameters__path-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.parameters__path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.parameters__others {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.parameters__raw {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.parameters__raw-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.parameters__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}

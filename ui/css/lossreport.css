@@ -1,0 +1,137 @@
+/* Loss report result: the gradient of each generator loss term, measured without changing a weight.
+   js/runs/lossreport.js. Sits inside the analysis job result (analysis.css). Tokens only; selectors one
+   class deep. */
+
+.lossreport {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.lossreport__lead {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.lossreport__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.lossreport__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* The answer to "Do the terms add up?" when they do, or when it could not be told. */
+.lossreport__verdict {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.lossreport__muted {
+  color: var(--ink-3);
+}
+
+.lossreport__facts {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A weights file: its name, with the whole path in the title. */
+.lossreport__file {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.lossreport__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.lossreport__table {
+  width: auto;
+  min-width: min(100%, 36ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.lossreport__term {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  white-space: nowrap;
+}
+
+/* "Not connected", across the three measured columns. */
+.lossreport__off {
+  color: var(--ink-3);
+}
+
+.lossreport__share {
+  min-width: 12ch;
+}
+
+/* The share as a thin bar under its percentage; decorative. */
+.lossreport__track {
+  display: block;
+  height: 3px;
+  margin-top: 3px;
+  background: var(--sunk);
+}
+
+.lossreport__bar {
+  display: block;
+  height: 100%;
+  background: var(--ink-2);
+}
+
+.lossreport__batches {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.lossreport__batches-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.lossreport__raw {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.lossreport__raw-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.lossreport__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+@media (forced-colors: active) {
+  .lossreport__bar {
+    background: CanvasText;
+  }
+}

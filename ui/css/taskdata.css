@@ -1,0 +1,243 @@
+/* Data audit result (js/runs/taskdata.js): per dataset, what was counted in full apart from what was
+   checked by opening files. Neutral chrome; colour only through badges and notices. */
+
+.taskdata {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s4);
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.taskdata__summary {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.taskdata__verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--text-md);
+}
+
+.taskdata__line {
+  margin: 0;
+  max-width: 80ch;
+}
+
+.taskdata__quiet {
+  margin: 0;
+  max-width: 80ch;
+  color: var(--ink-3);
+}
+
+.taskdata__coverage {
+  margin: 0;
+  max-width: 80ch;
+  font-weight: 600;
+}
+
+/* one dataset: a rule above, no card */
+.taskdata__set {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule-strong);
+  min-width: 0;
+}
+
+.taskdata__sethead {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.taskdata__settitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: var(--text-md);
+}
+
+.taskdata__key {
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.taskdata__setname {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.taskdata__sources {
+  font-size: var(--text-xs);
+}
+
+.taskdata__path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.taskdata__problems {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.taskdata__problemcount {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin: 0;
+  font-weight: 600;
+}
+
+/* a long list of problems scrolls in its own box */
+.taskdata__issues {
+  max-height: 320px;
+  overflow: auto;
+  border-top: 1px solid var(--rule);
+}
+
+/* "Counted in full" and "Checked by opening files": labelled groups, set apart by a left rule */
+.taskdata__group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  padding-left: var(--s3);
+  border-left: 3px solid var(--rule);
+  min-width: 0;
+}
+
+.taskdata__grouptitle {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.taskdata__subtitle {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.taskdata__figures {
+  font-stretch: var(--narrow);
+  gap: 2px var(--s3);
+}
+
+/* wide tables scroll sideways inside their own box, never widening the screen */
+.taskdata__tablewrap {
+  max-width: 100%;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+}
+
+.taskdata__table {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+}
+
+.taskdata__caption {
+  padding: var(--s1) var(--s3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.taskdata__name {
+  max-width: 36ch;
+  overflow-wrap: anywhere;
+}
+
+.taskdata__share {
+  white-space: nowrap;
+}
+
+.taskdata__bar {
+  display: inline-block;
+  width: 64px;
+  height: 6px;
+  margin-right: var(--s2);
+  vertical-align: middle;
+  background: var(--sunk);
+}
+
+.taskdata__barfill {
+  display: block;
+  height: 100%;
+  background: var(--ink-3);
+}
+
+.taskdata__pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.taskdata__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.taskdata__examples {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.taskdata__samples {
+  display: grid;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.taskdata__sample {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--s2);
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--rule);
+  min-width: 0;
+}
+
+/* a small preview on the neutral stage; its box is reserved so rows do not jump when it arrives */
+.taskdata__thumb {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  background: var(--stage);
+}
+
+.taskdata__thumbimg {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.taskdata__samplename {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.taskdata__samplefacts {
+  color: var(--ink-3);
+  font-stretch: var(--narrow);
+}
+

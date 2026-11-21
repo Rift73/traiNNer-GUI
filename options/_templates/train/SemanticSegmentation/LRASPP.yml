@@ -1,0 +1,58 @@
+# Copy to options/train/ and edit the dataset paths and class names before launch.
+# Example layout. Each RGB file has an integer PNG mask with the same relative stem.
+#   datasets/segmentation/train/images/scene1.jpg
+#   datasets/segmentation/train/masks/scene1.png
+#   datasets/segmentation/train/images/scene2.jpg
+#   datasets/segmentation/train/masks/scene2.png
+#   datasets/segmentation/val/images/scene3.jpg
+#   datasets/segmentation/val/masks/scene3.png
+# Train crops and flips move both files together. Validation uses the full image.
+# Masks use ID 0 for background, 1 for foreground, and 255 for ignored pixels.
+name: semantic_segmentation_lraspp
+task: semantic_segmentation
+task_options:
+  class_names: [background, foreground]
+  ignore_label: 255
+
+scale: 1
+num_gpu: 1
+network_g:
+  type: lraspp_mobilenet_v3_large
+  num_classes: 2  # Match the number of class_names. Weights start from scratch.
+
+path: {}
+
+datasets:
+  train:
+    name: segmentation train
+    type: imagemaskdataset
+    dataroot_lq: datasets/segmentation/train/images
+    dataroot_gt: datasets/segmentation/train/masks
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    batch_size_per_gpu: 2
+    num_worker_per_gpu: 2
+    dataset_enlarge_ratio: 1
+  val:
+    name: segmentation val
+    type: imagemaskdataset
+    dataroot_lq: datasets/segmentation/val/images
+    dataroot_gt: datasets/segmentation/val/masks
+
+train:
+  total_iter: 1000
+  optim_g:
+    type: AdamW
+    lr: 0.0003
+
+val:
+  val_enabled: true
+  metrics_enabled: true
+  save_img: false
+  val_freq: 100
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: 100
+  use_tb_logger: true

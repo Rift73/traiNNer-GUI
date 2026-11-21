@@ -1,0 +1,250 @@
+/* Image difference result: two saved images compared pixel by pixel. js/runs/difference.js.
+   Sits inside the analysis job result (analysis.css). Tokens only; selectors one class deep.
+   The first and the second image keep the side colours of the compare screen (--series-1 and --series-2
+   from runs.css); every coloured part has its number written beside it. */
+
+.difference {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.difference__lead {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.difference__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.difference__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.difference__absent {
+  color: var(--ink-3);
+}
+
+/* ───────── what was compared ───────── */
+
+.difference__facts {
+  font-variant-numeric: tabular-nums;
+}
+
+.difference__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.difference__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.difference__same {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* ───────── tables ───────── */
+
+.difference__count {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A few short rows: kept to a reading width, so a number stays near the name it belongs to. */
+.difference__table-wrap {
+  width: 100%;
+  max-width: 80ch;
+  min-width: 0;
+  overflow: auto;
+}
+
+.difference__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.difference__caption {
+  caption-side: top;
+  padding-bottom: var(--s2);
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* ───────── the difference image ───────── */
+
+.difference__views {
+  justify-self: start;
+}
+
+/* The picture stands on the neutral stage (.stage), so a black picture still shows where it ends. */
+.difference__frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  padding: var(--s4);
+}
+
+.difference__image {
+  display: block;
+  flex: none;
+  max-width: 100%;
+  height: auto;
+  outline: 1px solid var(--stage-rule);
+}
+
+/* A small picture enlarged by a whole factor: every pixel of the file stays a sharp square. */
+.difference__image--pixels {
+  image-rendering: pixelated;
+}
+
+.difference__explain {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.difference__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+/* ───────── against the reference ───────── */
+
+.difference__verdict {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.difference__bar {
+  display: flex;
+  gap: 1px;
+  height: 12px;
+  max-width: 80ch;
+  background: var(--sunk);
+}
+
+.difference__bar-part {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 2px;
+  height: 100%;
+  background: var(--ink-3);
+}
+
+.difference__bar-part--first {
+  background: var(--series-1, var(--ink));
+}
+
+.difference__bar-part--second {
+  background: var(--series-2, var(--ink-2));
+}
+
+/* Equally close: hatched, so the three parts differ by more than their colour. */
+.difference__bar-part--tie {
+  background: repeating-linear-gradient(135deg, var(--rule-strong) 0 3px, var(--sunk) 3px 6px);
+}
+
+.difference__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+}
+
+.difference__legend-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+}
+
+.difference__swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-right: 2px;
+  border-radius: 2px;
+  background: var(--ink-3);
+}
+
+.difference__swatch--first {
+  background: var(--series-1, var(--ink));
+}
+
+.difference__swatch--second {
+  background: var(--series-2, var(--ink-2));
+}
+
+.difference__swatch--tie {
+  background: repeating-linear-gradient(135deg, var(--rule-strong) 0 2px, var(--sunk) 2px 4px);
+}
+
+.difference__code {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
+/* ───────── everything the job reported ───────── */
+
+.difference__raw {
+  font-size: var(--text-sm);
+}
+
+.difference__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+@media (max-width: 720px) {
+  .difference__frame {
+    padding: var(--s2);
+  }
+}
+
+@media (forced-colors: active) {
+  .difference__bar-part {
+    background: CanvasText;
+  }
+
+  .difference__bar-part--tie {
+    background: repeating-linear-gradient(135deg, CanvasText 0 3px, Canvas 3px 6px);
+  }
+
+  .difference__swatch {
+    background: CanvasText;
+  }
+}

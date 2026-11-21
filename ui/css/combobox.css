@@ -1,0 +1,133 @@
+/* A text input with its known values in a list under it (js/components/combobox.js). */
+
+.combo {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Room for the arrow, which sits inside the field's right edge. */
+.combo__input {
+  padding-right: calc(var(--control-h) - 2px);
+}
+
+.combo__button {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: calc(var(--control-h) - 4px);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid transparent;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.combo__button:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.combo--open .combo__button {
+  background: var(--press);
+  color: var(--ink);
+}
+
+/* A drawn chevron, so it follows the ink colour in both themes. */
+.combo__chevron {
+  width: 7px;
+  height: 7px;
+  margin-top: -3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  rotate: 45deg;
+}
+
+.combo--open .combo__chevron {
+  margin-top: 3px;
+  rotate: -135deg;
+}
+
+/* Fixed to the viewport and placed by the script, so a scrolling pane or a dialog body cannot clip it. */
+.combo__list {
+  position: fixed;
+  z-index: 60;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  text-align: left;
+}
+
+.combo__option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  min-height: 26px;
+  padding: 3px var(--s2) 3px var(--s5);
+  cursor: pointer;
+  position: relative;
+}
+
+.combo__option[aria-selected="true"] {
+  background: var(--selection);
+}
+
+/* The value in use: a tick in the left gutter, the same place in every row so the names stay aligned. */
+.combo__option--current::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  width: 4px;
+  height: 8px;
+  margin-top: -6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  rotate: 45deg;
+}
+
+.combo__text {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.combo__note {
+  margin-left: auto;
+  flex: none;
+  max-width: 55%;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.combo__foot {
+  padding: var(--s1) var(--s2) var(--s1) var(--s5);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.combo__option + .combo__foot {
+  margin-top: 2px;
+  border-top: 1px solid var(--rule);
+}
+
+@media (forced-colors: active) {
+  .combo__option[aria-selected="true"] {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+}

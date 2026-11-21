@@ -1,0 +1,123 @@
+/* Disk space for a run's checkpoints: js/runs/storage.js (bottom of a run's Files tab).
+   Tokens only; selectors one class deep. A shortage is said by the shared warn notice, in words. */
+
+.storage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.storage__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.storage__lead {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.storage__sentence {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.storage__text {
+  margin: 0;
+  max-width: 80ch;
+}
+
+.storage__absent {
+  color: var(--ink-3);
+}
+
+/* A short remark beside a value: on its own line, quieter. */
+.storage__aside {
+  display: block;
+  font-size: var(--text-xs);
+  font-stretch: normal;
+  color: var(--ink-2);
+}
+
+/* The service's own sentences (assumptions, what is missing) and the facts under a shortage: real bullets. */
+.storage__list {
+  display: grid;
+  gap: var(--s1);
+  max-width: 80ch;
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+  list-style: disc;
+  font-size: var(--text-sm);
+}
+
+/* ───────── how this was worked out ───────── */
+
+.storage__details {
+  font-size: var(--text-sm);
+}
+
+.storage__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+.storage__subtitle {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.storage__facts {
+  font-variant-numeric: tabular-nums;
+}
+
+.storage__table-wrap {
+  width: 100%;
+  max-width: 90ch;
+  min-width: 0;
+  overflow: auto;
+}
+
+.storage__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage__files {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.storage__file {
+  min-width: 0;
+}
+
+.storage__path {
+  display: block;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .storage__list {
+    padding-left: var(--s3);
+  }
+}

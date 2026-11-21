@@ -1,0 +1,168 @@
+/* Training samples tab: what the model received. js/runs/samples.js.
+   Tokens only; selectors one class deep. Previews are tiny tensors drawn at a whole-number zoom. */
+
+.samples {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4) var(--s4);
+  min-width: 0;
+}
+
+.samples__heading {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.samples__lead {
+  margin: 0;
+  max-width: 80ch;
+  color: var(--ink-2);
+}
+
+.samples__status:empty {
+  display: none;
+}
+
+.samples__list {
+  display: grid;
+  gap: var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.samples__card {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.samples__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.samples__facts {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.samples__class {
+  margin: 0;
+}
+
+.samples__tensors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.samples__tensor {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.samples__tensor-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.samples__tensor-name {
+  font-weight: 600;
+}
+
+.samples__shape {
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.samples__figure {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  min-width: 0;
+}
+
+/* The neutral booth; a preview wider than the column scrolls instead of shrinking below its zoom. */
+.samples__frame {
+  max-width: 100%;
+  overflow: auto;
+  padding: var(--s2);
+  background: var(--stage);
+}
+
+.samples__imglink {
+  display: inline-block;
+  line-height: 0;
+}
+
+.samples__img {
+  display: block;
+  max-width: none;
+  image-rendering: pixelated;
+}
+
+.samples__caption {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  caption-side: top;
+  text-align: left;
+}
+
+.samples__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.samples__detection {
+  display: grid;
+  gap: var(--s2);
+  justify-items: start;
+}
+
+.samples__boxes:empty {
+  display: none;
+}
+
+.samples__table-wrap {
+  max-width: 100%;
+  max-height: 40vh;
+  overflow: auto;
+  border: 1px solid var(--rule);
+}
+
+.samples__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.samples__sources {
+  font-size: var(--text-sm);
+}
+
+.samples__raw {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.samples__more:empty {
+  display: none;
+}

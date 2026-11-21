@@ -1,0 +1,817 @@
+/*
+  Phone edition, part 2: the three screens, each as one column with one thing that scrolls.
+  js/mobile.js says where the person is with attributes on <html>:
+    data-screen  recipe | data | runs
+    data-level   home | part | item     (Runs: the overview, a part's list, one run or entry)
+    data-part    run | queue | analysis | studies | curricula | compare
+*/
+
+/* ───────── Runs: the overview, or what was opened from it ───────── */
+
+.runs {
+  flex-direction: column;
+}
+
+.runs__list {
+  flex: 1 1 auto;
+  width: auto;
+  max-height: none;
+  border: 0;
+}
+
+.runs__list-body {
+  flex: none;
+  min-height: 0;
+  overflow: visible;
+}
+
+:root[data-level="home"] .runs__detail,
+:root:not([data-level="home"]) .runs__list {
+  display: none;
+}
+
+/* The overview says how the queue stands and leads to it; its entries are on the queue's own screen,
+   so the runs are not a screen and a half further down. */
+.runs__queue .queue__list,
+.runs__queue .queue__more {
+  display: none;
+}
+
+.queue__summary-head {
+  min-height: 52px;
+  padding: var(--s1) var(--gutter);
+}
+
+.queue__paused {
+  padding: var(--s2) var(--gutter);
+}
+
+/* A row that leads somewhere: the words at the left, an arrowhead at the right. */
+.queue__all,
+.runs__nav-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-height: var(--control-h);
+  padding: 0 var(--gutter);
+  border-left: 0;
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.queue__all::after,
+.runs__nav-link::after {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid var(--ink-3);
+  border-right: 2px solid var(--ink-3);
+  transform: rotate(45deg);
+}
+
+.queue__all:active,
+.runs__nav-link:active,
+.runs__row:active {
+  background: var(--press);
+}
+
+.runs__nav {
+  padding: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.runs__nav-link + .runs__nav-link {
+  border-top: 1px solid var(--rule);
+}
+
+.runs__list > .pane__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+  border-top: 1px solid var(--rule);
+}
+
+.runs__h1 {
+  font-size: var(--text-lg);
+}
+
+.runs__row {
+  padding: var(--s3) var(--gutter);
+  row-gap: 2px;
+}
+
+/* "Compare" on a row compares with the run that is open; on the overview no run is. It is on the run's
+   own screen ("Compare with…"). */
+:root[data-level="home"] .runs__row-compare {
+  display: none;
+}
+
+.runs__archives-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--gutter);
+}
+
+/* On the overview no run is the open one. */
+:root[data-level="home"] .runs__row[aria-current="true"] {
+  background: none;
+  border-left-color: transparent;
+}
+
+/* ───────── one run ───────── */
+/* The run's facts, then its tabs. The whole page scrolls as one; the tabs stay at the top while their
+   content passes under them. */
+
+.runs__part {
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.runs__head {
+  padding: var(--s3) var(--gutter);
+}
+
+.runs__name {
+  font-size: var(--text-xl);
+  overflow-wrap: anywhere;
+}
+
+.runs__actions {
+  gap: var(--s2);
+}
+
+.runs__part > .tabs {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--panel);
+}
+
+/* At least a screen tall under the tabs, so the tabs can always be brought to the top edge, also while a
+   tab's content is still loading. */
+.runs__panels {
+  flex: none;
+  display: block;
+  min-height: calc(var(--view-h, 70dvh) - var(--control-h) - 1px);
+}
+
+.runs__panel {
+  flex: none;
+  overflow: visible;
+}
+
+/* A tab that is one tall thing with its own scrolling (the log) gets the height of the screen under the
+   tabs. --view-h: the height of the screen area, measured by js/mobile.js. */
+.runs__panel--fill {
+  height: calc(var(--view-h, 70dvh) - var(--control-h) - 1px);
+  min-height: 280px;
+  overflow: hidden;
+}
+
+.runs__tele-top {
+  padding: var(--s3) var(--gutter) 0;
+}
+
+/* Telemetry: the curve first, under it the series to tick, then the newest values. (js/mobile.js keeps
+   the ticked row where it is when a chart appears above it.) */
+.runs__tele {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s5);
+  padding: var(--gutter);
+}
+
+.runs__tele-main {
+  order: 1;
+}
+
+.runs__picker-pane {
+  order: 2;
+}
+
+.runs__latest {
+  order: 3;
+}
+
+.runs__picker {
+  gap: var(--s2);
+}
+
+.runs__picker-list {
+  gap: 0;
+}
+
+/* A whole row ticks its series: the label reaches over the row, the box included. */
+.runs__picker-item {
+  position: relative;
+  align-items: center;
+  gap: var(--s3);
+  min-height: var(--control-h);
+}
+
+.runs__picker-label::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.runs__picker-label {
+  flex: 1 1 auto;
+  align-self: stretch;
+  align-items: center;
+  align-content: center;
+  column-gap: var(--s2);
+  padding: var(--s1) 0;
+}
+
+.chart__bar {
+  row-gap: 0;
+}
+
+.chart__smooth {
+  margin-left: 0;
+}
+
+.chart__range {
+  flex: 1 1 120px;
+  height: var(--control-sm);
+}
+
+.chart__legend {
+  gap: 0 var(--s4);
+}
+
+.chart__legend-item,
+.chart__legend-label {
+  min-height: var(--control-sm);
+}
+
+.chart__tip {
+  max-width: min(320px, calc(100% - var(--s4)));
+}
+
+.runs__pad,
+.runs__inset {
+  padding: var(--s3) var(--gutter) var(--gutter);
+}
+
+/* Validation: the run's tabs are what stays at the top; the Images / Scores switch scrolls with its
+   content. One sample: its two pickers side by side, then a stage nearly as tall as the screen. */
+.val__viewbar {
+  position: static;
+}
+
+.validation__nav {
+  margin-left: 0;
+}
+
+.validation__pickers {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s3);
+}
+
+.validation__pickers .validation__field,
+.validation__pickers .validation__select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.validation__stage {
+  height: clamp(300px, calc(var(--view-h, 100dvh) - 60px), 760px);
+}
+
+/* ───────── the comparison stage ───────── */
+/* One finger moves the image, two pinch it (js/components/compare.js), so the two step buttons go and
+   the zoom row fits the width. */
+
+.compare__bar {
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+}
+
+.compare__zoom {
+  margin-left: 0;
+}
+
+.compare__zoom > .btn--icon {
+  display: none;
+}
+
+.compare__readout {
+  gap: var(--s1) var(--s4);
+}
+
+/* Log: the tools in two rows, the lines across the whole width. Only a warning or an error carries
+   its word in front. */
+.runs__toolbar {
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--gutter);
+}
+
+.runs__filter-wrap {
+  max-width: none;
+}
+
+.runs__log-note {
+  padding: var(--s1) var(--gutter);
+}
+
+.runs__line {
+  display: flex;
+  gap: var(--s2);
+  width: max-content;
+  min-width: 100%;
+  padding: 0 var(--s3) 0 calc(var(--gutter) - 3px);
+}
+
+.runs__log--wrap .runs__line {
+  width: auto;
+}
+
+.runs__lvl {
+  flex: none;
+  padding-left: 0;
+}
+
+.runs__lvl:empty {
+  display: none;
+}
+
+.runs__log--wrap .runs__text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* ───────── Runs: a part's list, or one thing opened from it ───────── */
+/* Queue, Analysis jobs, Studies and Curricula each are a list beside an open item on the desktop page.
+   Here the list is a screen of its own (with what the part is, under it), and an opened entry, job,
+   study or curriculum is the next screen; the link at the top left leads back to the list. */
+
+.queue,
+.analysis,
+.studies,
+.curricula {
+  display: block;
+  flex: none;
+  height: auto;
+  min-height: 0;
+}
+
+.queue__body,
+.analysis__body {
+  display: block;
+  min-height: 0;
+}
+
+.queue__lists,
+.queue__detail,
+.analysis__lists,
+.analysis__detail,
+.studies__side,
+.studies__main,
+.curricula__side,
+.curricula__main {
+  min-height: 0;
+  overflow: visible;
+  border-right: 0;
+}
+
+:root[data-level="item"] .queue__head,
+:root[data-level="item"] .queue__lists,
+:root[data-level="item"] .analysis__head,
+:root[data-level="item"] .analysis__lists,
+:root[data-level="item"] .studies__side,
+:root[data-level="item"] .curricula__side {
+  display: none;
+}
+
+/* What the part is, then what can be done with it across the full width. */
+.queue__head,
+.analysis__head {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s3);
+  padding: var(--s3) var(--gutter) var(--gutter);
+}
+
+.queue__head-actions {
+  justify-content: stretch;
+}
+
+.queue__head-actions > .btn {
+  flex: 1 1 0;
+}
+
+.queue__section-title {
+  padding: var(--s4) var(--gutter) var(--s2);
+}
+
+.queue__row {
+  gap: var(--s2);
+  padding: var(--s3) var(--gutter) var(--s3) calc(var(--gutter) - 3px);
+}
+
+.queue__link {
+  min-height: var(--control-h);
+  align-content: center;
+}
+
+.queue__curriculum-link {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-sm);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.queue__finished-summary {
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
+}
+
+.queue__intro,
+.analysis__intro {
+  padding: var(--gutter);
+  border-top: 1px solid var(--rule);
+}
+
+.analysis__link {
+  padding: var(--s3) var(--gutter);
+}
+
+.studies__side,
+.curricula__side {
+  padding: var(--s3) 0 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.studies__side-head,
+.curricula__side-head,
+.studies__new-help,
+.studies__status,
+.curricula__status {
+  margin: 0 var(--gutter);
+}
+
+.studies__link,
+.curricula__link {
+  padding: var(--s3) var(--gutter) var(--s3) calc(var(--gutter) - 3px);
+}
+
+.studies__main,
+.curricula__main {
+  padding: var(--gutter);
+}
+
+.analysis__link:active,
+.queue__link:active,
+.studies__link:active,
+.curricula__link:active {
+  background: var(--press);
+}
+
+/* A link that stands alone in a row or a cell is tall enough to hit. */
+.studies__cell-link,
+.curricula__link-inline,
+.evaluation__fact-name,
+.queue__lineage a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-sm);
+}
+
+/* ───────── Recipe: choosing one ───────── */
+/* The chooser (js/recipe/library.js), as a screen and inside the "Choose a recipe" sheet: first the
+   list, as one page with its filters at the top; a tapped row opens that recipe's check and text in
+   its place, with a bar at the top that leads back (data-pane on .lib, set by the chooser). */
+
+.lib {
+  display: block;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.lib__intro {
+  padding: var(--s3) var(--gutter);
+}
+
+.lib__body,
+.lib__col {
+  display: block;
+  border: 0;
+}
+
+.lib__controls {
+  gap: var(--s3);
+  padding: var(--s3) var(--gutter);
+}
+
+/* The tasks in one row that moves sideways, instead of three rows of buttons. */
+.lib__tasks {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.lib__tasks::-webkit-scrollbar {
+  display: none;
+}
+
+.lib__tasks > .btn {
+  flex: none;
+}
+
+.lib__listhost {
+  overflow: visible;
+}
+
+.lib__grouphead {
+  padding: var(--s2) var(--gutter);
+}
+
+.lib__item {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-height: 52px;
+  padding: var(--s2) var(--gutter) var(--s2) calc(var(--gutter) - 3px);
+  border-bottom: 1px solid var(--rule);
+}
+
+.lib__item:active {
+  background: var(--press);
+}
+
+.lib__name {
+  font-size: var(--text-md);
+}
+
+.lib__meta {
+  flex-wrap: wrap;
+  margin-left: 0;
+  padding-left: 0;
+  white-space: normal;
+}
+
+.lib__more {
+  padding: var(--s3) var(--gutter);
+}
+
+.lib__more > .btn {
+  width: 100%;
+}
+
+.lib__none,
+.lib__pad {
+  padding: var(--gutter);
+}
+
+.lib__inspect {
+  overflow: visible;
+  padding: var(--gutter);
+}
+
+/* One pane at a time. While the list is shown, the other pane only has something to say for pasted
+   YAML (its check result, under the text). */
+.lib[data-pane="list"] > .lib__back,
+.lib[data-pane="list"]:has(.lib__list) .lib__inspect,
+.lib[data-pane="list"] .lib__inspect:has(> .empty),
+.lib[data-pane="inspect"] > .lib__intro,
+.lib[data-pane="inspect"] .lib__col {
+  display: none;
+}
+
+.lib__back {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 0 var(--gutter);
+  background: var(--raised);
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lib__back::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.lib__back:active {
+  background: var(--press);
+}
+
+/* The recipe's name on its own lines, then what to do with it across the width. */
+.lib__head {
+  flex-wrap: wrap;
+}
+
+.lib__head > .lib__title {
+  flex: 1 1 100%;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.lib__head > .btn {
+  flex: 1 1 100%;
+}
+
+/* ───────── Recipe: the open recipe ───────── */
+/* One page that scrolls as a whole: what the recipe is and what can be done with it, then its options
+   (or its text). The row that finds an option and changes the section stays at the top. */
+
+.recipe {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.recipe__bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s2) var(--s3);
+  padding: var(--s3) var(--gutter);
+}
+
+.recipe__ident,
+.recipe__actions {
+  grid-column: 1 / -1;
+}
+
+.recipe__title {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  font-size: var(--text-xl);
+  white-space: normal;
+}
+
+.recipe__meta {
+  flex-wrap: wrap;
+  gap: 0 var(--s4);
+}
+
+.recipe__fact,
+.recipe__fact.truncate {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.recipe__verdict {
+  flex-wrap: wrap;
+}
+
+/* Options or YAML: the two side by side ("Both") have no room on this screen. */
+.recipe__bar > .seg > .btn:nth-child(2) {
+  display: none;
+}
+
+.recipe__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.recipe__actions > .btn {
+  min-width: 0;
+  padding: 0 var(--s2);
+}
+
+.recipe__body,
+.recipe__body[data-layout] {
+  display: block;
+  flex: none;
+}
+
+.recipe__body[data-layout="split"] > .recipe__source {
+  display: none;
+}
+
+.recipe__form,
+.form,
+.form__layout {
+  display: block;
+}
+
+.form__outline {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  flex-flow: row nowrap;
+  overflow: visible;
+  padding: var(--s2) var(--gutter);
+  background: var(--panel);
+  border-right: 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__outline > .form__search,
+.form__outline > .form__picker {
+  display: block;
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
+.form__outline > .form__nav {
+  display: none;
+}
+
+.form__settings {
+  overflow: visible;
+}
+
+.form__title {
+  padding: var(--s4) var(--gutter) 0;
+  font-size: var(--text-lg);
+}
+
+.form__lede {
+  padding: var(--s1) var(--gutter) var(--s3);
+}
+
+.form__status:not(:empty) {
+  padding: var(--s3) var(--gutter) 0;
+}
+
+.fld {
+  padding: var(--s3) var(--gutter);
+  /* a row brought into view (an error that was tapped) clears the row that stays at the top */
+  scroll-margin-top: 76px;
+}
+
+/* "More" under an option: the word stays small, what can be hit does not. */
+.fld__more {
+  margin: calc(-1 * var(--s2)) calc(-1 * var(--s1));
+  padding: var(--s2) var(--s1);
+}
+
+/* The text of the recipe takes the screen between the bars; its own tabs and tools stay with it. */
+.recipe__source {
+  height: var(--view-h, 80dvh);
+  min-height: 320px;
+}
+
+/* ───────── choosing a folder on the trainer machine ───────── */
+
+.picker__crumb {
+  min-width: var(--control-sm);
+  min-height: var(--control-sm);
+}
+
+.picker__sep {
+  align-self: center;
+}
+
+/* The chosen path in full, above the two buttons. */
+.picker__chosen {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.picker__chosen > .mono {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* ───────── held sideways ───────── */
+
+@media (orientation: landscape) and (max-height: 560px) {
+  /* Width is what there is: the recipe's four actions share one row. */
+  .recipe__actions {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .recipe__bar {
+    padding-top: var(--s2);
+    padding-bottom: var(--s2);
+  }
+}
+
+/* (a one-word link, "Run", is still wide enough to hit) */
+.studies__cell-link,
+.curricula__link-inline {
+  min-width: var(--control-h);
+}

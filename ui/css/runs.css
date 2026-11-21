@@ -1,0 +1,1182 @@
+/* Runs screen: queue block and run list, run detail, telemetry charts, log, files, recipe.
+   Classes .runs__* and .chart__*; one class deep; tokens only. */
+
+/*
+  Chart series colours. Eight categorical slots, assigned in a fixed order (never generated).
+  Hues avoid cyan, yellow and magenta, which mean ground truth, low quality and model output here.
+  Checked with the dataviz palette validator (lightness band, chroma floor, colour-vision-deficiency
+  separation of adjacent slots, normal-vision floor, contrast >= 3:1) against --panel in each theme:
+  light against #f2f2f2, dark against #262626. All checks passed.
+*/
+:root {
+  --series-1: #1f63c4; /* blue */
+  --series-2: #c2500f; /* orange */
+  --series-3: #7a4fd0; /* violet */
+  --series-4: #1a7a1a; /* green */
+  --series-5: #3a4cb8; /* indigo */
+  --series-6: #9c5a10; /* brown */
+  --series-7: #00876c; /* teal green */
+  --series-8: #c4302f; /* red */
+}
+
+:root[data-theme="dark"] {
+  --series-1: #3f80dc;
+  --series-2: #d4672a;
+  --series-3: #8c72e6;
+  --series-4: #2f9a2f;
+  --series-5: #6372e0;
+  --series-6: #b37630;
+  --series-7: #17977d;
+  --series-8: #de5450;
+}
+
+/* ───────── frame ───────── */
+
+.runs {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The left column scrolls as a whole when its blocks do not fit, so no block is squeezed: the queue
+   block and the folders block take their own height, and the run list keeps at least three rows. */
+.runs__list {
+  width: 320px;
+  flex: none;
+  border-right: 1px solid var(--rule);
+  overflow-y: auto;
+}
+
+.runs__queue {
+  flex: none;
+  border-bottom: 1px solid var(--rule);
+}
+
+.runs__queue:empty {
+  display: none;
+}
+
+/* grows into spare height; below 240 px the column scrolls instead, and a long list scrolls here */
+.runs__list-body {
+  flex: 1 0 240px;
+  min-height: 240px;
+  overflow-y: auto;
+}
+
+/* one small group of link rows (Studies, Analysis jobs) between the queue block and the run list:
+   the queue block's rule above, one rule below, none between the rows */
+.runs__nav {
+  flex: none;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.runs__nav-link {
+  display: block;
+  padding: var(--s1) var(--s3);
+  border-left: 3px solid transparent;
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.runs__nav-link:hover {
+  background: var(--hover);
+}
+
+.runs__nav-link[aria-current="page"] {
+  background: var(--raised);
+  border-left-color: var(--ink);
+}
+
+.runs__h1 {
+  font-size: var(--text-xl);
+}
+
+.runs__detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+/* host of the main area: the run detail, the queue view or the comparison */
+.runs__part {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+/* Same top inset as the Telemetry tab (its first line sits var(--s3) under the tab strip), so every
+   panel of this screen starts at one height. */
+.runs__pad,
+.runs__inset {
+  padding: var(--s3) var(--s4) var(--s4);
+}
+
+.runs__list-note {
+  padding: var(--s3);
+}
+
+/* ───────── list ───────── */
+
+.runs__items {
+  display: grid;
+}
+
+.runs__item {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.runs__row {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid transparent;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.runs__row:hover {
+  background: var(--hover);
+}
+
+.runs__row[aria-current="true"] {
+  background: var(--raised);
+  border-left-color: var(--ink);
+}
+
+.runs__row-compare {
+  flex: none;
+  align-self: center;
+  margin-right: var(--s2);
+}
+
+.runs__row-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.runs__row-name {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.runs__row-status,
+.runs__row-tag {
+  flex: none;
+}
+
+.runs__row-progress,
+.runs__row-telemetry {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  font-stretch: var(--narrow);
+}
+
+.runs__row-updated {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+}
+
+/* ───────── detail head ───────── */
+
+.runs__error:empty {
+  display: none;
+}
+
+.runs__head {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  flex: none;
+}
+
+.runs__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.runs__name {
+  font-size: var(--text-xl);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.runs__note {
+  font-size: var(--text-sm);
+  max-width: 72ch;
+}
+
+/* One line when the run is a curriculum phase; the slot is empty otherwise. */
+.runs__phase-slot:empty {
+  display: none;
+}
+
+.runs__phase {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.runs__progress {
+  display: grid;
+  grid-template-columns: minmax(120px, 360px) auto;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.runs__progress-text {
+  color: var(--ink-2);
+}
+
+.runs__kv {
+  font-size: var(--text-sm);
+  grid-template-columns: repeat(auto-fill, minmax(150px, auto) minmax(150px, 1fr));
+}
+
+/* the panels of the five tabs; only the open one is shown */
+.runs__panels {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* grows with its content and scrolls (Telemetry, Validation, Files) */
+.runs__panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* held to the panel height, so an inner viewport scrolls (Log, Recipe) */
+.runs__panel--fill {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.runs__section-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  margin-bottom: var(--s2);
+}
+
+.runs__hint {
+  font-size: var(--text-sm);
+  margin-bottom: var(--s2);
+}
+
+/* ───────── telemetry ───────── */
+
+.runs__tele-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  padding: var(--s3) var(--s4) 0;
+}
+
+.runs__tele-status {
+  flex: 1 1 240px;
+  font-size: var(--text-sm);
+}
+
+.runs__tele-source {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+}
+
+.runs__tele {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 240px;
+  gap: var(--s4);
+  padding: var(--s4);
+  align-items: start;
+}
+
+.runs__picker-pane,
+.runs__latest {
+  min-width: 0;
+}
+
+.runs__picker {
+  display: grid;
+  gap: var(--s3);
+}
+
+.runs__picker-group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.runs__picker-legend {
+  padding: 0;
+  margin-bottom: var(--s1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.runs__picker-list {
+  display: grid;
+  gap: 2px;
+}
+
+.runs__picker-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.runs__picker-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+  min-width: 0;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.runs__picker-count {
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+}
+
+.runs__tele-main {
+  min-width: 0;
+}
+
+.runs__charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s5);
+}
+
+.runs__chart {
+  min-width: 0;
+}
+
+.runs__chart-notes {
+  display: grid;
+  gap: 2px;
+  margin-top: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.runs__table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--rule);
+}
+
+.runs__table {
+  font-size: var(--text-sm);
+}
+
+.runs__metric-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* ───────── chart component ───────── */
+
+.chart {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.chart__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+}
+
+.chart__smooth {
+  margin-left: var(--s3);
+  color: var(--ink-2);
+}
+
+.chart__range {
+  width: 120px;
+  accent-color: var(--ink-2);
+}
+
+.chart__smooth-value {
+  min-width: 3ch;
+  color: var(--ink-2);
+}
+
+.chart__plot {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+/* absolute so the drawn width never feeds back into the measured width */
+.chart__svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+}
+
+.chart__grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart__axis {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart__tick,
+.chart__axis-label,
+.chart__empty {
+  fill: var(--ink-3);
+  font-size: 11px;
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart__empty {
+  font-size: var(--text-sm);
+}
+
+.chart__line {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* the reported values under a smoothed line: thin and faint */
+.chart__line--raw {
+  stroke-width: 1;
+  opacity: 0.3;
+}
+
+.chart__dot {
+  stroke: var(--panel);
+  stroke-width: 1.5;
+}
+
+.chart__cursor {
+  stroke: var(--ink-2);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart__mark {
+  fill: var(--panel);
+  stroke-width: 2;
+}
+
+.chart__tip {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+  max-width: 320px;
+  padding: var(--s1) var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  pointer-events: none;
+}
+
+.chart__tip-head {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.chart__tip-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.chart__tip-name {
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart__tip-value {
+  color: var(--ink);
+}
+
+.chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  font-size: var(--text-sm);
+}
+
+.chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.chart__legend-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.chart__legend-name {
+  color: var(--ink);
+}
+
+.chart__legend-value {
+  color: var(--ink-3);
+}
+
+.chart__swatch {
+  flex: none;
+  width: 14px;
+  height: 3px;
+  background: var(--swatch);
+}
+
+/* slots 9 and up repeat a colour, so they are dashed in the plot and in the swatch */
+.chart__swatch--dashed {
+  background: repeating-linear-gradient(90deg, var(--swatch) 0 5px, transparent 5px 8px);
+}
+
+.chart__note {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+/* ───────── log ───────── */
+
+.runs__logtab {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 240px;
+}
+
+.runs__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+}
+
+.runs__filter-wrap {
+  flex: 1 1 200px;
+  max-width: 360px;
+}
+
+.runs__count {
+  font-size: var(--text-sm);
+}
+
+.runs__log-note {
+  flex: none;
+  padding: var(--s1) var(--s4);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--rule);
+}
+
+.runs__log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s2) 0;
+  background: var(--raised);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.runs__line {
+  display: grid;
+  grid-template-columns: 64px max-content;
+  border-left: 3px solid transparent;
+  padding-right: var(--s3);
+}
+
+.runs__log--wrap .runs__line {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.runs__lvl {
+  padding-left: var(--s2);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  user-select: none;
+}
+
+.runs__text {
+  white-space: pre;
+}
+
+.runs__log--wrap .runs__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.runs__line--error {
+  border-left-color: var(--err);
+  background: var(--err-wash);
+}
+
+.runs__line--error .runs__lvl {
+  color: var(--err);
+}
+
+.runs__line--warn {
+  border-left-color: var(--warn);
+  background: var(--warn-wash);
+}
+
+.runs__line--warn .runs__lvl {
+  color: var(--warn);
+}
+
+/* ───────── files ───────── */
+
+.runs__files {
+  display: grid;
+  gap: var(--s5);
+  padding: var(--s3) var(--s4) var(--s4);
+}
+
+.runs__files:empty {
+  display: none;
+}
+
+/* A quiet line at the top of the Files tab (what the analysis jobs cannot do for this run). */
+.runs__files-note {
+  margin: 0;
+  padding: var(--s3) var(--s4) 0;
+  font-size: var(--text-sm);
+  max-width: 80ch;
+}
+
+.runs__file-group {
+  min-width: 0;
+}
+
+.runs__file-list {
+  display: grid;
+  border-top: 1px solid var(--rule);
+}
+
+.runs__file {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+/* the name keeps at least a readable width; the actions wrap beside it, then under it */
+.runs__file-link {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs__file-actions {
+  flex: 0 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s1);
+  margin-left: auto;
+}
+
+/* A checkpoint row is one radio choice; the file name inside stays a download link. */
+.runs__file--choice {
+  padding: 0 0 0 var(--s2);
+  border-left: 3px solid transparent;
+}
+
+.runs__file--selected {
+  background: var(--raised);
+  border-left-color: var(--ink);
+}
+
+.runs__file-choice {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s1) var(--s2) var(--s1) 0;
+  cursor: pointer;
+}
+
+.runs__file-choice:hover {
+  background: var(--hover);
+}
+
+.runs__file-radio {
+  flex: none;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+/* One action bar for the chosen checkpoint, kept in view while the list scrolls. */
+.runs__file-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s4);
+  background: var(--panel);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.runs__file-bar-label {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.runs__file-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.runs__file-bar-note {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* ───────── which checkpoint measured best ───────── */
+
+.runs__best-host {
+  padding: var(--s3) var(--s4);
+}
+
+/* Weighing two scores sits with the ranking above it; the disk space closes the tab (frontier.js, storage.js). */
+.runs__frontier-host {
+  padding: 0 var(--s4) var(--s3);
+}
+
+.runs__storage-host {
+  margin-top: var(--s4);
+  padding: var(--s3) var(--s4) var(--s5);
+  border-top: 1px solid var(--rule);
+}
+
+.runs__timing-host {
+  margin-top: var(--s4);
+  padding: var(--s3) var(--s4) var(--s5);
+  border-top: 1px solid var(--rule);
+}
+
+.runs__frontier-host:empty,
+.runs__timing-host:empty,
+.runs__storage-host:empty {
+  display: none;
+}
+
+.runs__best {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  max-width: 96ch;
+}
+
+.runs__best-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.runs__best-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.runs__best-label {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+/* A choice at its natural width, not a bar across the block. */
+.runs__best-select {
+  width: auto;
+  max-width: min(36ch, 100%);
+}
+
+.runs__best-body {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.runs__best-answers {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+}
+
+.runs__best-answer {
+  display: grid;
+  gap: 2px;
+  padding-left: var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+.runs__best-answer dt {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.runs__best-answer dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs__best-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* The file name inside the sentence: a text-like button with no padding, so the period follows it directly. */
+.runs__best-pick {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: inherit;
+  line-height: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.runs__best-pick:hover {
+  text-decoration-thickness: 2px;
+}
+
+.runs__best-tie {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.runs__best-line {
+  margin: 0;
+}
+
+.runs__best-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.runs__best-small {
+  display: grid;
+  gap: 2px;
+}
+
+.runs__best-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.runs__best-empty {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.runs__best-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.runs__best-summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.runs__best-table-wrap {
+  max-width: 100%;
+  max-height: 40vh;
+  margin-top: var(--s2);
+  overflow: auto;
+  border: 1px solid var(--rule);
+}
+
+.runs__best-table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ───────── recipe ───────── */
+
+.runs__recipe {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 240px;
+}
+
+.runs__yaml-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.runs__yaml {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  overflow: auto;
+  background: var(--raised);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* ───────── experiments folders (under the run list) ───────── */
+
+.runs__archives-host {
+  flex: none;
+  border-top: 1px solid var(--rule);
+}
+
+/* default display keeps the browser's disclosure marker, the open or closed cue */
+.runs__archives-summary {
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+}
+
+.runs__archives-summary:hover {
+  background: var(--hover);
+}
+
+.runs__archives-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.runs__archives-count {
+  margin-left: var(--s2);
+  font-size: var(--text-sm);
+}
+
+.runs__archives-body {
+  display: grid;
+  gap: var(--s2);
+  padding: 0 var(--s3) var(--s3);
+}
+
+.runs__file-note {
+  margin-top: var(--s2);
+}
+
+.runs__archives-list {
+  display: grid;
+  gap: var(--s2);
+}
+
+.runs__archive {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px var(--s2);
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+.runs__archive-path {
+  grid-column: 1 / -1;
+  font-size: var(--text-xs);
+}
+
+.runs__archive-state {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs__archive-state--err {
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+.runs__archives-status:empty {
+  display: none;
+}
+
+.runs__archive-confirm {
+  overflow-wrap: anywhere;
+}
+
+.runs__row-source {
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+}
+
+/* long ids (archive runs) in messages wrap instead of widening the pane */
+.runs__pad {
+  overflow-wrap: anywhere;
+}
+
+/* ───────── provenance ───────── */
+
+.runs__prov-attempt {
+  display: grid;
+  gap: var(--s3);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.runs__prov-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.runs__prov-section {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.runs__prov-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.runs__prov-kv {
+  font-size: var(--text-sm);
+}
+
+.runs__prov-list {
+  display: grid;
+  gap: 2px;
+}
+
+.runs__prov-path {
+  overflow-wrap: anywhere;
+}
+
+.runs__prov-err {
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+.runs__prov-details {
+  font-size: var(--text-sm);
+}
+
+/* ───────── narrower: latest values go under the chart, then the list goes on top ───────── */
+
+@media (max-width: 1200px) {
+  .runs__tele {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  .runs__latest {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  .runs {
+    flex-direction: column;
+  }
+
+  /* stacked: the whole left column is capped and scrolls; the run list keeps at least about two rows */
+  .runs__list {
+    width: auto;
+    max-height: 45vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .runs__list-body {
+    flex: 1 0 180px;
+    min-height: 180px;
+  }
+
+  .runs__progress {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runs__tele {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

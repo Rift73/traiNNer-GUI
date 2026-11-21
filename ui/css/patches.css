@@ -1,0 +1,282 @@
+/* Patch extraction result: js/runs/patches.js (analysis job page).
+   Tokens only; selectors one class deep. */
+
+.patches {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.patches__lead {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.patches__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.patches__muted {
+  color: var(--ink-3);
+}
+
+/* The issues of a refused edit. */
+.patches__notes {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding-left: var(--s4);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.patches__facts {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.patches__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* A title with its button: "Recipe lines" and "Copy". */
+.patches__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+/* One file or folder of the job: its name, where it is, what it holds. */
+.patches__file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.patches__file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s4);
+}
+
+.patches__file-name {
+  font-weight: 600;
+}
+
+
+.patches__file-facts {
+  font-size: var(--text-sm);
+}
+
+/* Narrow window: the label goes above its value, so a long path keeps the whole width. */
+@media (max-width: 760px) {
+  .patches__file-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.patches__download {
+  text-underline-offset: 2px;
+}
+
+.patches__path-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.patches__path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+
+.patches__names {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.patches__names-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.patches__names-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+.patches__names-box {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 32vh;
+  overflow: auto;
+  padding: var(--s2) var(--s3);
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.patches__names-list {
+  margin: 0;
+  padding-left: 5ch;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.patches__name {
+  overflow-wrap: anywhere;
+}
+
+.patches__others {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.patches__yaml {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: var(--s3);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+/* The one primary action, what it does not do, and why it is not offered. */
+.patches__action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.patches__why {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.patches__print {
+  margin: 0;
+  max-width: 76ch;
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.patches__error {
+  justify-self: stretch;
+  min-width: 0;
+}
+
+.patches__raw {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.patches__raw-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.patches__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+/* "Cut from": one line per source folder, then which pairs were taken. */
+.patches__roots {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.patches__root {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.patches__root-label {
+  color: var(--ink-2);
+}
+
+/* A second, quieter sentence after a fact. */
+.patches__aside {
+  color: var(--ink-2);
+}
+
+.patches__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.patches__table {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.patches__caption {
+  padding-bottom: var(--s2);
+  font-size: var(--text-sm);
+  text-align: left;
+  color: var(--ink-2);
+}
+
+.patches__cell {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* The crop warning above the button. */
+.patches__warn {
+  justify-self: stretch;
+  min-width: 0;
+}

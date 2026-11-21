@@ -1,0 +1,88 @@
+/* Weights conversion result: a .pth file's weights saved as a safetensors file. js/runs/convert.js.
+   Sits inside the analysis job result (analysis.css). Tokens only; selectors one class deep. */
+
+.convert {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.convert__lead {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.convert__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.convert__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.convert__absent {
+  color: var(--ink-3);
+}
+
+.convert__facts {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A name with what belongs beside it: the copy button, or a short aside. */
+.convert__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.convert__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.convert__aside {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.convert__type {
+  overflow-wrap: anywhere;
+}
+
+.convert__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.convert__raw {
+  font-size: var(--text-sm);
+}
+
+.convert__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}

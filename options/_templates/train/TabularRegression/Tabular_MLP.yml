@@ -1,0 +1,49 @@
+# Synthetic example: predict a rectangle's perimeter from two lengths.
+# Point meta_info at your own CSV files, then update the named columns and layer widths.
+name: tabular_perimeter
+task: tabular_regression
+task_options:
+  features: [width, height]
+  targets: [perimeter]
+num_gpu: 0
+scale: 1
+manual_seed: 42
+use_amp: false
+use_channels_last: false
+network_g:
+  type: tabular_mlp
+  in_features: 2
+  out_features: 1
+  hidden: []
+path: {}
+datasets:
+  train:
+    name: training rectangles
+    type: numericcsvdataset
+    meta_info: options/_templates/data/numeric_records/train.csv
+    batch_size_per_gpu: 12
+    num_worker_per_gpu: 0
+    prefetch_factor: null
+    persistent_workers: false
+    pin_memory: false
+    dataset_enlarge_ratio: 1
+  val:
+    name: held-out rectangles
+    type: numericcsvdataset
+    meta_info: options/_templates/data/numeric_records/validation.csv
+    batch_size_per_gpu: 128
+    pin_memory: false
+train:
+  total_iter: 200
+  optim_g: {type: AdamW, lr: 0.03, weight_decay: 0}
+val:
+  val_enabled: true
+  metrics_enabled: true
+  record_samples: true
+  save_img: false
+  val_freq: 50
+  save_best: rmse
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 100
+  use_tb_logger: false

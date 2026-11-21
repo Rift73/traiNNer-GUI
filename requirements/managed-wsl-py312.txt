@@ -1,0 +1,19 @@
+# Ubuntu 24.04, x86-64, Python 3.12. Keep the Torch/TorchVision pair matched.
+# Resolve these and pyproject.toml's core dependencies using PyPI and the
+# official PyTorch CUDA 13.4 nightly index.
+-c live-runtime.txt
+-c live-wsl-py312.txt
+torch==2.16.0.dev20261102+cu134
+torchvision==0.30.0.dev20261102+cu134
+lmdb==2.2.1
+segmentation-models-pytorch==0.5.0
+
+# TorchCodec 0.11.0 links libnppicc.so.13 without declaring it in wheel metadata.
+nvidia-npp==13.2.0.35
+
+# CUDA 13 Python wheels share nvidia/cu13 (bin, headers and runtime).
+# The CUDA runtime wheels alone cannot build the trainer's CUDA extensions.
+nvidia-cuda-nvcc==13.4.59
+nvidia-cuda-crt==13.4.59
+nvidia-nvvm==13.4.59
+nvidia-cuda-cccl==13.3.4.3.1

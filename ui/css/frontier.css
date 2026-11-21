@@ -1,0 +1,177 @@
+/* "Weigh two scores" (js/runs/frontier.js): choosing a checkpoint by two validation scores at once, under
+   "Which checkpoint measured best?" in a run's Files tab. One quiet control until it is opened.
+   Tokens only; selectors one class deep. No colour carries meaning here. */
+
+.frontier {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 96ch;
+}
+
+.frontier__details {
+  min-width: 0;
+}
+
+.frontier__summary {
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.frontier__summary:hover {
+  color: var(--ink);
+}
+
+.frontier__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2) 0 var(--s1) var(--s3);
+  border-left: 1px solid var(--rule-strong);
+}
+
+/* one line of controls; it wraps when the tab is narrow */
+.frontier__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  min-width: 0;
+}
+
+.frontier__field {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.frontier__label {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* A choice at its natural width, not a bar across the block. */
+.frontier__select {
+  width: auto;
+  max-width: min(32ch, 100%);
+}
+
+/* "For <score>: Higher is better / Lower is better", one group per score the service cannot orient */
+.frontier__directions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s5);
+  min-width: 0;
+}
+
+.frontier__choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.frontier__answer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.frontier__answer:empty {
+  display: none;
+}
+
+/* one group of measurements that can be weighed against each other */
+.frontier__cohort {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.frontier__title {
+  margin: 0;
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.frontier__line {
+  margin: 0;
+  max-width: 80ch;
+  font-variant-numeric: tabular-nums;
+}
+
+/* the answer line holds nothing while the answer is read or could not be */
+.frontier__line:empty {
+  display: none;
+}
+
+.frontier__note {
+  margin: 0;
+  max-width: 80ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+/* The table keeps its own width and scrolls sideways in its box when the tab is narrow. */
+.frontier__tablewrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+}
+
+.frontier__table {
+  width: auto;
+  min-width: min(100%, 56ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* "(higher is better)" after a score's name in its column heading */
+.frontier__direction {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.frontier__file {
+  min-width: 24ch;
+  overflow-wrap: anywhere;
+}
+
+/* how the file was tied to the score, under its name */
+.frontier__how {
+  display: block;
+  color: var(--ink-3);
+}
+
+.frontier__check {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: fit-content;
+  max-width: 100%;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+@media (max-width: 720px) {
+  .frontier__body {
+    padding-left: var(--s2);
+  }
+
+  .frontier__select {
+    max-width: 100%;
+  }
+}

@@ -1,0 +1,642 @@
+/* Options form of the Recipe screen (js/recipe/form.js, fields.js).
+   Flat rows separated by rules. Rows the recipe sets are full ink; rows at their schema default are
+   lighter, so what this recipe actually specifies reads at a glance. */
+
+.form {
+  /* The pane can be narrow while the window is wide (split layout): switch on the pane's width. */
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.form > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.form__pad {
+  padding: var(--s4);
+}
+
+.form__layout {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  /* minmax(0, 1fr): the row must not grow with its content, or the two columns would not scroll */
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* ───────── outline ───────── */
+
+.form__outline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--s2);
+  border-right: 1px solid var(--rule);
+}
+
+.form__search {
+  flex: none;
+}
+
+.form__picker {
+  display: none;
+  flex: none;
+}
+
+.form__nav {
+  display: grid;
+  align-content: start;
+}
+
+.form__navitem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* A long section name plus an issue count wraps onto a second line instead of being clipped. */
+  flex-wrap: wrap;
+  gap: 2px var(--s2);
+  min-height: 30px;
+  min-width: 0;
+  padding: 4px var(--s2);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--ink-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.form__navitem:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.form__navitem[aria-current="true"] {
+  border-left-color: var(--ink);
+  background: var(--hover);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.form__navbadge {
+  flex: none;
+}
+
+/* ───────── settings column ───────── */
+
+.form__settings {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.form__status:not(:empty) {
+  padding: var(--s3) var(--s4) 0;
+}
+
+.form__fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.form__content {
+  padding-bottom: var(--s6);
+}
+
+.form__title {
+  padding: var(--s4) var(--s4) 0;
+}
+
+.form__lede {
+  padding: var(--s1) var(--s4) var(--s3);
+  max-width: 72ch;
+  color: var(--ink-2);
+}
+
+.form__sectionissues:not(:empty) {
+  margin: 0 var(--s4) var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.form__rows {
+  border-top: 1px solid var(--rule);
+}
+
+.form__empty {
+  padding: var(--s3) var(--s4);
+  color: var(--ink-2);
+}
+
+.form__help {
+  padding: 0 var(--s4) var(--s3);
+}
+
+/* Datasets: one quiet line when a template's example paths are not found */
+.form__pointer {
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+}
+
+.form__actions > .select {
+  width: auto;
+  min-width: 14em;
+  max-width: 100%;
+}
+
+.form__actions > .combo {
+  flex: 0 1 22em;
+  width: auto;
+  min-width: 14em;
+  max-width: 100%;
+}
+
+.form__actions > .field__error {
+  flex: 1 1 100%;
+}
+
+/* sub-headings: optim_g, scheduler, network_d, older loss options */
+.form__sub {
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__subhead {
+  padding: var(--s4) var(--s4) var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__subtitle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s4) var(--s4) var(--s1);
+}
+
+.form__subhead > .form__subtitle {
+  padding: 0;
+}
+
+/* dataset and loss blocks */
+.form__block {
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.form__blockhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: var(--sunk);
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__blocktitle {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* groups (<details>) */
+.form__group {
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 38px;
+  padding: var(--s1) var(--s4);
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+}
+
+.form__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* disclosure mark drawn with borders so it follows the ink colour in both themes */
+.form__summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--s1);
+  border-right: 1.5px solid var(--ink-2);
+  border-bottom: 1.5px solid var(--ink-2);
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
+}
+
+.form__group[open] > .form__summary::before {
+  transform: rotate(45deg);
+}
+
+.form__summary:hover {
+  background: var(--hover);
+}
+
+.form__grouptitle {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.form__groupissues:empty {
+  display: none;
+}
+
+.form__groupstate {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-weight: 400;
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  white-space: nowrap;
+}
+
+.form__groupbody {
+  border-top: 1px solid var(--rule);
+  padding-left: var(--s3);
+}
+
+.form__groupdesc {
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* generic object editor */
+.form__nested {
+  padding-left: var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__nestedtitle {
+  padding: var(--s2) var(--s4) var(--s1);
+  color: var(--ink-2);
+}
+
+.form__nestedhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding-right: var(--s4);
+}
+
+/* search results */
+.form__resulthead {
+  padding: var(--s4) var(--s4) var(--s2);
+  border-bottom: 1px solid var(--rule);
+}
+
+.form__resultpath {
+  padding: var(--s2) var(--s4) 0;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+/* focus request: a short highlight, in answer to the person's click on an issue */
+.form__flash {
+  background: var(--selection);
+  transition: background-color 600ms var(--ease);
+}
+
+/* ───────── field rows ───────── */
+
+.fld {
+  display: grid;
+  grid-template-columns: minmax(0, 44%) minmax(0, 1fr);
+  gap: var(--s1) var(--s4);
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+  transition: background-color 600ms var(--ease);
+}
+
+.form__result > .fld {
+  border-bottom: 0;
+}
+
+.form__result {
+  border-bottom: 1px solid var(--rule);
+}
+
+.fld__label {
+  min-width: 0;
+}
+
+.fld__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+}
+
+.fld__key {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.fld__tag {
+  font-size: var(--text-xs);
+  font-stretch: var(--narrow);
+  color: var(--ink-2);
+  padding: 0 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.fld__tag--unknown {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.fld__desc {
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  max-width: 70ch;
+}
+
+.fld__more {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.fld__control {
+  display: grid;
+  gap: var(--s1);
+  align-content: start;
+  min-width: 0;
+}
+
+.fld__line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px var(--s2);
+  min-width: 0;
+}
+
+/* Text controls take the whole line, so a long path is readable; "Set to none" drops below. */
+.fld__line > .input,
+.fld__line > .select,
+.fld__line > .combo,
+.fld__text {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.fld__text {
+  display: flex;
+}
+
+.fld__none {
+  flex: none;
+  margin-left: auto;
+  height: 20px;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.fld__none:hover,
+.fld__none:focus-visible {
+  color: var(--ink);
+}
+
+/* "Set to none", "Use default" and "Remove" sit together at the end of the line. */
+.fld__acts {
+  display: flex;
+  flex: none;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.fld__acts:empty {
+  display: none;
+}
+
+.fld__caption {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.fld__note {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  max-width: 70ch;
+}
+
+/* Lists edited item by item (task_options.class_names) */
+.fld__listbox {
+  display: grid;
+  gap: var(--s1);
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.fld__list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fld__list:empty {
+  display: none;
+}
+
+.fld__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+/* The basis, not the field's own width, decides where the row breaks: only when 6em does not fit. */
+.fld__item > .input,
+.fld__item > .combo {
+  flex: 1 1 6em;
+  width: auto;
+  min-width: 6em;
+}
+
+/* An item's three actions stay together: beside the field where there is room, under it where not. */
+.fld__itemacts {
+  display: flex;
+  flex: none;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+/* Lists of small records (task_options.categories): one grid row per record */
+.fld__tablebody {
+  display: grid;
+  gap: var(--s1);
+}
+
+.fld__tablebody:empty {
+  display: none;
+}
+
+.fld__tablerow {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)) 5.5rem;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.fld__tablehead[hidden] {
+  display: none;
+}
+
+.fld__tablehead {
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
+.fld__itemno {
+  flex: none;
+  min-width: 4ch;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.fld__state {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.fld__pair {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fld__pair > .input {
+  flex: 1 1 0;
+  min-width: 4em;
+}
+
+.fld__dash {
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+}
+
+.fld__issues:empty {
+  display: none;
+}
+
+/* An issue that belongs to a whole block (a dataset, a loss, a group, a schedule inside another) has no
+   row of its own, so its slot takes the row's inset and rule instead of sitting flush against the edge. */
+.form__block > .fld__issues,
+.form__sub > .fld__issues,
+.form__nested > .fld__issues,
+.form__groupbody > .fld__issues {
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.fld__warn {
+  font-size: var(--text-sm);
+  color: var(--warn);
+}
+
+/* Default rows: the control shows the schema default, drawn lighter than values the recipe sets. */
+.fld--default .fld__key {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.fld--default .input,
+.fld--default .select,
+.fld--default .fld__state {
+  color: var(--ink-3);
+}
+
+.fld--default .input,
+.fld--default .select {
+  background: transparent;
+  border-style: dashed;
+}
+
+.fld--add .fld__key {
+  font-family: var(--font-ui);
+  font-weight: 500;
+}
+
+/* ───────── narrow panes ───────── */
+
+@container (max-width: 760px) {
+  .form__layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .form__outline {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .form__search,
+  .form__picker {
+    flex: 1 1 200px;
+    width: auto;
+  }
+
+  .form__picker {
+    display: block;
+  }
+
+  .form__nav {
+    display: none;
+  }
+}
+
+@container (max-width: 560px) {
+  .fld {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

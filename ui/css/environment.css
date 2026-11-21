@@ -1,0 +1,82 @@
+/* Trainer environment dialog (js/components/environment.js). */
+
+.environment {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.environment__facts {
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+
+.environment__value {
+  overflow-wrap: anywhere;
+}
+
+.environment__heading {
+  font-size: var(--text-md);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.environment__table {
+  width: 100%;
+  font-size: var(--text-sm);
+}
+
+.environment__gpu {
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  color: var(--ink-2);
+}
+
+/* The environment facts, then where the recipe form's choices come from. */
+.environment__body {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.environment__lists {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding-bottom: var(--s2);
+}
+
+.environment__lists-lead {
+  margin: 0;
+}
+
+.environment__lists-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.environment__lists-status {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.environment__lists-list {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+}
+
+/* The service's refusal can be the tail of a long trace. */
+.environment__lists-refusal {
+  display: block;
+  max-height: 12em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.environment__lists-issues:empty,
+.environment__lists-error:empty {
+  display: none;
+}

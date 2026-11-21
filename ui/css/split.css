@@ -1,0 +1,268 @@
+/* Dataset split result: js/runs/split.js (analysis job page).
+   Tokens only; selectors one class deep. */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.split__lead {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.split__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.split__muted {
+  color: var(--ink-3);
+}
+
+/* The service's notes, and the issues of a refused edit. */
+.split__notes {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding-left: var(--s4);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.split__facts {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.split__title {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* A title with its button: "Recipe lines" and "Copy". */
+.split__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+/* One file of the job: its name and count, where it is, its checksum, its names. */
+.split__file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+
+.split__file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s4);
+}
+
+.split__file-name {
+  font-weight: 600;
+}
+
+.split__file-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.split__file-facts {
+  font-size: var(--text-sm);
+}
+
+/* Narrow window: the label goes above its value, so a long path keeps the whole width. */
+@media (max-width: 760px) {
+  .split__file-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.split__download {
+  text-underline-offset: 2px;
+}
+
+.split__path-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.split__path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.split__sum {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  overflow-wrap: anywhere;
+}
+
+.split__names {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.split__names-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.split__names-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  min-width: 0;
+  padding-top: var(--s2);
+}
+
+.split__names-box {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 32vh;
+  overflow: auto;
+  padding: var(--s2) var(--s3);
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+.split__names-list {
+  margin: 0;
+  padding-left: 5ch;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.split__name {
+  overflow-wrap: anywhere;
+}
+
+.split__others {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.split__yaml {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  overflow: auto;
+  padding: var(--s3);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+/* The one primary action, what it does not do, and why it is not offered. */
+.split__action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.split__why {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.split__print {
+  margin: 0;
+  max-width: 76ch;
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.split__error {
+  justify-self: stretch;
+  min-width: 0;
+}
+
+.split__raw {
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.split__raw-summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.split__json {
+  max-width: 100%;
+  min-width: 0;
+  max-height: 40vh;
+  margin: var(--s2) 0 0;
+  overflow: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+}
+
+/* "Images per class" (classification). */
+.split__table-wrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.split__table {
+  width: auto;
+  min-width: min(100%, 36ch);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.split__class {
+  overflow-wrap: anywhere;
+}
+
+/* "Shared files" of a video split: the sentence, the example files, how files were compared. */
+.split__shared {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.split__shared-list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding-left: var(--s4);
+  overflow-wrap: anywhere;
+}

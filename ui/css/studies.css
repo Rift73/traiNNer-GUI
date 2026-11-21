@@ -1,0 +1,364 @@
+/* Controlled studies: js/runs/studies.js. Classes .studies__*; one class deep; tokens only. */
+
+.studies {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+.studies__side {
+  display: grid;
+  align-content: start;
+  gap: var(--s3);
+  padding: var(--s4) var(--s3);
+  border-right: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.studies__side-head {
+  display: grid;
+  gap: var(--s2);
+}
+
+.studies__main {
+  display: grid;
+  align-content: start;
+  gap: var(--s5);
+  padding: var(--s4);
+  min-width: 0;
+}
+
+.studies__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.studies__subtitle {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.studies__muted {
+  margin: 0;
+  color: var(--ink-3);
+  max-width: 80ch;
+}
+
+.studies__hint {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.studies__status:empty,
+.studies__new-help:empty,
+.studies__release-status:empty,
+.studies__result:empty,
+.studies__issues:empty {
+  display: none;
+}
+
+/* ───────── list ───────── */
+
+.studies__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.studies__item {
+  border-bottom: 1px solid var(--rule);
+}
+
+.studies__link {
+  display: grid;
+  gap: 2px;
+  padding: var(--s2);
+  border-left: 3px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.studies__link:hover {
+  background: var(--hover);
+}
+
+/* Same selected look as the run list and the analysis jobs list: raised paper and an ink rule. */
+.studies__link[aria-current="page"] {
+  border-left-color: var(--ink);
+  background: var(--raised);
+}
+
+.studies__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.studies__meta {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  color: var(--ink-3);
+}
+
+/* ───────── detail ───────── */
+
+.studies__head {
+  display: grid;
+  gap: var(--s2);
+}
+
+.studies__kv {
+  font-size: var(--text-sm);
+}
+
+.studies__section {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.studies__arms {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--s4);
+}
+
+.studies__arm {
+  display: grid;
+  align-content: start;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.studies__arm-name {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.studies__table,
+.studies__grid {
+  font-size: var(--text-sm);
+  font-stretch: var(--narrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.studies__value {
+  overflow-wrap: anywhere;
+}
+
+.studies__scroll {
+  overflow: auto;
+  min-width: 0;
+}
+
+.studies__seed-head,
+.studies__arm-head {
+  vertical-align: top;
+}
+
+.studies__seed {
+  display: block;
+  margin-bottom: var(--s1);
+}
+
+.studies__cell {
+  min-width: 150px;
+}
+
+.studies__cell-link {
+  display: block;
+  margin-top: var(--s1);
+}
+
+.studies__cell-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-top: var(--s1);
+}
+
+.studies__cell-error {
+  margin: var(--s1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--err);
+}
+
+.studies__counts {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ───────── compare two arms ───────── */
+
+.studies__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s3);
+}
+
+.studies__field {
+  display: grid;
+  gap: var(--s1);
+  flex: 1 1 180px;
+  max-width: 320px;
+  min-width: 0;
+}
+
+.studies__fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.studies__check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--control-h);
+}
+
+.studies__result {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* ───────── across seeds (seed summary of a comparison) ───────── */
+
+.studies__seeds {
+  display: grid;
+  gap: var(--s4);
+  margin-top: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  min-width: 0;
+}
+
+.studies__cohort {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.studies__cohort-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Only when the service gives the metric's direction; the cell also carries the word. */
+.studies__better {
+  color: var(--ok);
+}
+
+.studies__worse {
+  color: var(--err);
+}
+
+.studies__tone-word {
+  display: block;
+  font-size: var(--text-xs);
+}
+
+.studies__excluded {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding-left: var(--s4);
+}
+
+/* ───────── create dialog ───────── */
+
+.studies__form {
+  display: grid;
+  gap: var(--s3);
+}
+
+.studies__arm-list {
+  display: grid;
+  gap: var(--s3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.studies__arm-edit {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-left: 3px solid var(--rule-strong);
+  background: var(--sunk);
+}
+
+.studies__edit-list {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.studies__edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s2) var(--s3);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+.studies__edit-field {
+  display: grid;
+  gap: var(--s1);
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.studies__reading {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.studies__count {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.studies__issues {
+  display: grid;
+  gap: var(--s1);
+}
+
+.studies__issue {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .studies {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .studies__side {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+}
