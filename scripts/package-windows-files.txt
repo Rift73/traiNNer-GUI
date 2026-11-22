@@ -1169,6 +1169,7 @@ ui/css/mobile.css
 ui/css/parameters.css
 ui/css/patches.css
 ui/css/path-picker.css
+ui/css/phone.css
 ui/css/queue.css
 ui/css/recipe-form.css
 ui/css/recipe-source.css
@@ -1193,6 +1194,7 @@ ui/js/components/combobox.js
 ui/js/components/compare.js
 ui/js/components/environment.js
 ui/js/components/path-picker.js
+ui/js/components/phone.js
 ui/js/components/weights.js
 ui/js/dom.js
 ui/js/main.js

@@ -88,6 +88,7 @@ css/runfile.css         run file dialogs               js/runs/runfile.js
 css/path-picker.css     folder and file picker         js/components/path-picker.js
 css/weights.css         checkpoint structure dialog    js/components/weights.js
 css/environment.css     trainer environment dialog     js/components/environment.js
+css/phone.css           Open on phone: rail button, dialog  js/components/phone.js (index.html only)
 css/combobox.css        a value with known choices     js/components/combobox.js
 js/main.js              rail, next-step line, router (#/recipe, #/data, #/runs[/…])
 js/api.js               one function per endpoint; ApiError; imageUrl(), sizedUrl(), artifactUrl()
@@ -1020,6 +1021,35 @@ feature and each live action is the one the desktop page has. What differs is th
 - Modules that read the mark: `store.js` (prefix), `runs/log.js` (lines start wrapped), `recipe/library.js`
   (`data-pane`, the back button), `ui.js` (`confirmOnPhone`, used by `runs/detail.js`, `runs/queue.js`,
   `runs/curricula.js`, `main.js`).
+
+## Open on phone (2026-11-22)
+
+The rail's **Open on phone** button, on the desktop page only, opens a dialog on `/api/phone-access`: the
+private Tailscale link to this trainer as a QR code the service drew (`/api/phone-access/qr.png`) and as
+text, with the steps for the phone beside it. It replaces reading the link from a terminal.
+
+- **One press to the code.** Opening the dialog is asking for the link. When phone access is on but not
+  up (Tailscale was not connected when the trainer opened), the dialog asks the service to try once before
+  it says anything, so what it shows is the state now and not the state at launch.
+- **It recovers by itself.** While open it follows a start under way, keeps asking while Tailscale is not
+  connected or the link is not running, looks again when the person returns to the window, and tests a
+  shown link every few seconds. Instructions the person is reading are not rebuilt by a try that ends as
+  it began. Nothing is asked before the dialog opens, after it closes or while the page is hidden.
+- **Off is the person's choice.** In the `off` state nothing is started until **Turn on phone access** is
+  pressed. That button sends `on`. **Check now** and **Try again** send `check` for an immediate attempt
+  if access is still enabled. Automatic attempts use `retry` and follow the service's backoff.
+- **The link stays in the dialog.** Not in a title, a toast, the address, the console or a preference; the
+  code's image is dropped on close. The dialog says who can open the link.
+- **The code is on the stage.** White paper (`--code-paper`) with crop marks on the neutral booth, the
+  same in both themes, because a camera reads it.
+- **Said twice.** Each state change is announced through a hidden `role="status"` line. What a press led to
+  when the panel did not change is shown at the foot. The state's one button is a stable node in the foot
+  that keeps its focus while it works.
+
+Parts: `js/components/phone.js` (`openPhoneDialog()`; `phoneView(answer)` and `phoneAction(shown)` are pure
+and exported for checks), `css/phone.css`, three functions in `js/api.js`, the button in `js/main.js`
+(which reads the phone edition's mark and leaves that page's bar as it was). `mobile.html` does not link
+`css/phone.css`: it is the page the dialog leads to.
 
 ## How the UI is checked
 

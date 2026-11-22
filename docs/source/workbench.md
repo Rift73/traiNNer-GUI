@@ -33,13 +33,15 @@ The normal trainer CLI, YAML recipes and existing checkpoints remain available. 
 
 ## Open on a phone with Tailscale
 
-Open **traiNNer-GUI.exe** as usual. With Tailscale connected on the PC, the launcher also starts the private phone interface. In PowerShell from the extracted folder, run `.\traiNNer-GUI.exe --phone-status` to see the selected project's HTTPS URL. For a Linux checkout opened directly, use `./trainner-gui tailscale status`. On the iPhone, connect Tailscale using the same account and open that URL in Safari or Chrome. A bookmark keeps the address handy.
+Open **traiNNer-GUI.exe** and choose **Open on phone** on the desktop. On your phone, connect Tailscale with the same account. Scan the QR code with your camera to open the workbench in Safari or Chrome, or use **Copy link**. You can bookmark the address. Keep the desktop workbench running while you use the phone.
+
+If the PC is disconnected, connect Tailscale from the Windows system tray and leave the phone dialog open while it reconnects. If phone access was turned off for this workspace, enable it in the dialog. For a command-line status check, run `.\traiNNer-GUI.exe --phone-status` from the extracted Windows folder or `./trainner-gui tailscale status` in your Linux checkout.
 
 The phone uses the PC's training service. Its file picker browses the trainer's folders, including mounted Windows drives. Tap a folder once to open it, then choose **Use this folder** to select it. For a checkpoint, tap the filename and confirm. You can also paste a Windows or WSL path and tap **Go**. Back returns to the folder you last visited, and Up opens the parent. The desktop browser continues to use its ordinary localhost URL.
 
 - `./trainner-gui tailscale on` starts or retries phone access and prints its address. Use this after connecting Tailscale if it was offline at launch.
 - `./trainner-gui tailscale off` closes phone access and remembers that choice. The desktop trainer keeps running.
-- The regular checkout enables phone access automatically. A separate `--state-dir` requires an explicit `tailscale on` for that state.
+- The regular checkout enables phone access automatically. For a separate `--state-dir`, enable phone access once from the desktop dialog or with `tailscale on`.
 
 The PC needs a signed-in Tailscale installation, tailnet HTTPS enabled, and a tailnet access rule permitting the returned port. The integration uses a private foreground **Tailscale Serve** route and accepts the PC owner's Tailscale identity. The gateway closes when the Studio service exits. Existing Serve routes keep their ports. [Tailscale Serve documentation](https://tailscale.com/docs/features/tailscale-serve)
 

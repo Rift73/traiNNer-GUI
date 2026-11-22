@@ -165,6 +165,23 @@ function buildRail() {
     h('span', { class: 'conn__dot', 'aria-hidden': 'true' }),
     connText,
   );
+  // Open on phone: the desktop page only. The phone edition (mobile.html marks the document) is the page
+  // this leads to, so its bar stays as it was.
+  const phoneButton =
+    document.documentElement.dataset.edition === 'mobile'
+      ? null
+      : h(
+          'button',
+          {
+            class: 'btn btn--sm phone-open',
+            type: 'button',
+            'aria-haspopup': 'dialog',
+            title: 'Use this trainer from your phone: shows a private link as a QR code.',
+            onclick: openOnPhone,
+          },
+          h('span', { class: 'phone-open__glyph', 'aria-hidden': 'true' }),
+          h('span', { class: 'phone-open__label' }, 'Open on phone'),
+        );
   themeButton = h(
     'button',
     {
@@ -183,9 +200,26 @@ function buildRail() {
     railEl,
     h('a', { class: 'wordmark', href: '#/recipe', 'aria-label': 'traiNNer GUI' }, 'traiNNer', h('small', null, ' GUI')),
     stations,
-    h('div', { class: 'rail__end' }, connEl, themeButton),
+    h('div', { class: 'rail__end' }, connEl, phoneButton, themeButton),
   );
   renderTheme();
+}
+
+// One dialog at a time, also while its module is still on the way.
+let phoneOpening = false;
+
+async function openOnPhone() {
+  if (phoneOpening) return;
+  phoneOpening = true;
+  try {
+    const part = await import('./components/phone.js');
+    await part.openPhoneDialog();
+  } catch (error) {
+    console.error(error);
+    toast(`Open on phone could not be shown: ${error.message}`, { kind: 'err' });
+  } finally {
+    phoneOpening = false;
+  }
 }
 
 function renderTheme() {

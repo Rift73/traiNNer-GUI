@@ -40,6 +40,8 @@
   --gt-on-stage: #5fd0ee;
   --lq-on-stage: #ecd955;
   --out-on-stage: #f283d6;
+  /* a QR code is read by a camera, not judged by eye: its paper is white in both themes */
+  --code-paper: #ffffff;
 
   /* roles */
   --gt: #006d8c;

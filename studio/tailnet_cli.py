@@ -29,6 +29,10 @@ class TailnetError(RuntimeError):
     """Tailscale identity, Serve configuration, or child shutdown failed."""
 
 
+class TailnetDisconnected(TailnetError):
+    """Tailscale is installed but its connection or Serve session dropped."""
+
+
 class TailnetInfo(NamedTuple):
     cli: str
     host: str
@@ -82,19 +86,31 @@ def _find_cli() -> str:
     raise TailnetError("No installed Tailscale CLI was found.")
 
 
+def daemon_unreachable(detail: str) -> bool:
+    """Recognize connection errors shared by current and older CLI versions."""
+    message = detail.casefold()
+    return (
+        not any(text in message for text in ("permission denied", "access is denied"))
+        and any(text in message for text in (
+            "failed to connect to local tailscale daemon",
+            "failed to connect to local tailscaled",
+            "failed to connect to tailscale service",
+        ))
+    )
+
+
 def _read_json(cli: str, *args: str) -> Any:
     command = "tailscale " + " ".join(args)
     try:
         result = _query(cli, *args)
     except subprocess.TimeoutExpired as exc:
-        raise TailnetError(f"{command} timed out.") from exc
+        raise TailnetDisconnected(f"{command} timed out.") from exc
     except OSError as exc:
         raise TailnetError(f"Could not run {command}: {exc}") from exc
     if result.returncode:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        raise TailnetError(
-            f"{command} exited with {result.returncode}. {detail}".strip()
-        )
+        error = TailnetDisconnected if daemon_unreachable(detail) else TailnetError
+        raise error(f"{command} exited with {result.returncode}. {detail}".strip())
     try:
         return json.loads(result.stdout)
     except ValueError as exc:
@@ -125,13 +141,17 @@ def _dns_name(raw: Any) -> str:
 def _identity(cli: str) -> tuple[str, str]:
     status = _object(_read_json(cli, "status", "--json", "--peers=false"), "status")
     state = status.get("BackendState")
-    if state != "Running":
-        raise TailnetError(
+    if state in ("NoState", "NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting"):
+        raise TailnetDisconnected(
             f"Tailscale is disconnected or signed out (state {state!r})."
         )
+    if state != "Running":
+        raise TailnetError(f"Tailscale returned an unknown backend state {state!r}.")
+    if status.get("Self", False) is None or status.get("CurrentTailnet", False) is None:
+        raise TailnetDisconnected("Tailscale is not connected to a tailnet.")
     node = _object(status.get("Self"), "Self")
     if node.get("Online") is not True or node.get("Expired", False) is not False:
-        raise TailnetError(
+        raise TailnetDisconnected(
             "The local Tailscale device is offline or its key has expired."
         )
 
@@ -308,6 +328,12 @@ class _ServeProcess(subprocess.Popen[bytes]):
         )
 
 
+def check_connection(info: TailnetInfo) -> None:
+    """Confirm the connected device and owner still match the foreground session."""
+    if _identity(info.cli) != (info.host, info.login):
+        raise TailnetError("The local Tailscale device or signed-in owner changed.")
+
+
 def foreground_serve(
     info: TailnetInfo, target_port: int, log: IO[bytes] | IO[str]
 ) -> subprocess.Popen[bytes]:
@@ -317,8 +343,7 @@ def foreground_serve(
         raise TailnetError(
             "The HTTPS port was not selected from the Studio Serve range."
         )
-    if _identity(info.cli) != (info.host, info.login):
-        raise TailnetError("The local Tailscale device or signed-in owner changed.")
+    check_connection(info)
     if info.port in _serve_bindings(info.cli):
         raise TailnetError(f"Tailscale Serve port {info.port} is already in use.")
     try:
@@ -334,33 +359,27 @@ def _handlers(binding: _Binding, host_port: str) -> _JsonObject:
 def is_serving(info: TailnetInfo, target_port: int) -> bool:
     """Check the exact HTTPS root route and reject Funnel on this port."""
     host_port = f"{info.host}:{info.port}"
-    try:
-        target = _target_url(target_port)
-        bindings = _serve_bindings(info.cli).get(info.port)
-        if not bindings:
-            return False
-        if len(bindings) == 1:
-            binding = bindings[0]
-            handlers = _handlers(binding, host_port)
-            root = _map(handlers, "/")
-            if (
-                binding.tcp.get("HTTPS") is True
-                and binding.tcp.get("HTTP", False) is False
-                and not binding.tcp.get("TCPForward")
-                and not binding.funnel
-                and binding.web.keys() == {host_port}
-                and handlers.keys() == {"/"}
-                and root.get("Proxy") == target
-                and not root.get("Path")
-                and not root.get("Text")
-            ):
-                return True
-        _LOG.warning(
-            "Tailscale Serve port %d has an unexpected or public route.", info.port
-        )
-    except (TailnetError, ValueError) as exc:
-        _LOG.warning("Could not verify private Tailscale Serve: %s", exc)
-    return False
+    target = _target_url(target_port)
+    bindings = _serve_bindings(info.cli).get(info.port)
+    if not bindings:
+        return False
+    if len(bindings) == 1:
+        binding = bindings[0]
+        handlers = _handlers(binding, host_port)
+        root = _map(handlers, "/")
+        if (
+            binding.tcp.get("HTTPS") is True
+            and binding.tcp.get("HTTP", False) is False
+            and not binding.tcp.get("TCPForward")
+            and not binding.funnel
+            and binding.web.keys() == {host_port}
+            and handlers.keys() == {"/"}
+            and root.get("Proxy") == target
+            and not root.get("Path")
+            and not root.get("Text")
+        ):
+            return True
+    raise TailnetError(f"Tailscale Serve port {info.port} has an unexpected or public route.")
 
 
 def _wait_for_removal(info: TailnetInfo, target: str) -> None:

@@ -16,11 +16,15 @@ CUDA training in the managed environment requires an NVIDIA Ampere or newer GPU 
 
 The pinned Python package downloads total about **3.57 GiB** based on published package sizes. Allow about **20 GiB** for the managed WSL ext4 filesystem, including the installed runtime and cached downloads.
 
+## Open on phone
+
+Connect Tailscale on the PC and phone with the same account. Choose **Open on phone** in the desktop workbench and scan the QR code or copy the private link.
+
 ## Updates
 
-Keep launching the EXE from the folder you extracted. The packaged launcher checks the [latest GitHub release](https://github.com/Rift73/traiNNer-GUI/releases/latest) in the background. An offline launch opens the installed version. If you downloaded the original Preview 1, extract this refreshed ZIP over the original launcher folder once to keep your shortcut.
+Keep launching the EXE from the folder you extracted. The packaged launcher checks the [latest GitHub release](https://github.com/Rift73/traiNNer-GUI/releases/latest) in the background. An offline launch opens the installed version.
 
-On a managed install, an update prepares the new trainer alongside the current one. Switching versions waits for training and queued work to finish. Matching Python dependencies are reused. Your Windows workspace keeps the same project UUID, recipes, checkpoints and logs. Refresh a connected phone after the switch to load the updated UI. If your original Preview 1 shortcut used `--state-dir`, keep that argument on the replacement shortcut so its queue is checked during migration.
+On a managed install, an update prepares the new trainer alongside the current one. Switching versions waits for training and queued work to finish. Matching Python dependencies are reused. Your Windows workspace keeps the same project UUID, recipes, checkpoints and logs. Refresh a connected phone after the switch to load the updated UI.
 
 If you chose **Use an existing WSL checkout**, the launcher can update independently. Update that checkout through your normal Git workflow.
 

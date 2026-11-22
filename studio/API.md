@@ -4,6 +4,10 @@ Loopback JSON API served together with ui/ by the parent in WSL, same origin. GE
 
 When saving changes to an open draft, send the revision returned by the last read or save. A concurrent edit returns HTTP 409. The revision covers the exact UTF-8 bytes on disk, including a byte-order mark and line endings. Omit the revision to create a named draft or explicitly overwrite it.
 
+## Desktop phone access
+
+`GET /api/phone-access` reports the selected workspace's phone gateway. A ready response includes the private HTTPS URL. `GET /api/phone-access/qr.png` serves that URL as a QR code once ready. `POST /api/phone-access` accepts a JSON `action` of `on` (enable access), `check` (immediately retry an enabled connection), or `retry` (automatically retry an enabled connection with backoff). These endpoints are available from the local desktop workbench.
+
 ## Windows project workspace
 
 Create a project folder on a Windows drive and put a UTF-8 file named

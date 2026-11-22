@@ -19,7 +19,7 @@ from threading import BoundedSemaphore
 from urllib.parse import unquote
 
 from .desktop import _boot_id, _owns_live_lock, _start_ticks
-from .server import MAX_BODY
+from .server import MAX_BODY, is_phone_access_route
 
 _LOOPBACK = "127.0.0.1"
 _CONNECT_TIMEOUT = 1.0
@@ -208,6 +208,10 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             or route.startswith("//") or "\\" in route or _CONTROL.search(route)
         ):
             raise _RequestError(HTTPStatus.BAD_REQUEST, "Use an origin-form request target.")
+        if is_phone_access_route(route):
+            raise _RequestError(
+                HTTPStatus.FORBIDDEN, "Phone access settings are available on the desktop only."
+            )
         if self.headers.get_all("Transfer-Encoding") or self.headers.get_all("Trailer"):
             raise _RequestError(HTTPStatus.BAD_REQUEST, "Use a fixed-length request body.")
         if self.headers.get_all("Expect"):

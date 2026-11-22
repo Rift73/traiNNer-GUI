@@ -24,6 +24,11 @@ from .yaml_edit import render
 
 LOG = logging.getLogger("trainner-gui")
 MAX_BODY = 6 * 1024 * 1024
+PHONE_ACCESS_ROUTE = "/api/phone-access"
+
+
+def is_phone_access_route(route: str) -> bool:
+    return route == PHONE_ACCESS_ROUTE or route.startswith(PHONE_ACCESS_ROUTE + "/")
 
 
 def required(obj, key, kind=str):
@@ -104,6 +109,10 @@ class Services:
         return info
 
     def get(self, route, query):
+        if route == PHONE_ACCESS_ROUTE:
+            from . import tailnet
+
+            return tailnet.phone_access(self.root, self.state)
         if route == "/api/curricula":
             return self.curricula.list_curricula()
         if route == "/api/curriculum":
@@ -220,6 +229,10 @@ class Services:
             return self._post(route, body)
 
     def _post(self, route, body):
+        if route == PHONE_ACCESS_ROUTE:
+            from . import tailnet
+
+            return tailnet.request_phone_access(self.root, self.state, required(body, "action"))
         if route == "/api/catalog/refresh":
             return self.library.refresh_catalog()
         if route == "/api/reproduction/export":
@@ -347,6 +360,7 @@ class RecipeRejected(ValueError):
 class Handler(BaseHTTPRequestHandler):
     server_version = "traiNNer-GUI"
     sys_version = ""
+    _cache_control = "no-cache"
 
     def __init__(self, *args, services: Services, **kwargs):
         self.services = services
@@ -360,7 +374,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(size))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", self._cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "DENY")
@@ -402,10 +416,46 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Sec-Fetch-Site") == "cross-site":
             raise PermissionError("Cross-site access is disabled.")
 
+    def _phone_access_qr(self) -> None:
+        info = self.services.get(PHONE_ACCESS_ROUTE, {})
+        if info.get("state") != "ready":
+            raise FileNotFoundError("Phone access is not ready.")
+
+        from .tailnet_cli import TailnetError, _dns_name
+
+        url = info.get("url")
+        invalid_url = "Phone access reported an invalid ready URL."
+        if not isinstance(url, str):
+            raise RuntimeError(invalid_url)
+        try:
+            target = urlsplit(url)
+            host = _dns_name(target.hostname)
+            port = target.port
+        except (TailnetError, ValueError) as exc:
+            raise RuntimeError(invalid_url) from exc
+        authority = host if port is None else f"{host}:{port}"
+        if (
+            not host.endswith(".ts.net") or port == 0
+            or url not in (f"https://{authority}/", f"https://{authority}")
+        ):
+            raise RuntimeError(invalid_url)
+
+        import cv2
+
+        modules = cv2.QRCodeEncoder_create().encode(url)
+        # Use a white quiet zone and keep module edges sharp at a readable size.
+        bordered = cv2.copyMakeBorder(modules, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+        image = cv2.resize(bordered, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+        ok, png = cv2.imencode(".png", image)
+        if not ok:
+            raise RuntimeError("Could not encode the phone access QR code as PNG.")
+        self._bytes(png.tobytes(), "image/png")
+
     def _dispatch(self):
-        self._authorize()
         request = urlsplit(self.path)
         route = unquote(request.path)
+        self._cache_control = "no-store" if is_phone_access_route(route) else "no-cache"
+        self._authorize()
         query = {k:v[-1] for k,v in parse_qs(request.query, max_num_fields=32).items()}
         if self.command == "POST":
             if not route.startswith("/api/"):
@@ -433,6 +483,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._bytes(data,mime)
                 return
             self._json(self.services.post(route,body))
+            return
+        if route == PHONE_ACCESS_ROUTE + "/qr.png":
+            self._phone_access_qr()
             return
         if route == "/api/analysis/artifact":
             self._file(self.services.analyses.artifact(required(query, "id"), required(query, "path")),

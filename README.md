@@ -10,6 +10,8 @@ Train models locally from your browser. Edit YAML recipes, inspect datasets, and
 
 Keep using the same EXE. It downloads updates in the background and applies them on an idle launch. If you connected your own WSL checkout, you manage its code updates. The browser runs on Windows and training runs in Linux. The managed CUDA runtime requires an NVIDIA Ampere or newer GPU and a compatible Windows driver. CPU recipes can run without an NVIDIA GPU.
 
+To use your phone, connect Tailscale on both devices, select **Open on phone** in the desktop workbench, and scan the QR code.
+
 ## Your files
 
 The Windows project contains your recipes, logs, weights, and resumable training state. Back up the **whole project folder** plus any external datasets or files its recipes reference. Back up earlier Linux and CLI runs in their original locations.

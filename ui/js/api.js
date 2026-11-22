@@ -117,6 +117,24 @@ export const api = {
   /** The trainer machine as it is: interpreter, package versions, platform, CPU, disk. */
   environment: (opts) => get('/api/environment', opts),
 
+  // ───────── phone access ─────────
+
+  /**
+   * The private link that opens this trainer on a phone (through Tailscale), as the service holds it now.
+   * => {state: 'ready'|'starting'|'off'|'disconnected'|'unavailable'|'stopped', url?, detail?, retryable?}
+   * `url` comes with 'ready' only. 'off' stays until the person turns it on; every other state is on.
+   */
+  phoneAccess: (opts) => get('/api/phone-access', opts),
+  /**
+   * action: 'on' (turn it on, keep it on for later launches, and start it at once: the person's Turn on
+   * only) | 'check' (start it again at once if it is on: the person's Check now or Try again) | 'retry'
+   * (the same asked by the page itself; the service spaces these out). 'check' and 'retry' leave it off
+   * where it was turned off. => the same answer, without waiting for the start
+   */
+  setPhoneAccess: (action, opts) => post('/api/phone-access', { action }, opts),
+  /** The ready link as a QR code the service drew itself => Blob (PNG) */
+  phoneAccessQr: (opts) => get('/api/phone-access/qr.png', { ...opts, binary: true }),
+
   // ───────── recipes ─────────
 
   /** => [{path, name, family, task, architecture, scale} | {path, name, family, error}] */
