@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Rift73/traiNNer-GUI/refs/heads/main/schemas/redux-config.schema.json
 # Copy to options/train/ and point dataroot_lq at each labeled split.
 #   datasets/classification/train/dog/one.jpg
 #   datasets/classification/train/cat/two.jpg

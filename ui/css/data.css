@@ -1039,3 +1039,8 @@
 .data__regunit {
   color: var(--ink-3);
 }
+/* A video clip dataset in the recipe entries: its videos, one per line. */
+.data__videopath {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

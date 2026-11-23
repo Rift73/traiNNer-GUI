@@ -2,6 +2,12 @@
 
 Train models locally from your browser. Edit YAML recipes, inspect datasets, and monitor training and validation. Choose a template for image or video restoration, classification, segmentation, detection, or tabular regression. You can also import NeoSR recipes.
 
+## Training performance
+
+- **CUDA Graphs from Windows.** Training runs in WSL 2. On supported NVIDIA workloads, PyTorch’s `reduce-overhead` compile mode replays GPU work with CUDA Graphs to cut CPU launch overhead. `max-autotune` also benchmarks kernels during the initial compile to find faster ones for the rest of training. [Compile options](docs/source/config_reference.md#compile_mode)
+- **Keep image datasets on Windows.** In 300-update DiverSeg-IP benchmarks, the original loader read loose Windows files at **274 images/s** in the first run and **1,212 images/s** in a later benchmark. The optimized loader reached **1,468 images/s** from the same Windows folder. In a separate full-epoch comparison (523,392 images), a Windows ZIP created with **Store** compression sustained **1,713 images/s**, compared with **1,620 images/s** from loose files on WSL ext4. All runs used 2× WSR Compact on an RTX 5090, batch 32, with 128 px LQ crops. [Windows dataset setup](docs/source/workbench.md#first-run)
+- **Faster on-the-fly degradation.** The loader reads images ahead, and the trainer prepares upcoming batches while the GPU trains on the current one. With the revamped JPEG, WebP and video-codec paths, a WSR Compact batch of 32 went from **124 ms per training update to 77 ms with real video codecs**, or **70 ms with the default 50% video-codec approximation**. [Degradation options](docs/source/config_reference.md#compress_video_approx_prob-and-compress_webp_approx)
+
 ## Start on Windows
 
 1. Download the [Windows x64 ZIP](https://github.com/Rift73/traiNNer-GUI/releases/latest/download/traiNNer-GUI-Windows-x64.zip), extract it, and open **traiNNer-GUI.exe**.
@@ -15,6 +21,18 @@ To use your phone, connect Tailscale on both devices, select **Open on phone** i
 ## Your files
 
 The Windows project contains your recipes, logs, weights, and resumable training state. Back up the **whole project folder** plus any external datasets or files its recipes reference. Back up earlier Linux and CLI runs in their original locations.
+
+## Train on a rented Linux GPU
+
+Run these commands in the server’s SSH terminal.
+
+```sh
+git clone --depth 1 https://github.com/Rift73/traiNNer-GUI.git
+cd traiNNer-GUI
+./trainner-gui remote
+```
+
+Connect your desktop and phone to Tailscale with the same account. Setup prints private links to both views of the same trainer. On later visits, run `./trainner-gui remote` from the checkout. [Remote setup and Colab requirements](docs/source/workbench.md#train-on-a-remote-linux-server)
 
 ## Linux and WSL checkouts
 

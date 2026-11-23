@@ -175,6 +175,23 @@
   flex: 1 1 100%;
 }
 
+/* A block added under a name of its own (a metric, a schedule for one optimizer): its type and its
+   name share the line with the button where there is room. */
+.form__addkeyed > .combo,
+.form__addkeyed > .input {
+  flex: 1 1 12em;
+  width: auto;
+  min-width: 10em;
+  max-width: 22em;
+}
+
+/* "Undo removal": said where the thing was, apart from the controls that add a new one. */
+.form__undo {
+  border-bottom: 1px solid var(--rule);
+  background: var(--sunk);
+  color: var(--ink-2);
+}
+
 /* sub-headings: optim_g, scheduler, network_d, older loss options */
 .form__sub {
   border-bottom: 1px solid var(--rule);
@@ -566,6 +583,13 @@
   display: none;
 }
 
+/* A sentence from the service can carry whole paths (the video index check names the file and its index):
+   it breaks inside its column instead of widening the row. */
+.fld__issues {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* An issue that belongs to a whole block (a dataset, a loss, a group, a schedule inside another) has no
    row of its own, so its slot takes the row's inset and rule instead of sitting flush against the edge. */
 .form__block > .fld__issues,
@@ -639,4 +663,41 @@
   .fld {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* Starting weights for RDUAL (form.js rdualGuide) and the training videos panel's place in a dataset. */
+.form__rdual {
+  margin-bottom: var(--s3);
+}
+
+.form__rdualtitle {
+  margin: 0 0 var(--s1);
+}
+
+/* A real list: markers outside, so a wrapped line hangs under its first word. */
+.form__rduallist {
+  display: grid;
+  gap: var(--s1);
+  margin: 0 0 var(--s2);
+  padding-left: 1.25em;
+  list-style: disc outside;
+}
+
+.form__rdualcase {
+  display: list-item;
+  overflow-wrap: anywhere;
+}
+
+.form__rdualhead {
+  font-weight: 500;
+}
+
+.form__rdualnote {
+  margin: 0 0 var(--s2);
+  overflow-wrap: anywhere;
+}
+
+.form__rdualacts {
+  flex-wrap: wrap;
+  gap: var(--s2);
 }

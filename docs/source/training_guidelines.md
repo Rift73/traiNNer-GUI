@@ -108,7 +108,15 @@ in new training states; older states load with a warning and fresh controller
 history.
 
 Eligible CUDA Adam/AdamW runs select fused updates when neither `fused`
-nor `foreach` is set. A resumed optimizer retains its saved settings.
+nor `foreach` is set. Full-state resume restores optimizer history. Editing
+`train.optim_g.lr`, `optim_d.lr` or `optim_ae.lr` rebases that optimizer's
+current rate and remaining schedule, including cycle bounds and LR floors,
+by the ratio of new to old base rate. An unscheduled optimizer takes the new
+rate directly. When raising a zero base, the trainer positions the configured
+schedule at the saved update. A plateau scheduler starts from the requested
+rate and retains its observations. Imported legacy states that lack a
+recoverable base rate accept the original value in `train.resume_previous_lrs`
+(for example `{g: 0.0002}`).
 For a single fused generator optimizer with accumulation one and the gradient
 scaler disabled, the GPU can reject a nonfinite update before the host reads
 the result. The optimizer skips its weight and moment update. EMA can still

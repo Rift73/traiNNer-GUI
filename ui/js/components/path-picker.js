@@ -2,6 +2,12 @@
 // picker never guesses whether a path exists.
 //
 //   pickPath({title, mode: 'folder'|'file', start, extensions, confirmLabel}) -> Promise<string|null>
+//   pickPath({mode: 'file', multiple: true, selected, confirmLabel: string | (count) => string, …})
+//     -> Promise<string[]|null>: several files ticked in one visit, in natural order by path (never empty)
+//
+// Ticking several files (multiple, file mode only) is opt-in; without it the picker is exactly the one
+// above. The ticked files are a set of absolute paths kept for the whole visit, so files of two folders
+// can be chosen; `selected` seeds it.
 //
 // Two ways of browsing, one component:
 //   - the desktop page: a click highlights a row, a double click or Enter opens it, and the button
@@ -88,14 +94,33 @@ export function cleanTyped(text) {
 
 const isAbort = (error) => error?.name === 'AbortError';
 
+/** Paths in natural order (E2 before E10), the order the several-files mode returns. */
+const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+export function naturalSort(paths) {
+  return [...paths].sort((a, b) => naturalCompare(a, b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** The folder part of an absolute path ('' when there is none). */
+export function folderOfPath(path) {
+  const text = String(path ?? '').replace(/[\\/]+$/, '');
+  const cut = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'));
+  return cut < 0 ? '' : cut === 0 ? text.slice(0, 1) : text.slice(0, cut);
+}
+
 // ───────── dialog ─────────
 
 /**
  * @param {{title?: string, mode?: 'folder'|'file', start?: string, extensions?: string[]|null, confirmLabel?: string}} options
  * @returns {Promise<string|null>} absolute path on the trainer machine, or null when cancelled
  */
-export function pickPath({ title, mode = 'folder', start = '', extensions = null, confirmLabel } = {}) {
+export function pickPath({ title, mode = 'folder', start = '', extensions = null, confirmLabel, multiple = false, selected = [] } = {}) {
   const fileMode = mode === 'file';
+  /** Several files ticked in one visit (file mode only); every other mode is untouched by it. */
+  const multi = fileMode && multiple === true;
+  /** The ticked files: absolute paths, kept while folders change. */
+  const picked = new Set(multi && Array.isArray(selected) ? selected.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()) : []);
+  /** The row ticked or unticked last in the folder on screen (the start of a Shift range). */
+  let anchor = null;
   const phone = document.documentElement.dataset.edition === 'mobile';
   const ids = {
     path: uid('picker-path'),
@@ -105,7 +130,8 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     status: uid('picker-status'),
     chosen: uid('picker-chosen'),
   };
-  const confirmText = confirmLabel || (fileMode ? 'Use this file' : 'Use this folder');
+  const labelFor = (count) => (typeof confirmLabel === 'function' ? confirmLabel(count) : confirmLabel || (multi ? 'Use these files' : fileMode ? 'Use this file' : 'Use this folder'));
+  const confirmText = labelFor(picked.size);
 
   /** {path, parent, entries, next} of the folder on screen, or null before the first answer */
   let listing = null;
@@ -212,14 +238,21 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     class: 'picker__list',
     id: ids.list,
     role: 'listbox',
+    'aria-multiselectable': multi ? 'true' : null,
     tabindex: '0',
     'aria-label': fileMode ? 'Folders and files' : 'Folders',
     onkeydown: onListKey,
   });
   const statusLine = h('p', { class: 'picker__status', id: ids.status, role: 'status' });
   const moreButton = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: () => listing && load(listing.path, { append: true }) }, 'Load more');
-  const chosenLine = h('p', { class: 'picker__chosen', id: ids.chosen });
+  const chosenLine = h('p', { class: 'picker__chosen', id: ids.chosen, role: multi ? 'status' : null });
   let confirmButton;
+  // Several files: two actions on the set, between the name filter and the list.
+  const selectAllButton = multi ? h('button', { class: 'btn btn--sm btn--quiet picker__multibtn', type: 'button', onclick: () => selectAllShown() }, 'Select all shown') : null;
+  const clearButton = multi ? h('button', { class: 'btn btn--sm btn--quiet picker__multibtn', type: 'button', onclick: () => clearSelection() }, 'Clear selection') : null;
+  // The range gesture is not discoverable by itself; a phone has no Shift key, so it is not named there.
+  const rangeHint = multi && !phone ? h('span', { class: 'picker__multihint' }, 'Shift+click ticks a range.') : null;
+  const multiTools = multi ? h('div', { class: 'picker__multitools', role: 'group', 'aria-label': 'Selection' }, selectAllButton, clearButton, rangeHint) : null;
 
   const pathHelp = phone
     ? 'Paste or type a Windows or WSL path, then tap Go.'
@@ -248,6 +281,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
       showFiles?.el,
       hidden.el,
     ),
+    multiTools,
     noteBox,
     errorBox,
     list,
@@ -297,7 +331,41 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     return active?.kind === 'folder' ? joinPath(listing.path, active.name) : listing.path;
   }
 
+  /** Several files: what the foot says, and the button that hands the set back. */
+  function renderPicked() {
+    const n = picked.size;
+    if (confirmButton) {
+      confirmButton.disabled = !n || busy;
+      const label = labelFor(n);
+      if (confirmButton.textContent !== label) confirmButton.textContent = label;
+    }
+    const here = listing ? [...picked].filter((p) => folderOfPath(p) === listing.path.replace(/\/+$/, '') || (listing.path === '/' && folderOfPath(p) === '/')).length : n;
+    const elsewhere = n - here;
+    const text = !n ? 'Tick the files to use.' : `${fmt.plural(n, 'file')} selected${elsewhere ? `, ${fmt.int(elsewhere)} of them in other folders` : ''}`;
+    fill(chosenLine, h('span', { class: n ? 'picker__chosenlabel picker__picked' : 'muted' }, text));
+    // The two actions say when they would do nothing (aria-disabled keeps them in the tab order with their reason).
+    const shown = shownPickable();
+    const allTicked = shown.length > 0 && shown.every((entry) => picked.has(pathOf(entry)));
+    setAction(selectAllButton, shown.length && !allTicked ? '' : shown.length ? 'Every file shown is ticked.' : 'No file shown here can be ticked.');
+    setAction(clearButton, n ? '' : 'No file is ticked.');
+  }
+
+  function setAction(button, reason) {
+    if (!button) return;
+    if (reason) {
+      button.setAttribute('aria-disabled', 'true');
+      button.title = reason;
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.removeAttribute('title');
+    }
+  }
+
   function renderChosen() {
+    if (multi) {
+      renderPicked();
+      return;
+    }
     const path = chosenPath();
     if (confirmButton) confirmButton.disabled = !path || busy;
     if (phone) {
@@ -310,6 +378,10 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   }
 
   function confirm(close) {
+    if (multi) {
+      if (picked.size) close(naturalSort(picked));
+      return;
+    }
     const path = chosenPath();
     if (path) close(path);
   }
@@ -524,6 +596,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     rowByKey = new Map();
     active = null;
     openingRow = null;
+    anchor = null;
     fill(list);
     appendRows(listing.entries);
     if (phone) {
@@ -553,45 +626,113 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   const keyOf = (entry) => `${entry.kind}\u0000${entry.name}`;
 
   function selectable(entry) {
+    // Several files: a file the extensions leave out cannot be ticked.
+    if (multi && entry.kind === 'file') return matchesExtensions(entry.name, extensions);
     return entry.kind === 'folder' || fileMode;
+  }
+
+  // ── several files ──
+  const pathOf = (entry) => joinPath(listing?.path ?? '', entry.name);
+  const pickable = (entry) => multi && entry?.kind === 'file' && matchesExtensions(entry.name, extensions);
+  const shownPickable = () => (listing?.entries ?? []).filter(pickable);
+
+  function paintPicked(entry) {
+    const row = rowByKey.get(keyOf(entry));
+    if (!row) return;
+    const on = picked.has(pathOf(entry));
+    row.setAttribute('aria-selected', String(on));
+    row.classList.toggle('picker__row--picked', on);
+  }
+
+  /** Tick or untick one file; `range` (Shift) ticks every file from the anchor to it. */
+  function toggleEntry(entry, { range = false } = {}) {
+    if (!pickable(entry)) return;
+    const entries = listing?.entries ?? [];
+    const from = range && anchor ? entries.findIndex((e) => keyOf(e) === anchor) : -1;
+    const to = entries.findIndex((e) => keyOf(e) === keyOf(entry));
+    if (from >= 0 && to >= 0) {
+      for (let i = Math.min(from, to); i <= Math.max(from, to); i += 1) {
+        if (!pickable(entries[i])) continue;
+        picked.add(pathOf(entries[i]));
+        paintPicked(entries[i]);
+      }
+    } else {
+      const path = pathOf(entry);
+      if (picked.has(path)) picked.delete(path);
+      else picked.add(path);
+      paintPicked(entry);
+    }
+    anchor = keyOf(entry);
+    renderPicked();
+  }
+
+  function selectAllShown() {
+    if (selectAllButton?.getAttribute('aria-disabled') === 'true') return;
+    for (const entry of shownPickable()) {
+      picked.add(pathOf(entry));
+      paintPicked(entry);
+    }
+    renderPicked();
+  }
+
+  function clearSelection() {
+    if (clearButton?.getAttribute('aria-disabled') === 'true') return;
+    picked.clear();
+    for (const entry of listing?.entries ?? []) if (pickable(entry)) paintPicked(entry);
+    anchor = null;
+    renderPicked();
+  }
+
+  /** Desktop, several files: a click ticks a file (Shift: the range) and highlights a folder, which a double click opens. */
+  function clickEntry(entry, event) {
+    if (!selectable(entry)) return;
+    setActive(entry, false);
+    if (entry.kind === 'file') toggleEntry(entry, { range: Boolean(event?.shiftKey) });
   }
 
   function appendRows(entries) {
     const frag = document.createDocumentFragment();
     for (const entry of entries) {
       const dim = entry.kind === 'file' && (!fileMode || !matchesExtensions(entry.name, extensions));
+      const tick = pickable(entry);
       const row = h(
         'div',
         {
-          class: `picker__row picker__row--${entry.kind}${dim ? ' picker__row--dim' : ''}`,
+          class: `picker__row picker__row--${entry.kind}${dim ? ' picker__row--dim' : ''}${multi ? ' picker__row--multi' : ''}`,
           id: uid('picker-row'),
           role: 'option',
-          'aria-selected': 'false',
+          'aria-selected': multi && tick && picked.has(pathOf(entry)) ? 'true' : 'false',
           'aria-disabled': selectable(entry) ? null : 'true',
-          onclick: phone ? () => tapEntry(entry, row) : () => setActive(entry),
-          ondblclick: phone ? null : () => openEntry(entry),
+          onclick: phone ? () => tapEntry(entry, row) : multi ? (event) => clickEntry(entry, event) : () => setActive(entry),
+          ondblclick: phone ? null : multi ? () => entry.kind === 'folder' && openEntry(entry) : () => openEntry(entry),
         },
+        // Several files: a drawn box at the start of every row (empty for a row that cannot be ticked).
+        multi ? h('span', { class: tick ? 'picker__check' : 'picker__check picker__check--none', 'aria-hidden': 'true' }) : null,
         h('span', { class: `picker__kind picker__kind--${entry.kind}` }, entry.kind === 'folder' ? 'Folder' : 'File'),
         h('span', { class: 'picker__name' }, entry.name),
         // Phone: what a tap does, at the end of the row. A folder opens (an arrow); a file is chosen (a ring).
-        phone && selectable(entry) ? h('span', { class: 'picker__mark', 'aria-hidden': 'true' }) : null,
+        // Several files: the box says it for a file, so only a folder keeps its arrow.
+        phone && selectable(entry) && !(multi && entry.kind === 'file') ? h('span', { class: 'picker__mark', 'aria-hidden': 'true' }) : phone && multi ? h('span', { 'aria-hidden': 'true' }) : null,
       );
+      if (multi && tick && picked.has(pathOf(entry))) row.classList.add('picker__row--picked');
       rowByKey.set(keyOf(entry), row);
       frag.appendChild(row);
     }
     list.appendChild(frag);
+    if (multi) renderPicked();
   }
 
   function setActive(entry, scroll = true) {
     const old = active ? rowByKey.get(keyOf(active)) : null;
+    // Several files: aria-selected says ticked; the row with the keyboard is only highlighted.
     if (old) {
-      old.setAttribute('aria-selected', 'false');
+      if (!multi) old.setAttribute('aria-selected', 'false');
       old.classList.remove('picker__row--active');
     }
     active = entry ? { kind: entry.kind, name: entry.name } : null;
     const now = active ? rowByKey.get(keyOf(active)) : null;
     if (now) {
-      now.setAttribute('aria-selected', 'true');
+      if (!multi) now.setAttribute('aria-selected', 'true');
       now.classList.add('picker__row--active');
       list.setAttribute('aria-activedescendant', now.id);
       if (scroll) now.scrollIntoView({ block: 'nearest' });
@@ -604,6 +745,8 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   function openEntry(entry) {
     if (!listing || !entry) return;
     if (entry.kind === 'folder') openPath(joinPath(listing.path, entry.name), { walk: false });
+    // Several files: Enter on a file ticks it; only the button at the foot hands the set back.
+    else if (multi) toggleEntry(entry);
     else if (fileMode) dialogHandle.close(joinPath(listing.path, entry.name));
   }
 
@@ -621,6 +764,9 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
       openPath(joinPath(listing.path, entry.name), { walk: false });
       openingRow = row;
       row.classList.add('picker__row--opening');
+    } else if (multi) {
+      setActive(entry, false);
+      toggleEntry(entry);
     } else {
       setActive(entry, false);
     }
@@ -658,9 +804,30 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
       PageDown: index + page,
       PageUp: index - page,
     }[event.key];
+    if (multi && event.key === ' ') {
+      // Space ticks or unticks the highlighted file.
+      event.preventDefault();
+      if (index >= 0) toggleEntry(entries[index]);
+      return;
+    }
+    if (multi && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      selectAllShown();
+      return;
+    }
     if (target !== undefined) {
       event.preventDefault();
-      if (entries.length) setActive(entries[Math.max(0, Math.min(last, target))]);
+      if (!entries.length) return;
+      const next = entries[Math.max(0, Math.min(last, target))];
+      // Several files: Shift with an arrow ticks from the row ticked last (or the one left) to the new one.
+      if (multi && event.shiftKey) {
+        const from = index >= 0 ? entries[index] : null;
+        if (!anchor && pickable(from)) anchor = keyOf(from);
+        setActive(next);
+        toggleEntry(next, { range: true });
+        return;
+      }
+      setActive(next);
       return;
     }
     if (event.key === 'Enter') {
@@ -709,6 +876,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     controller?.abort();
     reloadFiltered.cancel();
     clearTimeout(typedTimer);
+    if (multi) return Array.isArray(value) && value.length ? value : null;
     return typeof value === 'string' && value ? value : null;
   });
 }

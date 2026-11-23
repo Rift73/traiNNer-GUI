@@ -2,6 +2,8 @@
 // adds what a phone needs around it, then loads js/main.js unchanged.
 //   - where the person is, as attributes on <html> that css/mobile*.css lays the screens out by
 //     (one pane at a time instead of two side by side), and a link back to the level above;
+//   - the chosen tab kept in view in a strip wider than the screen, the next step that would only repeat
+//     the open page, and the run's name in the top bar once the page's own has scrolled away;
 //   - room for the on-screen keyboard;
 //   - the colour of the browser's own bars.
 // Nothing here talks to the service, and nothing here is loaded by index.html.
@@ -129,6 +131,171 @@ document.addEventListener('click', (event) => {
     const top = natural();
     if (Math.abs(scroller.scrollTop - top) > 2) scroller.scrollTop = top;
   }, 520);
+});
+
+// ───────── tab strips: the chosen tab in view, and a sign that there are more ─────────
+// A strip wider than the screen is moved sideways (never the page: so not scrollIntoView) until the
+// chosen tab is in its middle, at once when the strip appears and gliding when another tab is chosen.
+// data-more says on which side more tabs wait; css/mobile.css fades that edge.
+
+const viewEl = document.getElementById('view');
+
+function markEdges(strip) {
+  const max = strip.scrollWidth - strip.clientWidth;
+  const start = strip.scrollLeft > 1;
+  const end = max - strip.scrollLeft > 1;
+  const more = start && end ? 'both' : start ? 'start' : end ? 'end' : '';
+  if (more && strip.dataset.more !== more) strip.dataset.more = more;
+  else if (!more && strip.dataset.more) delete strip.dataset.more;
+}
+
+function centreTab(tab, glide) {
+  const strip = tab.closest('.tabs');
+  if (!strip || !strip.clientWidth) return;
+  // From the boxes on screen, so it holds whichever element the tab's offsets are measured from.
+  const offset = tab.getBoundingClientRect().left - strip.getBoundingClientRect().left - strip.clientLeft;
+  const max = strip.scrollWidth - strip.clientWidth;
+  const left = Math.max(0, Math.min(max, Math.round(strip.scrollLeft + offset - (strip.clientWidth - tab.offsetWidth) / 2)));
+  if (Math.abs(strip.scrollLeft - left) >= 1) strip.scrollTo({ left, behavior: glide && !calm?.matches ? 'smooth' : 'auto' });
+  markEdges(strip);
+}
+
+const chosenTab = (strip) => strip.querySelector('[role="tab"][aria-selected="true"]');
+
+// A strip's size decides both: first shown (it may be drawn while hidden), turned, or a tab renamed.
+const stripSizes = new WeakMap();
+const stripWatch =
+  typeof ResizeObserver === 'function'
+    ? new ResizeObserver((entries) => {
+        for (const { target } of entries) {
+          const first = !stripSizes.get(target);
+          stripSizes.set(target, target.clientWidth);
+          const tab = first && chosenTab(target);
+          if (tab) centreTab(tab, false);
+          else markEdges(target);
+        }
+      })
+    : null;
+const stripsSeen = new WeakSet();
+
+document.addEventListener(
+  'scroll',
+  (event) => {
+    if (event.target instanceof Element && event.target.matches('.tabs')) markEdges(event.target);
+  },
+  true,
+);
+
+// ───────── the run's name in the top bar ─────────
+// Deep in a tab, the name at the head of the run's page has scrolled away. The bar then shows it (a copy
+// for the eye only: the page's heading stays the heading), while that heading is out of view under the
+// tabs that are held at the top.
+
+const barTitle = document.createElement('span');
+barTitle.className = 'mtitle';
+barTitle.setAttribute('aria-hidden', 'true');
+app.append(barTitle);
+
+let titleFor = null; // the heading being watched
+let titleSeen = null;
+
+// A run's name is one long word ("2x_DUAL_LIGHT_C128G4D16_PU21_GAN"). Wider than the screen, it would
+// break before its last letter; with a place to break after each separator it breaks there. (<wbr> adds
+// no text, so the page still finds the name it wrote; a new name is written plain and is marked again.)
+function breakName(heading) {
+  const text = heading.textContent;
+  if (heading.childElementCount || !/[_.-]./.test(text)) return;
+  const parts = text.split(/([_.-]+)/); // a run of separators at every odd place
+  const nodes = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    if (i) nodes.push(document.createElement('wbr'));
+    nodes.push(parts[i] + (parts[i + 1] ?? ''));
+  }
+  heading.replaceChildren(...nodes);
+}
+
+function watchTitle() {
+  const heading = root.dataset.part === 'run' && viewEl ? viewEl.querySelector('.runs__name') : null;
+  const name = heading?.textContent ?? '';
+  if (heading) breakName(heading);
+  if (barTitle.textContent !== name) barTitle.textContent = name;
+  if (heading === titleFor) return;
+  titleSeen?.disconnect();
+  titleSeen = null;
+  titleFor = heading;
+  delete root.dataset.titled;
+  if (!heading || typeof IntersectionObserver !== 'function') return;
+  // The heading leads the page, so it has left the top edge before the held tabs could cover it.
+  titleSeen = new IntersectionObserver(
+    (entries) => {
+      const shown = entries[entries.length - 1].isIntersecting;
+      if (shown || root.dataset.part !== 'run') delete root.dataset.titled;
+      else root.dataset.titled = '';
+    },
+    { root: heading.closest('.runs__part') },
+  );
+  titleSeen.observe(heading);
+}
+
+// One watcher for the screen area: strips that appear, a tab that is chosen, the run's page drawn again.
+// Redraws come in bursts (a log, a chart), so the look over the screen is made once per frame.
+let viewLook = 0;
+function lookOverView() {
+  viewLook = 0;
+  if (!viewEl) return;
+  for (const strip of viewEl.querySelectorAll('.tabs')) {
+    if (stripsSeen.has(strip)) continue;
+    stripsSeen.add(strip);
+    stripWatch?.observe(strip);
+    const tab = chosenTab(strip);
+    if (tab) centreTab(tab, false);
+    else markEdges(strip);
+  }
+  watchTitle();
+}
+
+if (viewEl) {
+  new MutationObserver((records) => {
+    for (const r of records) {
+      if (r.type === 'attributes' && r.target.getAttribute('aria-selected') === 'true' && r.target.matches('[role="tab"]')) centreTab(r.target, true);
+    }
+    if (!viewLook && records.some((r) => r.type === 'childList')) viewLook = requestAnimationFrame(lookOverView);
+  }).observe(viewEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected'] });
+}
+
+// ───────── the next step, on the page it leads to ─────────
+// A link to the page that is open is marked (data-here) and css/mobile.css leaves it out. "Running:
+// <run>" with Open run, on that run's own page, then says nothing the page's head does not: <html> gets
+// data-next-here and the whole line steps aside upright. Only there, and only when the line has no other
+// action: "The queue is paused" keeps its sentence and Continue the queue on the entry it points to.
+// Any other message brings the line back, because it is looked at each time it is drawn.
+
+const nextEl = document.getElementById('next');
+const decoded = (text) => {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+};
+
+function nextHere() {
+  const actions = nextEl ? [...nextEl.querySelectorAll('.btn')] : [];
+  const at = decoded(location.hash);
+  let elsewhere = 0;
+  for (const action of actions) {
+    const here = action.matches('a[href]') && decoded(action.getAttribute('href')) === at;
+    action.toggleAttribute('data-here', here);
+    if (!here) elsewhere += 1;
+  }
+  if (actions.length && !elsewhere && root.dataset.part === 'run') root.dataset.nextHere = '';
+  else delete root.dataset.nextHere;
+}
+
+if (nextEl) new MutationObserver(nextHere).observe(nextEl, { childList: true });
+window.addEventListener('hashchange', () => {
+  nextHere();
+  watchTitle();
 });
 
 // Ticking a series can add a chart above the list of series. Browsers that do not hold the page still
@@ -284,7 +451,6 @@ if (viewport) {
 // A part that is one tall thing with its own scrolling (a log, the YAML text) is given exactly the room
 // between the bars, whatever the next-step line takes at the moment.
 
-const viewEl = document.getElementById('view');
 if (viewEl && typeof ResizeObserver === 'function') {
   new ResizeObserver(() => root.style.setProperty('--view-h', `${viewEl.clientHeight}px`)).observe(viewEl);
 }

@@ -8,12 +8,14 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
 
 from traiNNer.training.checkpoint_association import SAVE_ID, SAVE_ID_KEY, pth_save_id
+from trainner_config.official_weights import NEUFLOW_SHA256, neuflow_cache_path
+from trainner_config.rdual import NEUFLOW_PRETRAIN_PATH, rdual_neuflow_required
 
 from . import provenance
 from . import run_observe as observe
@@ -24,11 +26,13 @@ from .preflight import input_paths, preflight
 from .recipes import RecipeLibrary, safe_name
 from .reproduction_paths import Relocations, SourcePath, source_path
 from .reproduction_pins import input_precondition
+from .run_checkpoints import import_sources, rdual_options
 from .runs import ACTIVE, RunManager
 from .yaml_edit import read_recipe, render
 
 _FORMAT = "trainner-run-recipe"
 _MODES = ("replay", "weights-only")
+_NEUFLOW_FIELD = ["path", "neuflow_weights"]
 _TRAIN_OUTPUTS = {
     "experiments_root",
     "models",
@@ -207,23 +211,92 @@ def _kind(field: list[str | int]) -> str:
     return "state" if field[1] == "resume_state" else "weight"
 
 
+def _rdual_resume_files(
+    config: dict, root: Path, resolve: Callable[[str], Path]
+) -> dict[str, Path] | None:
+    paths = config["path"]
+    if not paths.get("resume_state"):
+        return {}
+    try:
+        state = resolve(paths["resume_state"])
+        return import_sources({**config, "path": {**paths, "resume_state": str(state)}}, root)
+    except (OSError, ValueError, RuntimeError):
+        # Reproduction preflight reports the source-state or relocation problem.
+        return None
+
+
 def _declared_inputs(
-    config: dict, base: SourcePath | None, launch: dict, mode: str, hash_inputs: bool
+    config: dict,
+    base: SourcePath | None,
+    launch: dict,
+    mode: str,
+    hash_inputs: bool,
+    *,
+    runtime: dict,
+    selected: dict | None,
+    archived: bool,
 ) -> list[dict]:
+    from msgspec import ValidationError
+
     result = []
     recorded = _mapping(launch.get("inputs"))
-    for field, value in input_paths(config):
+    fields = [(field, value) for field, value in input_paths(config) if field != _NEUFLOW_FIELD]
+    try:
+        opt = rdual_options(config)
+    except ValidationError:
+        opt = None
+    flow_receipt = _mapping(runtime.get("neuflowWeights"))
+    required = None
+    if opt is not None:
+        def resolve_original(value: str, _root: Path = Path()) -> Path:
+            return _LOCAL.locate(source_path(value, base))[0]
+
+        if selected is not None:
+            opt.path.pretrain_network_g = selected["sourcePath"]
+            opt.path.pretrain_network_g_ema = None
+            opt.path.resume_state = None
+            opt.path.param_key_g = None
+            required = rdual_neuflow_required(opt, Path(), resolve_path=resolve_original)
+        elif "neuflowWeights" in runtime:
+            required = bool(flow_receipt)
+        else:
+            candidates = _rdual_resume_files(config, Path(), resolve_original)
+            required = rdual_neuflow_required(
+                opt, Path(), resolve_path=resolve_original, resume_files=candidates
+            )
+        if required or (required is None and opt.path.neuflow_weights is not None):
+            value = opt.path.neuflow_weights
+            if value is None:
+                value = flow_receipt.get("path") or NEUFLOW_PRETRAIN_PATH
+            fields.append((_NEUFLOW_FIELD, value))
+
+        if mode == "replay" and archived and opt.path.resume_state:
+            # Legacy archived launch recipes may retain overwritten warmstart declarations.
+            fields = [(field, value) for field, value in fields
+                      if field[0] != "path" or not field[1].startswith("pretrain_network_")]
+        elif opt.train is None or opt.train.ema_decay <= 0:
+            fields = [(field, value) for field, value in fields
+                      if field != ["path", "pretrain_network_g_ema"]]
+
+    for field, value in fields:
         kind = _kind(field)
-        # Fine-tune drops the source training state and all inherited student weights.
-        hash_contents = (
-            hash_inputs
-            and kind != "dataset"
-            and (mode == "replay" or field == ["path", "pretrain_network_g_teacher"])
-        )
+        if field == _NEUFLOW_FIELD:
+            # An archive may lack the original cwd for the bundled default.
+            anchor_known = base is not None or Path(value).is_absolute()
+            hash_contents = hash_inputs and required is True and (
+                opt.path.neuflow_weights is not None or anchor_known
+            )
+        else:
+            # Fine-tune drops the source training state and inherited student weights.
+            hash_contents = (
+                hash_inputs and kind != "dataset"
+                and (mode == "replay" or field == ["path", "pretrain_network_g_teacher"])
+            )
         declared, observed = _observe_input(value, base, kind, hash_contents)
         item = {"field": field, "kind": kind, "value": value, "sourcePath": declared}
         if kind != "dataset":
-            if saved := _mapping(recorded.get(field[1])):
+            saved = flow_receipt if field == _NEUFLOW_FIELD and flow_receipt else _mapping(recorded.get(field[1]))
+            if saved:
                 item["launch"] = saved
             if observed is not None:
                 item["observed"] = observed
@@ -479,7 +552,10 @@ def export_run_recipe(
             "legacyStartup": legacy or None,
             "sourceFiles": _recorded_sources(runs, launch),
         },
-        "inputs": _declared_inputs(config, base, launch, mode, hash_inputs),
+        "inputs": _declared_inputs(
+            config, base, launch, mode, hash_inputs, runtime=reported,
+            selected=initialization.get("weight"), archived=basis == "archived",
+        ),
         "limitations": limits,
     }
     body = _portable_numbers(body)
@@ -745,8 +821,12 @@ def _compare_input(recorded: dict, current: dict | None) -> str:
             return "differentSize"
         if observed["sha256"] != current.get("sha256"):
             return "sha256Mismatch"
+    expected = launch.get("expectedSha256")
+    if expected is not None and expected != current.get("sha256"):
+        return "sha256Mismatch"
+    has_digest = "sha256" in observed or expected is not None
     if launch.get("fileVersion") == current["fileVersion"]:
-        return "sha256Match" if "sha256" in observed else "fileVersionMatch"
+        return "sha256Match" if has_digest else "fileVersionMatch"
     prior = observed
     if launch and _launch_evidence(launch, observed) not in (
         "fileVersionMatch",
@@ -756,7 +836,7 @@ def _compare_input(recorded: dict, current: dict | None) -> str:
     size = launch.get("size", prior.get("size"))
     if type(size) is int and size != current["size"]:
         return "differentSize"
-    if "sha256" in observed:
+    if has_digest:
         return "sha256Match"
     if expected := prior.get("saveId"):
         return "saveIdMatch" if expected == current.get("saveId") else "saveIdMismatch"
@@ -915,7 +995,12 @@ def prepare_reproduction(
     originals = _matching_inputs(bundle)
     inspected = []
     unresolved = False
-    for field, value in input_paths(config):
+    recorded_flow = _mapping(reported.get("neuflowWeights"))
+
+    def inspect_input(
+        field: list[str | int], value: Any, *, implicit_flow: bool = False
+    ) -> None:
+        nonlocal unresolved
         kind, label = _kind(field), _field(field)
         original = originals.get(tuple(field), {})
         evidence = (
@@ -925,6 +1010,8 @@ def prepare_reproduction(
             if original.get("value") == value
             else {}
         )
+        if implicit_flow and recorded_flow.get("path") == value and "launch" not in evidence:
+            evidence = {**evidence, "launch": recorded_flow}
         row = {
             "field": field,
             "kind": kind,
@@ -933,19 +1020,24 @@ def prepare_reproduction(
         }
         inspected.append(row)
         try:
-            old = source_path(value, base)
+            # Retain the existing checkout-relative fallback for older
+            # archives with no recorded cwd, while comparing their evidence.
+            source_value = value
+            if implicit_flow and base is None and value == NEUFLOW_PRETRAIN_PATH:
+                source_value = str(library.root / NEUFLOW_PRETRAIN_PATH)
+            old = source_path(source_value, base)
             local, mapped = relocations.locate(old)
         except (OSError, ValueError, RuntimeError) as error:
             unresolved = True
             row.update(status="unresolved", path=None)
             issues.append(_issue("relocationRequired", label, str(error), "error"))
-            continue
+            return
         row.update(sourcePath=str(old), path=str(local), mapped=mapped)
-        if str(local) != value:
+        if not implicit_flow and str(local) != value:
             updates.append({"path": field, "value": str(local)})
         if kind == "dataset":
             row.update(status="declared")
-            continue
+            return
         try:
             observed = _mapping(evidence.get("observed"))
             launch_input = _mapping(evidence.get("launch"))
@@ -961,15 +1053,39 @@ def prepare_reproduction(
                 raise ValueError(
                     "Invalid SHA-256 input declaration in the reproduction bundle."
                 )
+            expected = launch_input.get("expectedSha256")
+            if expected is not None and (
+                not isinstance(expected, str) or re.fullmatch("[0-9a-f]{64}", expected) is None
+            ):
+                raise ValueError("Invalid launch SHA-256 in the reproduction bundle.")
+
+            # An omitted option with an official receipt can use the local
+            # cache. Preserve explicit overrides and any conflicting digest.
+            if (
+                implicit_flow and not mapped
+                and NEUFLOW_SHA256 in (expected, digest)
+                and expected in (None, NEUFLOW_SHA256)
+                and digest in (None, NEUFLOW_SHA256)
+                and not local.exists()
+            ):
+                cache = neuflow_cache_path()
+                if not cache.exists():
+                    row.update(path=str(cache), status="downloadPending", current=None)
+                    return
+                local = cache.resolve()
+                row["path"] = str(local)
+
+            if implicit_flow:
+                updates.append({"path": field, "value": str(local)})
             current = _identity(
                 local,
-                hash_contents=digest is not None,
-                expected_size=observed.get("size"),
+                hash_contents=digest is not None or expected is not None,
+                expected_size=observed.get("size") if digest is not None else None,
             )
         except (OSError, ValueError) as error:
             row.update(status="unavailable")
             issues.append(_issue("inputInspectionFailed", label, str(error), "error"))
-            continue
+            return
         row.update(status=_compare_input(evidence, current), current=current)
         if row.get("launchEvidence") == "different":
             issues.append(
@@ -1010,6 +1126,42 @@ def prepare_reproduction(
                     "This file has no matching portable save ID or local file version.",
                 )
             )
+
+    from msgspec import ValidationError
+
+    from .paths import local_path
+
+    try:
+        opt = rdual_options(config)
+    except ValidationError:
+        opt = None  # Preflight will report the invalid options.
+    for field, value in input_paths(config):
+        if field == _NEUFLOW_FIELD:
+            continue
+        if opt is not None and field[0] == "path":
+            if mode == "replay" and basis == "archived" and opt.path.resume_state and field[1].startswith("pretrain_network_"):
+                continue
+            if field == ["path", "pretrain_network_g_ema"] and (opt.train is None or opt.train.ema_decay <= 0):
+                continue
+        inspect_input(field, value)
+
+    if opt is not None and not unresolved:
+        mapped = read_recipe(_render(text, updates))
+        effective = rdual_options(mapped)
+        companions = _rdual_resume_files(
+            mapped, library.root, lambda value: local_path(value, library.root)
+        )
+        required = rdual_neuflow_required(
+            effective, library.root, resolve_path=local_path, resume_files=companions
+        )
+        # A legacy PTH may defer its flow flag to startup. Preserve a fallback
+        # known to have been used by a recorded replay of that payload.
+        if required or (required is None and mode == "replay" and recorded_flow):
+            value = opt.path.neuflow_weights
+            if value is None:
+                prior = originals.get(tuple(_NEUFLOW_FIELD), {})
+                value = prior.get("value") or recorded_flow.get("path") or NEUFLOW_PRETRAIN_PATH
+            inspect_input(_NEUFLOW_FIELD, value, implicit_flow=opt.path.neuflow_weights is None)
     prepared = None if unresolved else _render(text, updates)
     check = preflight(prepared, library) if prepared is not None else {}
     issues.extend(check.get("issues", []))

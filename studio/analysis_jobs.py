@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from .runs import RunManager
 
 JOB_ID = re.compile("[0-9a-f]{32}")
-KINDS = {"predict", "evaluate", "export", "loss-report", "pack-dataset", "weight-drift", "image-difference", "task-data", "split-leakage", "pair-registration", "split-dataset", "extract-patches", "convert-weights", "average-checkpoints", "network-parameters"}
+KINDS = {"predict", "evaluate", "export", "loss-report", "pack-dataset", "weight-drift", "image-difference", "task-data", "split-leakage", "pair-registration", "split-dataset", "extract-patches", "convert-weights", "average-checkpoints", "network-parameters", "index-video-clips"}
 
 
 def _integer(body, key, default, low, high):
@@ -136,6 +136,10 @@ class AnalysisJobs:
                     raise ValueError(f"Select a completed .safetensors file for {side}.")
                 params[side] = str(path)
             return None, params
+        if kind == "index-video-clips":
+            from .video_indexing import index_inputs
+            inputs = index_inputs(read_recipe(body.get("yaml")), self.root)
+            return None, {"kind": kind, **inputs}
         if kind == "pack-dataset":
             dataset = body.get("dataset")
             if not isinstance(dataset, dict):
@@ -490,7 +494,7 @@ class AnalysisJobs:
             (folder / "cancel").touch()
             # The packer owns a portable directory transaction and cooperatively
             # removes unpublished staging. After publication it reports success.
-            if read_record(folder / "job.json")["kind"] in {"pack-dataset", "weight-drift", "image-difference", "task-data", "split-leakage", "pair-registration", "split-dataset", "extract-patches"}:
+            if read_record(folder / "job.json")["kind"] in {"index-video-clips", "pack-dataset", "weight-drift", "image-difference", "task-data", "split-leakage", "pair-registration", "split-dataset", "extract-patches"}:
                 return self.detail(job_id)
             identity = read_record(folder / "worker.json")
             if identity and identity["boot"] == _boot_id():
@@ -587,7 +591,7 @@ def _work(folder):
     def progress(event):
         nonlocal last_progress, last_stage
         now = time.monotonic()
-        if event["stage"] != last_stage or now - last_progress >= 0.5:
+        if event.get("action") == "indexing" or event["stage"] != last_stage or now - last_progress >= 0.5:
             write_record(folder / "progress.json", event)
             last_progress, last_stage = now, event["stage"]
 
@@ -688,6 +692,9 @@ def _work(folder):
                                        root=Path.cwd(), progress=progress, cancelled=cancelled)
         except TaskDataCancelled as exc:
             raise AnalysisCancelled from exc
+    elif kind == "index-video-clips":
+        from .video_indexing import index_episodes
+        result = index_episodes(info, progress, check_cancel)
     elif kind == "pack-dataset":
         from .dataset_pack import DatasetPackCancelled, pack_dataset
         destination = Path(info.get("destination", output / "dataset"))

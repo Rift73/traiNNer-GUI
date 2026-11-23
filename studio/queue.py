@@ -23,10 +23,12 @@ from .paths import local_path
 from .recipes import RecipeLibrary, atomic_text, safe_name
 from .reproduction_pins import checked_files
 from .run_checkpoints import (
+    import_sources,
     phase_checkpoint,
     phase_options,
     phase_weight_roles,
     prepared_import_plan,
+    rdual_options,
 )
 from .runs import ACTIVE, QUEUE_REQUEST_PREFIX, RUN_ID, RunBusyError, RunManager
 from .update_gate import studio_admission
@@ -36,21 +38,48 @@ WAITING = {"held", "pending"}
 ARCHIVE_PROVENANCE = ("sourceRootId", "sourceRoot", "sourceRecipe", "replayIssues")
 
 
-def _archive_replay_issues(text: str) -> list[dict[str, str]]:
+def _archive_replay_issues(text: str, root: Path) -> list[dict[str, str]]:
+    from trainner_config.rdual import rdual_neuflow_required
+
     from .preflight import input_paths
 
+    config = read_recipe(text)
     issues = []
-    for path, value in input_paths(read_recipe(text)):
+
+    def absolute(value: str, _root: Path) -> Path:
+        if not value.lstrip().startswith("~") and (path := local_path(value, Path())).is_absolute():
+            return path
+        raise ValueError("Resolve this archived recipe input to an explicit local path before training.")
+
+    try:
+        opt = rdual_options(config)
+    except ValueError:
+        opt = None
+    need_flow = opt is not None
+    if opt is not None and opt.path.neuflow_weights:
+        try:
+            companions = {}
+            if opt.path.resume_state:
+                absolute(opt.path.resume_state, root)
+                companions = import_sources(config, root)
+            need_flow = rdual_neuflow_required(
+                opt, root, resolve_path=absolute, resume_files=companions
+            ) is not False
+        except (OSError, ValueError, RuntimeError):
+            pass
+    for path, value in input_paths(config):
         if not isinstance(value, str) or not value.strip():
             continue
+        if path == ["path", "neuflow_weights"] and not need_flow:
+            continue
+        if opt is not None and path[0] == "path" and (
+            (opt.path.resume_state and path[1].startswith("pretrain_network_"))
+            or (path[1] == "pretrain_network_g_ema" and (opt.train is None or opt.train.ema_decay <= 0))
+        ):
+            continue
         try:
-            absolute = (
-                not value.lstrip().startswith("~")
-                and local_path(value, Path()).is_absolute()
-            )
+            absolute(value, root)
         except ValueError:
-            absolute = False
-        if not absolute:
             issues.append(
                 {
                     "level": "error",
@@ -653,7 +682,7 @@ class QueueManager:
             info["sourceInvocation"] = run["invocation"]
         if run.get("source") == "archive":
             info.update({key: run[key] for key in ARCHIVE_PROVENANCE if key in run})
-            if issues := _archive_replay_issues(text):
+            if issues := _archive_replay_issues(text, self.root):
                 info["replayIssues"] = issues
         return info
 

@@ -11,33 +11,44 @@ clip, then accumulates the discriminator's gradients over every frame of the
 clip. Both optimizers step once per iteration.
 """
 
+from __future__ import annotations
+
 import functools
-import os
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Any
+from pathlib import Path
+from pickle import UnpicklingError
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import torch
-from safetensors.torch import load_file
+from safetensors import SafetensorError
 from torch import Tensor, nn
 from torch.amp.grad_scaler import GradScaler
 from torch.nn import functional
 from torch.nn.utils import clip_grads_with_norm_
-from trainner_config.objectives import ObjectiveConfigError, validate_objectives
+from trainner_config.rdual import (
+    NEUFLOW_PRETRAIN_PATH,  # noqa: F401
+    clip_training_problems,
+    complete_neuflow_state,
+    ensure_neuflow_weights,
+    generator_weights,
+    load_neuflow_weights,
+)
 
 from traiNNer.archs.rdual_arch import RDUAL
 from traiNNer.data.clip_hr import hr_clip
 from traiNNer.data.realesrgan_dataset import sample_degradation_kernels
 from traiNNer.losses.vosr_loss import VOSRLoss, vosr_balance_state
+from traiNNer.models.checkpoint_payload import read_network_checkpoint
 from traiNNer.models.realesrgan_model import DegradingBatch, RealESRGANModel
 from traiNNer.models.sr_model import _get_total_gradient_norm
-from traiNNer.utils.lq_condition import LQCondition
+from traiNNer.utils.logger import get_root_logger
 from traiNNer.utils.redux_options import ReduxOptions
 from traiNNer.utils.types import DataFeed
 
-# Upstream NeuFlow v2 weights for an RDUAL checkpoint that has no flow.*
-NEUFLOW_PRETRAIN_PATH = "experiments/pretrained_models/neuflow_v2.safetensors"
+if TYPE_CHECKING:
+    from traiNNer.archs.rsr_arch import RSR
 
 # Encoder and gradient frames per call inside backward_clip
 ENCODE_CHUNK = 4
@@ -67,53 +78,9 @@ def check_clip_training_options(opt: ReduxOptions) -> None:
         )
 
 
-def clip_training_problems(opt: ReduxOptions) -> list[str]:
-    """The settings of opt the clip training does not support."""
-    problems = []
-    if opt.val is not None and (opt.val.val_enabled or opt.is_train is False):
-        if opt.val.tile_size:
-            problems.append("recurrent clip validation requires full frames (val.tile_size: 0)")
-        for phase, dataset in opt.datasets.items():
-            if phase.split("_", 1)[0] not in ("val", "test"):
-                continue
-            if dataset.type.lower() not in ("pairedvideodataset", "singlevideodataset"):
-                problems.append(f"datasets.{phase} requires a paired or single video frame sequence")
-            if dataset.clip_size is None or dataset.clip_size < 1:
-                problems.append(f"datasets.{phase}.clip_size must be a positive window length")
-    if opt.is_train is False:
-        if opt.input_pixel_format != "rgb" or opt.output_pixel_format != "rgb":
-            problems.append("recurrent evaluation requires RGB inputs and outputs")
-        return problems
-    if not opt.high_order_degradation:
-        problems.append(
-            "high_order_degradation must be true (the LR clips are made on the fly)"
-        )
-    if opt.input_pixel_format != "rgb" or opt.output_pixel_format != "rgb":
-        problems.append("input_pixel_format and output_pixel_format must be rgb")
-    if opt.dist or (isinstance(opt.num_gpu, int) and opt.num_gpu > 1):
-        problems.append("training runs on one GPU")
-    if opt.otf_hf_noise_prob > 0:
-        problems.append("otf_hf_noise_prob must be 0 (it draws per frame)")
-    if opt.network_g_teacher is not None:
-        problems.append("network_g_teacher is not supported")
-    if opt.dvd_prob > 0:
-        problems.append(
-            "dvd_prob must be 0 (the DVD response needs real image context "
-            "around the patch, which clip crops do not carry)"
-        )
-    train = opt.train
-    if train is not None:
-        if train.use_moa:
-            problems.append("train.use_moa (batch augmentation) is not supported")
-        if train.vosr_target is not None:
-            problems.append("train.vosr_target is not supported")
-        if train.distillation is not None and train.distillation.enabled:
-            problems.append("train.distillation is not supported")
-        try:
-            validate_objectives(opt)
-        except ObjectiveConfigError as exc:
-            problems.append(str(exc))
-    return problems
+def _uses_neuflow(network: nn.Module) -> TypeGuard[RDUAL | RSR]:
+    # Block-read RSR has no flow module or marker.
+    return hasattr(network, "flow_loaded")
 
 
 class RDUALModel(RealESRGANModel):
@@ -129,6 +96,7 @@ class RDUALModel(RealESRGANModel):
         self.check_options(opt)
         super().__init__(opt)
         self.shot_ids: Tensor | None = None
+        self.neuflow_weights: Path | None = None
         compile = (
             functools.partial(
                 torch.compile,
@@ -140,27 +108,92 @@ class RDUALModel(RealESRGANModel):
             else None
         )
         self.step_functions = self.prepare_generator(compile)
+        # The per-frame adjoint already initializes every trainable G gradient
+        # outside graph capture. Keep its ordinary storage across updates.
+        if (
+            type(self) is RDUALModel
+            and self.use_compile
+            and self.device.type == "cuda"
+            and self.opt.compile_mode in {"max-autotune", "reduce-overhead"}
+            and self.opt.clip_keep == "none"
+        ):
+            self.cudagraph_stable_gradients = True
+
+    def load_network(
+        self,
+        net: nn.Module,
+        load_path: str,
+        strict: bool = True,
+        param_key: str | None = "params",
+    ) -> None:
+        bare = self.get_bare_model(net)
+        if not _uses_neuflow(bare):
+            super().load_network(net, load_path, strict, param_key)
+            return
+
+        path = Path(load_path).expanduser()
+        if self.opt.path.resume_state and param_key is None:
+            param_key = "params"
+        weights = generator_weights(read_network_checkpoint(path), param_key, path)
+        target = bare.state_dict()
+        name = type(bare).__name__
+        if not strict and not any(
+            key != "flow_loaded" and not key.startswith("flow.")
+            and key in target and value.shape == target[key].shape
+            for key, value in weights.items()
+        ):
+            raise ValueError(f"{name} generator weights matched no non-flow tensors: {path}")
+        weights = complete_neuflow_state(weights, target)
+
+        get_root_logger().info("Loading %s generator weights from %s.", name, path)
+        if not self._print_different_keys_loading(bare, weights, str(path), strict):
+            raise ValueError(f"{name} generator weights have mismatched keys: {path}")
+        bare.load_state_dict(weights, strict=strict)
 
     def prepare_generator(self, compile: Callable[[Callable], Callable] | None) -> Any:
         """Ready the generator once its pretrain is loaded; returns its step functions."""
         bare = self.get_bare_model(self.net_g)
         assert isinstance(bare, RDUAL)
-        # The generator and its EMA copy exist and the pretrain is loaded: give
-        # every copy whose checkpoint lacked the frozen flow the upstream weights.
+        self._prepare_neuflow(bare)
+        return bare.step_functions(compile)
+
+    def _prepare_neuflow(self, bare: RDUAL | RSR) -> None:
         networks = [bare]
         if self.net_g_ema is not None:
-            networks.append(self.net_g_ema.ema_model)
+            ema = self.net_g_ema.ema_model
+            assert _uses_neuflow(ema)
+            networks.append(ema)
+
+        if (transfer := self.transfer_g_receipt) is not None:
+            required = {"flow_loaded", *(f"flow.{key}" for key in bare.flow.state_dict())}
+            if not required.issubset(transfer["loaded"]):
+                bare.flow_loaded.zero_()
+                if len(networks) > 1 and self.opt.path.pretrain_network_g_ema is None:
+                    networks[1].flow_loaded.zero_()
+
+        self._load_missing_neuflow(networks)
+
+    def _load_missing_neuflow(self, networks: list[RDUAL | RSR]) -> None:
         missing = [net for net in networks if not bool(net.flow_loaded)]
-        if missing:
-            if not os.path.exists(NEUFLOW_PRETRAIN_PATH):
-                raise FileNotFoundError(
-                    "The RDUAL checkpoint has no NeuFlow v2 weights and "
-                    f"{NEUFLOW_PRETRAIN_PATH} does not exist"
-                )
-            flow_weights = load_file(NEUFLOW_PRETRAIN_PATH, device="cpu")
+        if not missing:
+            return
+        path = ensure_neuflow_weights(self.opt, Path.cwd())
+        try:
+            flow_weights = load_neuflow_weights(path)
             for net in missing:
                 net.load_flow_weights(flow_weights)
-        return bare.step_functions(compile)
+        except (OSError, ValueError, RuntimeError, SafetensorError, UnpicklingError, EOFError) as exc:
+            raise ValueError(f"Cannot load path.neuflow_weights from {path}: {exc}") from exc
+        self.neuflow_weights = path.resolve()
+        get_root_logger().info("Loaded NeuFlow v2 weights from %s.", self.neuflow_weights)
+
+    def _select_inference_net(self, *, unwrap_compiled: bool) -> nn.Module:
+        network = super()._select_inference_net(unwrap_compiled=unwrap_compiled)
+        bare = self.get_bare_model(network)
+        # Retest can replace the generator weights after model construction.
+        if _uses_neuflow(bare):
+            self._load_missing_neuflow([bare])
+        return network
 
     def model_to_device(
         self,
@@ -192,9 +225,18 @@ class RDUALModel(RealESRGANModel):
                 train_dataset.lq_size,
                 train_dataset.lq_size,
             )
+        input_dtype = self.amp_dtype if self.use_amp else torch.float32
+        if type(bare) is not RDUAL:
+            bare.prepare_for_compile(input_shape=input_shape, input_dtype=input_dtype)
+            return
         bare.prepare_for_compile(
             input_shape=input_shape,
-            input_dtype=self.amp_dtype if self.use_amp else torch.float32,
+            input_dtype=input_dtype,
+            reduce_frequency_grad=(
+                self.use_compile and self.opt.compile_mode == "reduce-overhead"
+                and self.device.type == "cuda" and self.opt.num_gpu == 1 and not self.opt.dist
+                and self.memory_format == torch.channels_last and self.opt.clip_keep == "none"
+            ),
         )
 
     @torch.no_grad()
@@ -297,9 +339,16 @@ class RDUALModel(RealESRGANModel):
     def _delivered(self, batch: DegradingBatch) -> DataFeed:
         """The clips' lq and gt (B,T,3,H,W) and the batch's shot_ids."""
         count = len(batch.chains)
+        target_clips = [batch.done[i]["gt"] for i in range(count)]
+        if type(self) is RDUALModel and self.memory_format == torch.channels_last:
+            # Each loss and D consume one BCHW frame across the batch.
+            targets = torch.stack([clip.permute(0, 2, 3, 1) for clip in target_clips], dim=1)
+            targets = targets.permute(1, 0, 4, 2, 3)
+        else:
+            targets = torch.stack(target_clips)
         return {
             "lq": torch.stack([batch.done[i]["lq"] for i in range(count)]),
-            "gt": torch.stack([batch.done[i]["gt"] for i in range(count)]),
+            "gt": targets,
             "shot_ids": batch.carry["shot_ids"].to(self.device, non_blocking=True),
         }
 
@@ -308,18 +357,13 @@ class RDUALModel(RealESRGANModel):
             device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
         )
 
-    def _frame_condition(self, t: int) -> Tensor | None:
-        """Discriminator conditioning of frame t, as image training builds it."""
-        assert self.lq is not None
-        assert self.gt is not None
+    def _frame_condition(self, t: int, semantics: tuple[Tensor, ...] | None) -> Tensor | None:
+        if semantics is not None:
+            return semantics[t]
         if self.d_conditioner is None:
             return None
-        lq, gt = self.lq[:, t], self.gt[:, t]
-        if isinstance(self.d_conditioner, LQCondition):
-            return self.d_conditioner(lq, (gt.shape[-2], gt.shape[-1]))
-        if self.d_input_conditioning:
-            return self.d_conditioner(gt, lq)
-        return self.d_conditioner(gt)
+        assert self.lq is not None and self.gt is not None
+        return self._discriminator_condition(self.gt[:, t], self.lq[:, t])
 
     def _generator_frame_loss(
         self,
@@ -329,6 +373,7 @@ class RDUALModel(RealESRGANModel):
         vosr_plan: VosrPlan | None = None,
         vosr_shares: list[Tensor] | None = None,
         multipliers: dict[str, float] | None = None,
+        semantics: tuple[Tensor, ...] | None = None,
     ) -> Callable[[Tensor, int], Tensor]:
         """The image generator loss stack for frame t, a 1/T share of the clip's loss.
 
@@ -373,9 +418,7 @@ class RDUALModel(RealESRGANModel):
                     target = lq_target
                 if label == "l_g_gan":
                     assert self.net_d is not None
-                    prediction = self.net_d(
-                        self._discriminator_input(output, self._frame_condition(t))
-                    )
+                    prediction = self._discriminate(output, self._frame_condition(t, semantics))
                     value = criterion(prediction, True, is_disc=False)
                     gan_terms.append(value.detach())
                 else:
@@ -487,6 +530,14 @@ class RDUALModel(RealESRGANModel):
             keep=self.opt.clip_keep,
             functions=self.step_functions,
             autocast=self._autocast,
+            output_frames_channels_last=self.memory_format == torch.channels_last,
+            group_parameter_gradients=(
+                type(self) is RDUALModel and type(bare) is RDUAL
+                and self.use_compile and self.opt.compile_mode == "reduce-overhead"
+                and self.opt.num_gpu == 1 and not self.opt.dist
+                and self.use_amp and self.device.type == "cuda" and self.amp_dtype == torch.bfloat16
+                and self.memory_format == torch.channels_last and self.opt.clip_keep == "none"
+            ),
             encode_chunk=ENCODE_CHUNK,
             grad_chunk=GRAD_CHUNK,
         )
@@ -543,9 +594,12 @@ class RDUALModel(RealESRGANModel):
         # ----------------------------- generator ----------------------------- #
         loss_sums: dict[str, Tensor] = {}
         gan_terms: list[Tensor] = []
+        semantics = None
+        if gan_active and self.sed_conditioner is not None:
+            semantics = tuple(self.sed_conditioner(self.gt[:, t]) for t in range(frames))
         self.output = self.backward_clip(
             self._generator_frame_loss(
-                frames, loss_sums, gan_terms, vosr_plan, vosr_shares, multipliers
+                frames, loss_sums, gan_terms, vosr_plan, vosr_shares, multipliers, semantics
             )
         )
         loss_dict.update(loss_sums)
@@ -629,23 +683,15 @@ class RDUALModel(RealESRGANModel):
                     if self.compile_discriminator and uses_cudagraphs:
                         # each frame's discriminator pass is its own CUDA-graph step
                         torch.compiler.cudagraph_mark_step_begin()
-                    condition = self._frame_condition(t)
-                    real = (
-                        self.gt[:, t].contiguous().to(memory_format=self.memory_format)
-                    )
-                    fake = (
-                        self.output[:, t]
-                        .contiguous()
-                        .to(memory_format=self.memory_format)
-                    )
+                    condition = self._frame_condition(t, semantics)
+                    frame_format = (torch.channels_last if self.memory_format == torch.channels_last
+                                    else torch.contiguous_format)
+                    real = self.gt[:, t].contiguous(memory_format=frame_format)
+                    fake = self.output[:, t].contiguous(memory_format=frame_format)
                     with self._autocast():
-                        real_d_pred = self.net_d(
-                            self._discriminator_input(real, condition)
-                        )
+                        real_d_pred = self._discriminate(real, condition)
                         l_d_real = cri_gan(real_d_pred, True, is_disc=True)
-                        fake_d_pred = self.net_d(
-                            self._discriminator_input(fake, condition)
-                        )
+                        fake_d_pred = self._discriminate(fake, condition)
                         l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
                     for name, value in (
                         ("l_d_real", l_d_real.detach()),

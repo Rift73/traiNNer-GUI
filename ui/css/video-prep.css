@@ -1,0 +1,191 @@
+/* Training videos of a clip-training dataset (js/recipe/video-prep.js): in the options form and on the Data screen. */
+
+.vprep {
+  display: grid;
+  gap: var(--s3);
+  margin: var(--s2) 0 var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--rule);
+  /* brought to the top of the form (revealVideoPanel): a little room above its frame */
+  scroll-margin-top: var(--s3);
+}
+
+.vprep__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.vprep__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.vprep__lead {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.vprep__source {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--s1) var(--s3);
+}
+
+/* A group of file names needs the width, so the two buttons sit under the value (video-prep.js renderPaths). */
+.vprep__source--stacked {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.vprep__source--stacked > .vprep__pick {
+  grid-column: 1 / -1;
+}
+
+.vprep__label {
+  font-weight: 500;
+}
+
+.vprep__paths {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vprep__path {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.vprep__path--none {
+  color: var(--ink-3);
+}
+
+/* Several files of one folder: the folder once, then their names. */
+.vprep__group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vprep__names {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.vprep__pick,
+.vprep__actions,
+.vprep__noticeacts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.vprep__noticeacts {
+  margin-top: var(--s2);
+}
+
+.vprep__job {
+  display: grid;
+  gap: var(--s1);
+}
+
+.vprep__episode,
+.vprep__count,
+.vprep__wait,
+.vprep__pollerror,
+.vprep__hint,
+.vprep__last,
+.vprep__more {
+  margin: 0;
+}
+
+.vprep__episode {
+  overflow-wrap: anywhere;
+}
+
+.vprep__count,
+.vprep__wait,
+.vprep__last,
+.vprep__more,
+.vprep__hint {
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+}
+
+.vprep__pollerror {
+  color: var(--err);
+  font-size: var(--text-sm);
+}
+
+.vprep__status {
+  display: grid;
+  gap: var(--s2);
+}
+
+.vprep__status:empty {
+  display: none;
+}
+
+.vprep__loading {
+  padding: 0;
+}
+
+.vprep__files {
+  display: grid;
+  gap: var(--s2);
+}
+
+.vprep__files:empty {
+  display: none;
+}
+
+.vprep__list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vprep__file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px var(--s2);
+}
+
+.vprep__name {
+  overflow-wrap: anywhere;
+}
+
+.vprep__reason {
+  grid-column: 2;
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.vprep__ready {
+  display: grid;
+  gap: var(--s2);
+}
+
+.vprep__summary {
+  cursor: pointer;
+  color: var(--ink-2);
+}
+
+/* A narrow pane: the buttons go under the path. */
+@media (max-width: 720px) {
+  .vprep__source {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

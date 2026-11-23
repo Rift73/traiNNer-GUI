@@ -7,7 +7,10 @@ import { createStore, persist } from '../store.js';
 const store = createStore({
   /**
    * [{id, name, source: 'managed'|'cli', status, iteration?, total?, startedAt?, updatedAt?, task?,
-   *   queueEntryId?, error?, returncode?, iterationsPerSecond?, eta?, vram?, telemetryIteration?}]
+   *   queueEntryId?, error?, returncode?, iterationsPerSecond?, eta?, estimatedFinishAt?, vram?, telemetryIteration?}]
+   *   eta: the time left as the trainer wrote it ("3:22:06"); estimatedFinishAt: when that estimate ends, a UTC
+   *   date-time the service works out from the time of the log line; null or absent when it cannot (an older
+   *   service, an undated log line).
    */
   list: [],
   /** 'idle' | 'loading' | 'ready' | 'error' */
@@ -106,11 +109,14 @@ function pickSummary(run) {
   const out = {};
   const keys = [
     'id', 'name', 'source', 'status', 'iteration', 'total', 'startedAt', 'updatedAt', 'task', 'queueEntryId',
-    'error', 'returncode', 'iterationsPerSecond', 'eta', 'vram', 'telemetryIteration', 'attemptId', 'sourceRootId', 'sourceRoot',
+    'error', 'returncode', 'iterationsPerSecond', 'eta', 'estimatedFinishAt', 'vram', 'telemetryIteration', 'attemptId', 'sourceRootId', 'sourceRoot',
   ];
   for (const key of keys) {
     if (run[key] !== undefined) out[key] = run[key];
   }
+  // A finish time belongs to the estimate it was dated from: an estimate that comes without one clears the
+  // earlier finish time of the entry it is merged into.
+  if (out.eta !== undefined && out.estimatedFinishAt === undefined) out.estimatedFinishAt = null;
   return out;
 }
 

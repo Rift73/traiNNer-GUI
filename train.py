@@ -52,7 +52,7 @@ from traiNNer.data.data_sampler import (
 )
 from traiNNer.data.prefetch_dataloader import CPUPrefetcher, CUDAPrefetcher
 from traiNNer.models import build_model, degrades_ahead
-from traiNNer.training.checkpoints import save_periodic_checkpoint
+from traiNNer.training.checkpoints import CheckpointRequests, save_periodic_checkpoint
 from traiNNer.training.data import create_train_val_dataloader
 from traiNNer.training_recovery import (
     CUDA_FAILURE_EXIT_CODE,
@@ -432,8 +432,8 @@ def _train_pipeline(root_path: str) -> None:
         # change the generator used by the next dropout or augmentation.
         for loader in (train_loader, *val_loaders):
             loader.generator = torch.Generator().manual_seed(opt.manual_seed)
-    start_batch = 0
-    restored_cursor = False
+    start_sample = 0
+    sampler_resume = None
     if resume_state is not None:
         start_epoch = resume_state["epoch"]
         current_iter = resume_state["iter"]
@@ -445,10 +445,18 @@ def _train_pipeline(root_path: str) -> None:
                 start_epoch,
             )
         elif "sampler_cursor" in resume_state:
-            start_epoch, start_batch = restore_sampler_cursor(
-                resume_state["sampler_cursor"], geometry
+            train_dataset = opt.datasets["train"]
+            sampler_resume = restore_sampler_cursor(
+                resume_state["sampler_cursor"],
+                geometry,
+                auto_batch_size_per_gpu=(
+                    train_dataset.batch_size_per_gpu
+                    if train_dataset.dataset_enlarge_ratio == "auto"
+                    else None
+                ),
             )
-            restored_cursor = True
+            start_epoch = sampler_resume.epoch
+            start_sample = sampler_resume.next_sample
         else:
             logger.warning(
                 "Legacy checkpoint has no sampler cursor. Restarting epoch %d at its first batch.",
@@ -456,7 +464,7 @@ def _train_pipeline(root_path: str) -> None:
             )
         if opt.checkpoint_rng:
             pending_streams = resume_state.get("random_streams")
-            if pending_streams is None or not restored_cursor:
+            if pending_streams is None or sampler_resume is None:
                 raise ValueError("This checkpoint has no replayable random streams and sampler cursor. "
                                  "Set checkpoint_rng to false to resume with fresh streams.")
             if pending_streams.get("worker_augmentation") != worker_augmentation:
@@ -466,12 +474,27 @@ def _train_pipeline(root_path: str) -> None:
         logger.info(
             "Resuming training from epoch: %d, iter: %d.", start_epoch, current_iter
         )
-        if restored_cursor:
+        if sampler_resume is not None:
+            assert geometry is not None
+            if sampler_resume.saved_batch_size != geometry["batch_size"]:
+                logger.warning(
+                    "Continuing from checkpoint update %d with rank-local batch size "
+                    "changed from %d to %d.",
+                    current_iter,
+                    sampler_resume.saved_batch_size,
+                    geometry["batch_size"],
+                )
+                if sampler_resume.restarted_epoch:
+                    logger.warning(
+                        "Automatic dataset enlargement changed the permutation. "
+                        "Restarting sampler epoch %d.",
+                        start_epoch,
+                    )
             logger.info(
-                "Restored sampler position at epoch %d, rank-local batch %d (zero-based). "
+                "Restored sampler position at epoch %d, rank-local sample %d (zero-based). "
                 "%s",
                 start_epoch,
-                start_batch,
+                start_sample,
                 "Training random streams will be restored." if opt.checkpoint_rng else
                 "Random streams restart from the launch seed; worker augmentation state is fresh.",
             )
@@ -491,9 +514,10 @@ def _train_pipeline(root_path: str) -> None:
     early_stopping = model.early_stopping
     early_stopped = early_stopping is not None and early_stopping.stopped
     last_validation_iter = current_iter if early_stopped else None
+    initial_iter = current_iter
     last_completed_iter = current_iter
     last_saved_iter = None
-    last_completed_position = (start_epoch, start_batch)
+    last_completed_position = (start_epoch, start_sample)
 
     # Optimizer/scheduler state is now initialized (or restored). Warm-up must
     # protect the first update too, without consuming a scheduler step.
@@ -502,13 +526,6 @@ def _train_pipeline(root_path: str) -> None:
     # create message logger (formatted outputs)
     msg_logger = MessageLogger(opt, current_iter, tb_logger)
 
-    # The constructor may already queue workers or decode a batch. Position
-    # the sampler before creating any iterator for a cursor-based resume.
-    if restored_cursor:
-        assert geometry is not None
-        train_sampler.set_epoch(
-            start_epoch, start_sample=start_batch * geometry["batch_size"]
-        )
     prefetcher: CPUPrefetcher | CUDAPrefetcher | DegradeAheadPrefetcher | None = None
 
     # Start the steady-state loop only after all initialization is complete.
@@ -591,15 +608,16 @@ def _train_pipeline(root_path: str) -> None:
         random_state.restore(pending_streams, opt.manual_seed, rng_device)
         del pending_streams
 
+    checkpoint_requests = CheckpointRequests.from_environment(model, opt.rank, logger)
     try:
         epoch = start_epoch
-        next_batch = start_batch
+        batch_size = geometry["batch_size"] if geometry is not None else 0
+        next_sample = start_sample
+        next_batch = start_sample // batch_size if batch_size else 0
         stop = interrupt_received or early_stopped
         while current_iter < total_iters and not stop:
-            if restored_cursor:
-                restored_cursor = False
-            else:
-                train_sampler.set_epoch(epoch)
+            # Set the offset before constructing the iterator or resetting prefetch.
+            train_sampler.set_epoch(epoch, start_sample=next_sample)
             if prefetcher is None:
                 prefetcher = _create_prefetcher(opt, train_loader, logger)
                 if degrades_ahead(model):
@@ -615,6 +633,10 @@ def _train_pipeline(root_path: str) -> None:
             while train_data is not None:
                 data_timer.record()
                 next_batch += 1
+                if geometry is not None:
+                    next_sample = min(
+                        next_sample + batch_size, geometry["samples_per_rank"]
+                    )
 
                 # Reserve an iteration label only at the accumulation boundary.
                 # A rejected boundary rolls that label back below.
@@ -656,9 +678,18 @@ def _train_pipeline(root_path: str) -> None:
                 validation_due = apply_gradient and validation_interval and current_iter % validation_interval == 0
                 log_due = apply_gradient and current_iter % opt.logger.print_freq == 0
                 stopped_at_boundary = interrupt_received
+                # Only rank zero polls. The model save paths have no DDP
+                # collectives, and deferred update accounting is single-rank.
+                checkpoint_requested = (
+                    apply_gradient
+                    and checkpoint_requests is not None
+                    and not checkpoint_due
+                    and checkpoint_requests.poll(force=stopped_at_boundary)
+                )
                 settled = not model.deferred_nonfinite_guard
                 if not settled and apply_gradient and (
-                    stopped_at_boundary or checkpoint_due or validation_due or log_due or current_iter >= total_iters
+                    stopped_at_boundary or checkpoint_due or checkpoint_requested
+                    or validation_due or log_due or current_iter >= total_iters
                 ):
                     # Uninterrupted SR normally charges a late GPU rejection to the next
                     # update. Checkpoints and final results cannot carry that in-memory debt.
@@ -679,7 +710,7 @@ def _train_pipeline(root_path: str) -> None:
                 if accepted_gradient or (
                     apply_gradient and settled and model.deferred_nonfinite_guard
                 ):
-                    last_completed_position = (epoch, next_batch)
+                    last_completed_position = (epoch, next_sample)
                 iter_timer.record()
                 if accepted_gradient and current_iter == msg_logger.start_iter + 1:
                     # reset start time in msg_logger for more accurate eta_time
@@ -709,17 +740,18 @@ def _train_pipeline(root_path: str) -> None:
                         stop = True
 
                 # save models and training states
-                if checkpoint_due and accepted_gradient:
+                if accepted_gradient and (checkpoint_due or checkpoint_requested):
                     record_checkpoint_position()
                     saved = save_periodic_checkpoint(
                         model,
                         epoch,
                         current_iter,
                         logger=logger,
-                        layout=checkpoint_layout,
-                        recovery=recovery,
-                        retention=retention,
+                        layout=checkpoint_layout if checkpoint_due else None,
+                        recovery=recovery if checkpoint_due else None,
+                        retention=retention if checkpoint_due else None,
                         required=final_managed_checkpoint or early_stopped,
+                        requests=checkpoint_requests,
                     )
                     if saved:
                         last_saved_iter = current_iter
@@ -744,7 +776,7 @@ def _train_pipeline(root_path: str) -> None:
 
             if train_data is None:
                 epoch += 1
-                next_batch = 0
+                next_batch = next_sample = 0
         # Resolve pending update failures under the same recovery policy.
         model.settle_training_updates()
     except PersistentNonfiniteError as e:
@@ -759,6 +791,8 @@ def _train_pipeline(root_path: str) -> None:
         crashed = True
         interrupt_received = True
     finally:
+        if checkpoint_requests is not None and checkpoint_requests.poll(force=True):
+            checkpoint_requests.finish(error="Training ended before the checkpoint request could be saved.")
         if prefetcher is not None:
             prefetcher.close()
 
@@ -804,7 +838,12 @@ def _train_pipeline(root_path: str) -> None:
         # An all-ignore segmentation window ran no forward or optimizer step.
         elif rejected_at_stop and model.training_step_rejection_reason != "no_annotated_pixels":
             logger.warning("Interrupted after a rejected update. Keeping the preceding checkpoint.")
-        elif current_iter > 0 and not early_stopped and current_iter != last_saved_iter:
+        # The source checkpoint stays intact if this launch accepted no updates.
+        elif (
+            current_iter > initial_iter
+            and not early_stopped
+            and current_iter != last_saved_iter
+        ):
             epoch = last_completed_position[0]
             logger.info(
                 "Saving models and training states to %s for epoch: %d, iter: %d.",

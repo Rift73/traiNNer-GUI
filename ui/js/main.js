@@ -8,6 +8,8 @@ import { data, AUDIT_TASKS } from './state/data.js';
 import { runs, runStatus } from './state/runs.js';
 import { queue } from './state/queue.js';
 import { catalog } from './state/catalog.js';
+import { videoPrep, counts as videoCounts, jobActive, exampleUnchosen, VIDEO_DATASET } from './state/video-prep.js';
+import { revealVideoPanel, askAndPrepare } from './recipe/video-prep.js';
 import { countIssues, loading, notice, toast, confirmOnPhone } from './ui.js';
 import { startTraining, addToQueue, go, runHref, queueHref } from './actions.js';
 
@@ -43,8 +45,27 @@ function auditState() {
   return audit.warnings ? 'warnings' : 'ok';
 }
 
+/** The datasets of the open recipe that are folders of images (a video clip dataset is checked as videos). */
+const imageFolderSets = () => recipe.datasetFolders().filter((set) => String(set.type).toLowerCase() !== VIDEO_DATASET);
+
+/** True when the open recipe trains on video clips and names no other image folder to check. */
+function videoOnlyRecipe() {
+  return videoPrep.get().applies && !imageFolderSets().some((set) => set.gt.length || set.lq.length);
+}
+
 function dataStation() {
   const d = data.get();
+  if (videoOnlyRecipe()) {
+    const v = videoPrep.get();
+    if (jobActive(v.job)) return { state: '', text: 'Preparing videos…' };
+    if (exampleUnchosen(v)) return { state: '', text: 'Choose the video folder' };
+    if (v.roots.length && v.check.phase === 'error') return { state: 'err', text: 'Videos need attention' };
+    const c = v.check.phase === 'done' && v.check.answer ? videoCounts(v.check.answer) : null;
+    if (!c) return { state: '', text: 'Videos not checked' };
+    if (c.invalid) return { state: 'err', text: `${fmt.int(c.invalid)} of ${fmt.plural(c.total, 'video')} cannot be used` };
+    if (c.pending) return { state: 'warn', text: `${fmt.int(c.pending)} of ${fmt.plural(c.total, 'video')} need an index` };
+    return { state: 'ok', text: `${fmt.plural(c.ready, 'video')} ready` };
+  }
   if (auditedRecipe()) {
     const audit = d.audit;
     switch (auditState()) {
@@ -318,6 +339,10 @@ function nextStep() {
   }
   if (!r.hasResult) return { tone: '', text: 'Checking the recipe…' };
 
+  // Clip training: the videos need their indexes before training, whatever else is still unset.
+  const video = videoStep(r);
+  if (video) return video;
+
   const { errors, warnings } = countIssues(r.issues);
   if (errors || !r.ok) {
     // A template names example folders. When the only errors are data paths that are not there, the
@@ -382,7 +407,8 @@ function nextStep() {
   }
 
   const d = data.get();
-  const hasFolders = recipe.datasetFolders().some((set) => set.gt.length || set.lq.length);
+  // A video clip dataset is not an image folder: its videos have their own step (videoStep).
+  const hasFolders = imageFolderSets().some((set) => set.gt.length || set.lq.length);
   if (d.phase === 'done' && d.result && countIssues(d.result.issues).errors) {
     return { tone: 'err', text: 'The image folders you checked have errors.', action: { label: 'Open Data', href: '#/data' } };
   }
@@ -408,6 +434,44 @@ const DATA_PATH_FIELD = /^datasets\.[^.]+\.(dataroot_gt|dataroot_lq|annotation_f
 
 function isMissingDataPath(issue) {
   return DATA_PATH_FIELD.test(String(issue.path ?? '')) && /^Path was not found/i.test(String(issue.message ?? ''));
+}
+
+// Where the service puts the trouble of the training videos (a whole-request problem or the index count).
+const VIDEO_ROOT_FIELD = /^datasets\.train\.dataroot_gt(\.\d+|\[\d+\])?$/;
+
+/** The next step of a clip-training recipe, or null when its videos do not decide it. */
+function videoStep(r) {
+  const v = videoPrep.get();
+  if (!v.applies) return null;
+  if (jobActive(v.job)) {
+    const p = v.job.progress ?? {};
+    const done = Number.isFinite(p.current) && Number.isFinite(p.total) && p.total > 0 ? `: ${fmt.int(Math.min(p.current, p.total))} of ${fmt.int(p.total)} done` : '';
+    return { tone: 'run', text: `Preparing the training videos${done}.`, action: { label: 'Show progress', run: revealVideoPanel } };
+  }
+  // A template's example path: the step is choosing the videos, not reading the refusal.
+  if (exampleUnchosen(v)) return { tone: 'warn', text: 'Choose the folder that holds the training videos.', action: { label: 'Choose folder', primary: true, run: revealVideoPanel } };
+  const c = v.check.phase === 'done' && v.check.answer ? videoCounts(v.check.answer) : null;
+  if (c && c.fixable > 0 && c.invalid === 0) {
+    return {
+      tone: 'warn',
+      text: `${fmt.int(c.pending)} of ${fmt.plural(c.total, 'training video')} need an index before training.`,
+      action: {
+        label: 'Prepare videos',
+        primary: true,
+        run: () => {
+          revealVideoPanel();
+          askAndPrepare().catch((error) => toast(`The preparation could not be started: ${error?.message ?? error}`, { kind: 'err' }));
+        },
+      },
+    };
+  }
+  // The videos themselves stand in the way (a refused check, unusable videos, no folder), whatever else is wrong.
+  const errorIssues = (Array.isArray(r.issues) ? r.issues : []).filter((issue) => issue.level === 'error');
+  const videosWrong = !v.roots.length || v.check.phase === 'error' || Boolean(c?.invalid);
+  if (videosWrong || (errorIssues.length && errorIssues.every((issue) => VIDEO_ROOT_FIELD.test(String(issue.path ?? ''))))) {
+    return { tone: 'err', text: 'The training videos need attention before training.', action: { label: 'Show videos', run: revealVideoPanel } };
+  }
+  return null;
 }
 
 function showRecipeIssues() {
@@ -514,7 +578,7 @@ async function route() {
 
 buildRail();
 recipe.restore();
-for (const store of [conn, recipe, data, runs, queue]) {
+for (const store of [conn, recipe, data, runs, queue, videoPrep]) {
   store.subscribe(() => {
     renderRail();
     renderNext();

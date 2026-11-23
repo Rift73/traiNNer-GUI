@@ -2,9 +2,11 @@ from typing import Annotated, Any, Literal
 
 from msgspec import Meta, Struct, field
 
+from trainner_config.neosr_batchaug import NATIVE_BATCH_MODES
+from trainner_config.resampling import NeoSRResizeMode
+
 PixelFormat = Literal["rgb", "y", "uv", "yuv444"]
-OTFResizeMode = Literal["bilinear", "bicubic", "nearest-exact", "lanczos", "area",
-                        "aa_box", "aa_bilinear", "aa_bicubic", "aa_mitchell", "aa_lanczos2", "aa_lanczos3"]
+OTFResizeMode = Literal[NeoSRResizeMode, "nearest-exact", "lanczos"]
 Probability = Annotated[float, Meta(ge=0, le=1)]
 
 # Examples advertise names to recipe editors while preserving the existing string contracts.
@@ -15,6 +17,12 @@ ChromaResizeFilter = Annotated[str, Meta(examples=[
 CompressionAlgorithm = Annotated[str, Meta(examples=["jpeg", "webp", "h264", "hevc", "mpeg2", "mpeg4", "vp9"])]
 VideoSampling = Annotated[str, Meta(examples=["444", "422", "420"])]
 BLUR_KERNELS = ("iso", "aniso", "generalized_iso", "generalized_aniso", "plateau_iso", "plateau_aniso")
+OTF_IMAGE_BACKENDS = ("disk", "lmdb", "zip")
+OTF_DEGRADATIONS = (
+    "ntsc", "rainbow", "ghosting", "interlace", "scanline", "lowpass", "overshoot",
+    "shift", "subsampling", "dithering", "compress", "hf_noise", "nlmeans",
+)
+OTFDegradation = Annotated[str, Meta(examples=list(OTF_DEGRADATIONS))]
 BlurKernel = Annotated[str, Meta(examples=list(BLUR_KERNELS))]
 
 
@@ -37,7 +45,11 @@ class DatasetOptions(StrictStruct):
     type: str
     io_backend: Annotated[
         dict[str, Any],
-        Meta(extra_json_schema={"properties": {"type": {"type": "string", "examples": ["disk", "lmdb"]}}}),
+        Meta(extra_json_schema={"properties": {"type": {
+            "type": "string",
+            "examples": list(OTF_IMAGE_BACKENDS),
+            "description": "Image storage backend. Use zip with RealESRGANDataset to read one or more archives directly. Put the archive paths in dataroot_gt and leave target_dataroot_gt unset.",
+        }}}),
     ] = field(default_factory=lambda: {"type": "disk"})
     native_paired_crop: Annotated[
         bool, Meta(description="Use the LLVM RGB patch packer for paired image training with 8-bit sources. Uses the same shared crop, flip and rotation as the ordinary loader. Prepare the native data tools first."),
@@ -208,7 +220,7 @@ class DatasetOptions(StrictStruct):
     dataroot_gt: Annotated[
         str | list[str] | None,
         Meta(
-            description="Path to the HR (high res) images in your training dataset. Specify one or multiple folders, separated by commas."
+            description="Ground-truth sources. Enter one path or a list of paths. For RealESRGANDataset with ZIP storage, select the .zip files themselves, for example /mnt/d/images.zip."
         ),
     ] = None
     target_dataroot_gt: Annotated[
@@ -326,6 +338,16 @@ class PathOptions(StrictStruct):
     ] = True
     resume_state: str | None = None
     pretrain_network_g_ema: str | None = None
+    neuflow_weights: Annotated[
+        str | None,
+        Meta(description=(
+            "NeuFlow v2 weights for RDUAL and aligned RSR generators without embedded flow. "
+            "Accepts .safetensors or .pth. When omitted, the trainer uses "
+            "experiments/pretrained_models/neuflow_v2.safetensors if present, "
+            "then the official mixed checkpoint from the trainer's cache. "
+            "The official weights download on first use."
+        )),
+    ] = None
 
     pretrain_network_d: Annotated[
         str | None,
@@ -354,7 +376,9 @@ class PathOptions(StrictStruct):
         ),
     ] = None
     pretrain_network_ae_decoder_ema: str | None = None
-    ignore_resume_networks: list[str] | None = None
+    ignore_resume_networks: list[Annotated[str, Meta(examples=[
+        "network_g", "network_g_ema", "network_d", "network_ae", "network_ae_ema",
+    ])]] | None = None
 
 
 class OnnxOptions(StrictStruct):
@@ -576,6 +600,10 @@ class TrainOptions(StrictStruct):
         ),
     ] = -1
     early_stopping: EarlyStoppingOptions | None = None
+    resume_previous_lrs: Annotated[
+        dict[str, Annotated[float, Meta(ge=0)]] | None,
+        Meta(description="Original optimizer base learning rates by role (g, d, ae) for importing old training states that omitted them. Managed resume fills these when known. New checkpoints record their own bases."),
+    ] = None
     restart_scheduler: Annotated[
         bool,
         Meta(
@@ -649,9 +677,9 @@ class TrainOptions(StrictStruct):
     moa_multi_prob: Annotated[float, Meta(ge=0, le=1, description="NeoSR probability of drawing multiple augmentation slots.")] = 0.3
     moa_antialias: Annotated[bool, Meta(description="Use antialiased NeoSR ResizeMix interpolation.")] = False
     moa_augs: Annotated[
-        list[str],
+        list[Annotated[str, Meta(examples=list(NATIVE_BATCH_MODES))]],
         Meta(
-            description="Candidate batch augmentations. Native mode selects one per batch."
+            description="Candidate batch augmentations. Native mode selects one per batch. downup and up require native mode."
         ),
     ] = field(default_factory=lambda: ["none", "mixup", "cutmix", "resizemix", "cutblur"])
     moa_probs: Annotated[
@@ -822,7 +850,7 @@ class NeoSRSampleOptions(StrictStruct):
     jpeg_prob: Probability = 1.0
     jpeg_prob2: Probability = 1.0
     clean_prob: Probability = 0.0
-    clean_mode: list[OTFResizeMode] = field(default_factory=lambda: ["aa_bicubic"])
+    clean_mode: list[NeoSRResizeMode] = field(default_factory=lambda: ["aa_bicubic"])
     clean_mode_prob: list[float] | None = None
     sharpen_prob: Probability = 0.0
     sharpen_sigma: tuple[float, float] = (0.5, 2.0)
@@ -1039,7 +1067,7 @@ class ReduxOptions(StrictStruct):
 
     # ── Degradation Combo System ─────────────────────────────────────────────
     otf_degradation_combos: Annotated[
-        list[list[str]] | None,
+        list[list[OTFDegradation]] | None,
         Meta(
             description="List of degradation combinations. Each combo is a list of degradation names. "
             "One combo is selected per iteration (mutually exclusive). "
@@ -1064,7 +1092,7 @@ class ReduxOptions(StrictStruct):
         ),
     ] = 0.5
     otf_global_degradations: Annotated[
-        list[str] | None,
+        list[OTFDegradation] | None,
         Meta(
             description="Degradations that are always eligible regardless of which combo is selected. "
             "Valid names: same as otf_degradation_combos. "
@@ -1751,7 +1779,7 @@ class ReduxOptions(StrictStruct):
     queue_size: Annotated[
         int,
         Meta(
-            description="Queue size for OTF processing, must be a multiple of `batch_size_per_gpu`."
+            description="Target size of the on-the-fly training pair pool in images. Zero disables the pool. Positive sizes round down to whole batches, with a minimum of one batch."
         ),
     ] = 120
     queue_lq_uint8: Annotated[

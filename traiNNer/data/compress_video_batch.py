@@ -351,11 +351,19 @@ def _prepare_pyav(
 
     device = tensor.device
     codec_name, fmt = _PYAV_CODEC_MAP[codec]
+    # PyAV encodes RGB24. Interleave the source pixels on the GPU once so each
+    # CPU frame can borrow that buffer, including mirrored lead-in frames.
+    packed_rgb = (
+        temporal and tensor.is_cuda and tensor.dtype == torch.float32
+        and hasattr(av.VideoFrame, "from_numpy_buffer")
+    )
+    if packed_rgb:
+        tensor = tensor.clamp(0, 1).mul_(255).to(torch.uint8, memory_format=torch.channels_last)
     tensor = _with_lead_in(tensor, temporal, lead_in)
     b, _, h, w = tensor.shape
 
-    # BCHW float → uint8, on its way to the CPU
-    inp, ready = stage_to_host((tensor.clamp(0, 1) * 255).byte())
+    # Keep the staged layout so the codec worker can borrow interleaved frames.
+    inp, ready = stage_to_host(tensor if packed_rgb else (tensor.clamp(0, 1) * 255).byte())
     pinned = ready is not None
 
     # Chroma subsampling (filter to codec-supported formats)
@@ -400,9 +408,11 @@ def _prepare_pyav(
         stream.options = options
         stream.codec_context.thread_count = enc_threads
 
-        for frame_chw in frames_np:
-            frame_hwc = frame_chw.transpose(1, 2, 0)  # CHW → HWC
-            vf = av.VideoFrame.from_ndarray(frame_hwc, format="rgb24")
+        for frame_hwc in frames_np:
+            if packed_rgb and frame_hwc.strides[1:] == (3, 1):
+                vf = av.VideoFrame.from_numpy_buffer(frame_hwc, format="rgb24")
+            else:
+                vf = av.VideoFrame.from_ndarray(frame_hwc, format="rgb24")
             for pkt in stream.encode(vf):
                 container.mux(pkt)
         for pkt in stream.encode(None):
@@ -433,10 +443,10 @@ def _prepare_pyav(
     def round_trip() -> Tensor:
         if ready is not None:
             ready.synchronize()
-        inp_np = inp.numpy()
+        inp_np = inp.permute(0, 2, 3, 1).numpy()
         if pad_h or pad_w:
             inp_np = np.pad(
-                inp_np, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode="reflect"
+                inp_np, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)), mode="reflect"
             )
         if temporal or b <= _CHUNK_FRAMES:
             frames = encode_decode(inp_np)

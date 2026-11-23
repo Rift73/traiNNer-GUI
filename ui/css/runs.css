@@ -230,6 +230,20 @@
   max-width: 72ch;
 }
 
+/* The line about a checkpoint saved on request; the slot is empty until one is asked for. */
+.runs__checkpoint:empty {
+  display: none;
+}
+
+.runs__checkpoint .spinner {
+  vertical-align: -2px;
+}
+
+/* "Resume with other settings…": each field holds one short number, so it is not as wide as its sentence. */
+.runs__resume-field > .input {
+  max-width: 14em;
+}
+
 /* One line when the run is a curriculum phase; the slot is empty otherwise. */
 .runs__phase-slot:empty {
   display: none;

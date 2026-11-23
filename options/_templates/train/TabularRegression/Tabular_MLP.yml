@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Rift73/traiNNer-GUI/refs/heads/main/schemas/redux-config.schema.json
 # Synthetic example: predict a rectangle's perimeter from two lengths.
 # Point meta_info at your own CSV files, then update the named columns and layer widths.
 name: tabular_perimeter

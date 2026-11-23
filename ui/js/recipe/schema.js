@@ -80,6 +80,8 @@ export function variantTags(node, propertyName = 'type') {
   if (!tagNode) return [];
   if (Array.isArray(tagNode.enum)) return tagNode.enum;
   if ('const' in tagNode) return [tagNode.const];
+  // A tag that is matched without regard to case is a pattern; `examples` then names its spelling.
+  if (typeof tagNode.pattern === 'string' && Array.isArray(tagNode.examples)) return tagNode.examples.filter((x) => typeof x === 'string');
   return [];
 }
 
@@ -223,6 +225,11 @@ export const SERVICE_OPTIONS = {
     anyOf: [{ type: 'array', items: { type: 'integer', minimum: 1 } }, { type: 'null' }],
     default: null,
     description: "Saves the first sample fed to the model at each of these updates, for example [1, 500]: its tensors and previews, shown in the run's Training samples tab. Off when empty. Each capture pauses the trainer briefly and writes the sample to disk.",
+  },
+  'path.neuflow_weights': {
+    anyOf: [{ type: 'string' }, { type: 'null' }],
+    default: null,
+    description: 'NeuFlow v2 weights for RDUAL generators without embedded flow. Accepts .safetensors or .pth, and the file must exist. Omit to download the official weights once on first use.',
   },
 };
 

@@ -7,12 +7,22 @@ from pathlib import Path
 import torch
 from PIL import Image
 from torch import Tensor, nn
-
+from trainner_config.rdual import (
+    complete_neuflow_state,
+    ensure_neuflow_weights,
+    load_neuflow_weights,
+)
 from trainner_config.tasks import recurrent_architectures, resolve_task, task_name
 from trainner_data.frame_sequences import FrameWindowIndex
+
 from traiNNer.archs import build_network
 from traiNNer.archs.arch_info import TEMPORAL_ARCHS
-from traiNNer.models.checkpoint_payload import load_matching_network_checkpoint
+from traiNNer.models.checkpoint_payload import (
+    _checkpoint_tensors,
+    load_matching_network_checkpoint,
+    read_network_checkpoint,
+    strip_common_prefix,
+)
 from traiNNer.utils.img_util import tensor2img
 
 
@@ -71,25 +81,27 @@ def predict_sequence(opt, checkpoint: Path, source: Path, destination: Path, cli
     assert selection is not None and opt.network_g is not None
     _, architecture, _ = selection
     network = build_network({**opt.network_g, "scale": opt.scale}).to(device="cpu", dtype=torch.float32)
-    load_matching_network_checkpoint(network, checkpoint, opt.path.param_key_g)
+    uses_neuflow = hasattr(network, "flow_loaded")
+    if uses_neuflow:
+        # Older checkpoints can omit the frozen optical flow.
+        weights, _ = _checkpoint_tensors(
+            read_network_checkpoint(checkpoint), checkpoint, opt.path.param_key_g
+        )
+        weights = strip_common_prefix(weights, ("module.", "_orig_mod.", "netG."))
+        state = complete_neuflow_state(weights, network.state_dict())
+        network.load_state_dict(state, strict=True)
+    else:
+        load_matching_network_checkpoint(network, checkpoint, opt.path.param_key_g)
     network.eval()
-    if architecture == "rdual" or getattr(network, "temporal_read", None) == "aligned":
-        # Some old RDUAL exports omit the frozen optical-flow weights. Applying
-        # a randomly initialized flow network would change every output.
-        if not bool(network.flow_loaded):
-            from safetensors.torch import load_file
-            from traiNNer.models.rdual_model import NEUFLOW_PRETRAIN_PATH
-
-            path = Path(NEUFLOW_PRETRAIN_PATH)
-            if not path.is_file():
-                raise FileNotFoundError(f"This checkpoint requires NeuFlow v2 weights at {path}.")
-            network.load_flow_weights(load_file(str(path), device="cpu"))
 
     width = _window_width(opt, network, clip_size)
     index = FrameWindowIndex([str(source)], width)
     if not index:
         raise ValueError(f"No scene in {source} contains {width} frames. Use numbered PNG/JPEG frames.")
     pairs = _prediction_paths(source, destination, list(index.centers()))
+    if uses_neuflow and not bool(network.flow_loaded):
+        path = ensure_neuflow_weights(opt, Path.cwd())
+        network.load_flow_weights(load_neuflow_weights(path))
 
     # Consecutive windows overlap. Retain at most one window's decoded inputs;
     # the learned state still starts at the same center-specific validation boundary.

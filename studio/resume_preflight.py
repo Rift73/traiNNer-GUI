@@ -9,7 +9,7 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 
-from trainner_config.resume import resume_recipe
+from trainner_config.resume import recipe_learning_rate, resume_recipe
 
 from .paths import artifact_version
 from .run_checkpoints import import_sources
@@ -68,9 +68,10 @@ def inspect_resume(config: dict, opt, root: Path) -> tuple[dict, list[dict]]:
                    optimizerIdentities=bool(saved["optimizers"]), randomStreams=saved["randomStreams"],
                    replaySeed=saved["seed"])
     remedy = "Use the checkpoint recipe to resume, or start from network weights for a new optimizer."
-    if len(roles) != saved["optimizerCount"]:
-        issue("path.resume_state", f"The state has {saved['optimizerCount']} optimizers. This recipe uses {len(roles)}. {remedy}")
     requested = resume_recipe(opt)
+    optimizer_roles = [role for role in roles if role in requested["optimizers"]]
+    if len(optimizer_roles) != saved["optimizerCount"]:
+        issue("path.resume_state", f"The state has {saved['optimizerCount']} optimizers. This recipe uses {len(optimizer_roles)}. {remedy}")
     recorded = saved["recipe"]
     if recorded and recorded.get("version") == 1:
         for key in ("task", "scale"):
@@ -86,10 +87,29 @@ def inspect_resume(config: dict, opt, root: Path) -> tuple[dict, list[dict]]:
             old, new = recorded["optimizers"].get(role) or {}, requested["optimizers"].get(role) or {}
             if str(old.get("type")).casefold() != str(new.get("type")).casefold():
                 issue(f"train.optim_{role}.type", f"The saved optimizer is {old.get('type')!r}. {remedy}")
-            elif (options := sorted(k for k in old.keys() | new.keys() if k != "type" and old.get(k) != new.get(k))):
-                issue(f"train.optim_{role}", "Optimizer options changed (" + ", ".join(options) + "). Resume restores saved parameter groups, including their learning rates. Use weights-only initialization to apply fresh optimizer settings.", "warning")
+            else:
+                options = sorted(
+                    key for key in old.keys() | new.keys()
+                    if key not in {"type", "lr"} and old.get(key) != new.get(key)
+                )
+                if options:
+                    issue(
+                        f"train.optim_{role}",
+                        f"Optimizer options changed ({', '.join(options)}). Resume restores these options "
+                        "from the saved parameter groups. Use weights-only initialization to apply them.",
+                        "warning",
+                    )
+                old_rate = recipe_learning_rate(old.get("lr"))
+                new_rate = recipe_learning_rate(new.get("lr"))
+                if old_rate is not None and new_rate is not None and old_rate != new_rate:
+                    issue(
+                        f"train.optim_{role}.lr",
+                        "Resume applies the edited base learning rate. Restored schedules keep their "
+                        "position and use the new base rate.",
+                        "warning",
+                    )
 
-    for role, identity in zip(roles, saved["optimizers"]):
+    for role, identity in zip(optimizer_roles, saved["optimizers"]):
         actual_roles = identity["roles"]
         if actual_roles and actual_roles != ["net_" + role]:
             issue("path.resume_state", f"Saved parameters belong to {actual_roles}, but this optimizer targets net_{role}. {remedy}")
@@ -103,7 +123,7 @@ def inspect_resume(config: dict, opt, root: Path) -> tuple[dict, list[dict]]:
         issue("path.resume_state", "This legacy state has no named optimizer identities. The trainer matches groups by position.", "warning")
     train = opt.train
     if not train.restart_scheduler:
-        expected = [(role, train.scheduler if train.schedulers is None else train.schedulers.get(role)) for role in roles]
+        expected = [(role, train.scheduler if train.schedulers is None else train.schedulers.get(role)) for role in optimizer_roles]
         expected = [(role, spec) for role, spec in expected if spec is not None]
         if len(expected) != saved["schedulerCount"]:
             issue("train.scheduler", "The number of active schedules differs from the checkpoint. Restore its schedules or explicitly restart them.")
@@ -160,11 +180,22 @@ def inspect_resume(config: dict, opt, root: Path) -> tuple[dict, list[dict]]:
         elif identity is not None:
             issue("datasets.train.type", "This replay state requires the original paired image dataset.")
     if ds and (geometry := saved["geometry"]):
-        batch = ds.batch_size_per_gpu
-        when_known = {"accum_iters": ds.accum_iter}
-        if type(batch) is int and isinstance(opt.num_gpu, int):
-            when_known["batch_size"] = batch if opt.dist else batch * max(1, opt.num_gpu)
-        for key, value in when_known.items():
-            if geometry.get(key) != value:
-                issue("datasets.train", f"Sampler cursor records {key}={geometry.get(key)!r}. This recipe uses {value}. Keep the original loader geometry for full-state resume.")
+        if geometry.get("accum_iters") != ds.accum_iter:
+            issue(
+                "datasets.train",
+                f"Sampler cursor records accum_iters={geometry.get('accum_iters')!r}. "
+                f"This recipe uses {ds.accum_iter}. Keep the original accumulation for full-state resume.",
+            )
+        if type(ds.batch_size_per_gpu) is int and isinstance(opt.num_gpu, int):
+            batch = ds.batch_size_per_gpu * (1 if opt.dist else max(1, opt.num_gpu))
+            saved_batch = geometry.get("batch_size")
+            if type(saved_batch) is not int or saved_batch < 1:
+                issue("datasets.train", "The sampler cursor has an invalid saved batch size.")
+            elif saved_batch != batch:
+                issue(
+                    "datasets.train.batch_size_per_gpu",
+                    f"Resume changes the batch size from {saved_batch} to {batch} samples per rank. "
+                    "This changes how samples are grouped into updates.",
+                    "warning",
+                )
     return summary, issues

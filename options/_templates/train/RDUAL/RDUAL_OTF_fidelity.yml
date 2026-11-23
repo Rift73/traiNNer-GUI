@@ -1,0 +1,112 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Rift73/traiNNer-GUI/refs/heads/main/schemas/redux-config.schema.json
+# 2x RDUAL fidelity training on indexed, same-resolution videos.
+# Use 8-bit yuv420p, limited-range BT.709 sources. Set dataroot_gt to their folder.
+# Index the videos in Studio first, using the same descale settings as the recipe.
+name: 2x_RDUAL_OTF_fidelity
+task: recurrent_restoration
+scale: 2
+num_gpu: 1
+input_pixel_format: rgb
+output_pixel_format: rgb
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+use_compile: false
+clip_keep: none
+
+# One degradation draw per clip. H.264 compresses the frames together.
+high_order_degradation: true
+otf_hf_noise_prob: 0.0
+resize_prob: [0.15, 0.15, 0.7]  # up, down, keep
+resize_range: [0.7, 1.5]
+resize_mode_list: [bilinear, bicubic, lanczos]
+resize_mode_prob: [0.34, 0.33, 0.33]
+compress_prob: 0.8
+compress_algorithms: [h264]
+compress_algorithm_probs: [1.0]
+compress_h264_range: [13, 26]
+compress_video_sampling: ["420"]
+
+resize_prob2: [0.15, 0.15, 0.7]
+resize_range2: [0.8, 1.2]
+resize_mode_list2: [bilinear, bicubic, lanczos]
+resize_mode_prob2: [0.34, 0.33, 0.33]
+compress_prob2: 0.6
+compress_algorithms2: [h264]
+compress_algorithm_probs2: [1.0]
+compress_h264_range2: [13, 26]
+compress_video_sampling2: ["420"]
+
+resize_mode_list3: [bilinear, bicubic, lanczos]
+resize_mode_prob3: [0.34, 0.33, 0.33]
+
+datasets:
+  train:
+    name: Indexed training videos
+    type: videoclipdataset
+    dataroot_gt: [datasets/train/videos]
+    # The defaults use 1080p sources and make 960x540 HR frames before cropping.
+    # Use the source resolution as descale_size when there is no upscale to undo.
+    # Dimensions are width, height. HR must fit a square of lq_size * scale.
+    descale_size: [1920, 1080]
+    descale_kernel: bilinear
+    descale_border: zero
+    hr_size: [960, 540]
+    downscale_algorithm: hermite
+    hr_linear_light: gamma24
+    lq_size: 64
+    clip_lengths: [4]
+    use_hflip: true
+    use_rot: true
+    use_time_reverse: true
+    batch_size_per_gpu: 1
+    accum_iter: 1
+    num_worker_per_gpu: 0
+    prefetch_factor: ~
+    persistent_workers: false
+
+network_g:
+  type: rdual
+  dynamic_experts: 4
+  c_windows: [32, 64]
+  use_checkpoint: true
+
+path:
+  # For a warm start, select a compatible 2x RDUAL training checkpoint.
+  # A complete RDUAL checkpoint includes frozen NeuFlow v2 weights.
+  # For DUAL Light, set strict_load_g to false to allow new recurrent weights.
+  pretrain_network_g: ~
+  # Optional external NeuFlow v2 weights (.safetensors or .pth).
+  # If omitted, use experiments/pretrained_models/neuflow_v2.safetensors when present,
+  # then the official mixed checkpoint, downloaded to the trainer's cache on first use.
+  neuflow_weights: ~
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  total_iter: 10000
+  ema_decay: 0.999
+  optim_g:
+    type: AdamW
+    lr: 0.0001
+    weight_decay: 0
+    betas: [0.9, 0.99]
+  scheduler:
+    type: MultiStepLR
+    milestones: [7500]
+    gamma: 0.5
+  losses:
+    - type: charbonnierloss
+      loss_weight: 1.0
+
+val:
+  val_enabled: false
+  save_img: false
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 500
+  save_checkpoint_format: safetensors
+  save_checkpoint_keep: 3
+  use_tb_logger: true

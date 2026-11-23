@@ -33,6 +33,8 @@ export function pathRole(path, key) {
   if (k === 'meta_info') return { mode: 'file', title: 'Choose the meta_info file', extensions: ['.txt', '.csv'] };
   if (path[0] === 'path' && path.length === 2) {
     if (/^pretrain_network_/.test(k)) return { mode: 'file', title: `Choose the weights for ${k}`, extensions: WEIGHT_EXTENSIONS, weights: true };
+    // The optical flow weights RDUAL reads; not a network checkpoint, so no structure to inspect.
+    if (k === 'neuflow_weights') return { mode: 'file', title: 'Choose the NeuFlow v2 weights', extensions: WEIGHT_EXTENSIONS };
     if (k === 'resume_state') return { mode: 'file', title: 'Choose the training state to resume', extensions: ['.state'] };
     if (PATH_FOLDERS.has(k)) return { mode: 'folder', title: `Choose the folder for ${k}`, extensions: undefined };
   }
@@ -93,11 +95,24 @@ function describeParts(head, rest, whole = null) {
 
 // ───────── value <-> text ─────────
 
+/**
+ * A number as a field shows it: the shorter of the plain and the scientific spelling, so a small
+ * learning rate reads 1e-4 and not 0.0001. A whole number is never respelled (500000 stays 500000).
+ */
 function numText(value) {
-  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  const plain = String(value);
+  if (Number.isInteger(value)) return plain;
+  const sci = value.toExponential();
+  return sci.length < plain.length ? sci : plain;
 }
 
-/** Parse one number; `type` 'int' rejects fractions. Returns {ok, value, error}. */
+/**
+ * Parse one number; `type` 'int' rejects fractions. Returns {ok, value, error}, and `floatLiteral`: the
+ * text as typed when it is a fraction in scientific notation (1e-4), which the YAML then keeps as
+ * `!!float 1e-4`. A whole number stays a plain number however it was typed (1e3 is written 1000), so an
+ * option that needs an integer never becomes a float.
+ */
 export function parseNumber(text, type) {
   const t = text.trim();
   // Number('') is 0 and Number('0x10') is 16: only accept decimal and exponent notation.
@@ -105,6 +120,7 @@ export function parseNumber(text, type) {
   const n = Number(t);
   if (!Number.isFinite(n)) return { ok: false, error: 'Enter a finite number.' };
   if (type === 'int' && !Number.isInteger(n)) return { ok: false, error: 'Enter a whole number.' };
+  if (type !== 'int' && !Number.isInteger(n) && /e/i.test(t)) return { ok: true, value: n, floatLiteral: t };
   return { ok: true, value: n };
 }
 
@@ -142,8 +158,10 @@ const jsonText = (value) => (value === undefined || value === null ? '' : JSON.s
  *   choices: {getChoices: () => Choice[], listLabel?: string, unsetText?: string} for a text option whose
  *     usual values are known from elsewhere (the installed optimizers). Any other text can still be typed.
  *     A choice marked `unset` removes the option; `unsetText` is what the empty field then says.
- * @param {{apply: (path: Array, value: any) => Promise<any>, remove: (path: Array) => Promise<any>,
+ * @param {{apply: (path: Array, value: any, floatLiteral?: string) => Promise<any>, remove: (path: Array) => Promise<any>,
  *   edit: (edits: Array) => Promise<any>}} ctx
+ *   apply's floatLiteral: the number as typed in scientific notation (1e-4), sent with the edit so the
+ *   YAML keeps that spelling (`!!float 1e-4`); only passed when the person typed one.
  * @returns {{el: HTMLElement, path: Array, key: string, update: (value: any, isSet: boolean) => void,
  *   setIssues: (issues: Array) => void, focus: () => void, contains: (node: Node) => boolean}}
  */
@@ -186,9 +204,10 @@ export function createField(spec, ctx) {
     toast(`${spec.key} was not changed: ${error?.message ?? error}`, { kind: 'err' });
     control.show(current.value, current.isSet);
   };
-  const commit = (value) => {
+  // floatLiteral: a number as the person typed it in scientific notation, kept as that spelling in the YAML.
+  const commit = (value, floatLiteral) => {
     showError(null);
-    return Promise.resolve(ctx.apply(path, value)).catch(refused);
+    return Promise.resolve(typeof floatLiteral === 'string' ? ctx.apply(path, value, floatLiteral) : ctx.apply(path, value)).catch(refused);
   };
   // Several edits at once (list items: remove one, set one); the backend applies them in order.
   const edit = (edits) => {
@@ -201,7 +220,8 @@ export function createField(spec, ctx) {
     return Promise.resolve(ctx.remove(path)).catch(refused);
   };
 
-  const control = buildControl(kind, { id, labelId, key: spec.key, path, commit, edit, drop, showError, getCurrent: () => current, itemLabel: spec.itemLabel, listEditor: spec.listEditor, choices: spec.choices ?? null });
+  // picks: what the form says Browse picks here ('file' for a row of archive files), for the control's own hint.
+  const control = buildControl(kind, { id, labelId, key: spec.key, path, commit, edit, drop, showError, getCurrent: () => current, itemLabel: spec.itemLabel, listEditor: spec.listEditor, choices: spec.choices ?? null, picks: spec.browse?.mode ?? null });
   // When the default already is none, "Use default" covers it; an explicit none is offered only
   // where the schema allows null and the default is something else.
   const defaultIsNone = kind.hasDefault && kind.default === null;
@@ -299,7 +319,7 @@ export function createField(spec, ctx) {
     tag.className = `fld__tag${spec.unknown ? ' fld__tag--unknown' : ''}`;
     if (noneButton) noneButton.hidden = effective === null || effective === undefined;
     if (dropButton) dropButton.hidden = !current.isSet;
-    if (browseButton) browseButton.textContent = Array.isArray(current.value) && current.isSet && current.value.length > 1 ? 'Add a folder' : 'Browse';
+    if (browseButton) browseButton.textContent = Array.isArray(current.value) && current.isSet && current.value.length > 1 ? (role.mode === 'file' ? 'Add a file' : 'Add a folder') : 'Browse';
     if (inspectButton) inspectButton.hidden = !weightsReady || !textValues().some((v) => /\.safetensors$/i.test(v));
     if (noteEl) {
       // A note is a sentence, or {text, warn: true} for one that says something is missing.
@@ -388,6 +408,8 @@ function buildControl(kind, env) {
     case 'number':
       return textControl(kind, env, {
         num: true,
+        // Scientific notation needs the letter e, which a phone's number pad does not have.
+        sci: kind.kind === 'number',
         format: numText,
         parse: (text) => parseNumber(text, kind.kind),
       });
@@ -422,7 +444,7 @@ function buildControl(kind, env) {
         path: true,
         format: listText,
         parse: (text) => parseList(text, 'string'),
-        hint: 'Separate several folders with commas.',
+        hint: `Separate several ${env.picks === 'file' ? 'files' : 'folders'} with commas.`,
       });
     case 'list':
       return textControl(kind, env, {
@@ -438,6 +460,21 @@ function buildControl(kind, env) {
     case 'any':
       // No type in the schema: follow the value the recipe has.
       return buildControl({ ...kind, ...kindFromValue(env.getCurrent().value ?? kind.default), description: kind.description }, env);
+    case 'loose':
+      // An option known by name only (a parameter listed without a value to start from): read as
+      // "Add option" reads a value, so a number, a list and plain text can all be typed.
+      return textControl(kind, env, {
+        path: true,
+        format: (v) => (typeof v === 'string' ? v : JSON.stringify(v)),
+        parse: (text) => {
+          try {
+            return { ok: true, value: JSON.parse(text) };
+          } catch {
+            return { ok: true, value: text.trim() };
+          }
+        },
+        hint: 'Read as JSON; plain text is taken as a string.',
+      });
     default:
       return textControl(kind, env, {
         path: true,
@@ -589,15 +626,26 @@ function textControl(kind, env, opts) {
     type: 'text',
     autocomplete: 'off',
     spellcheck: 'false',
-    inputmode: opts.num ? 'decimal' : null,
+    inputmode: opts.num ? (opts.sci ? 'text' : 'decimal') : null,
+    autocapitalize: opts.sci ? 'off' : null,
   });
   let shownText = '';
+  let typed = false; // the person typed in the field since it was last drawn or written
+  input.addEventListener('input', () => {
+    typed = true;
+  });
   const tryCommit = () => {
-    if (input.value === shownText) {
-      env.showError(null);
-      return;
-    }
     const text = input.value;
+    if (text === shownText) {
+      // Leaving the field as it was drawn writes nothing. Scientific notation the person typed is
+      // written even when the field shows the same text: 0.0001 is drawn as 1e-4 whatever the YAML
+      // spells, and typing 1e-4 over it asks for that spelling.
+      const again = typed && opts.sci ? opts.parse(text) : null;
+      if (!again?.ok || !again.floatLiteral) {
+        env.showError(null);
+        return;
+      }
+    }
     let result;
     // Emptying an option whose default is none removes the key instead of writing null.
     if (text.trim() === '' && kind.nullable && kind.hasDefault && kind.default === null && env.drop) {
@@ -613,8 +661,9 @@ function textControl(kind, env, opts) {
       return;
     }
     shownText = text;
+    typed = false;
     inFlight += 1;
-    Promise.resolve(env.commit(result.value)).finally(() => {
+    Promise.resolve(env.commit(result.value, result.floatLiteral)).finally(() => {
       inFlight -= 1;
     });
   };
@@ -625,6 +674,7 @@ function textControl(kind, env, opts) {
       tryCommit();
     } else if (event.key === 'Escape') {
       input.value = shownText;
+      typed = false;
       env.showError(null);
     }
   });
@@ -640,6 +690,7 @@ function textControl(kind, env, opts) {
       const v = shown(kind, value, isSet);
       shownText = v === undefined || v === null ? '' : opts.format(v);
       input.value = shownText;
+      typed = false;
       input.placeholder = v === null && (isSet || kind.hasDefault) ? 'None' : 'Not set';
       if (opts.placeholderHint && !shownText) input.placeholder = opts.placeholderHint;
       if (opts.hint) input.title = opts.hint;
@@ -1172,15 +1223,19 @@ export function typeField({ id, path, ids, accept = ids, getValue, description, 
  * each with the value it starts from and the values it usually takes. null: nothing is known.
  * `special` lets the caller draw a key it knows the structure of: `special.row(path, key, value)` may
  * return the element for that key (null: the usual row), and `special.more(path, object)` elements for
- * what the object can hold and does not yet (placed before "Add option"). Both reach nested objects too.
+ * what the object can hold and does not yet (placed before "Add option"). `special.first(path, object)`
+ * may return elements that come before the object's own rows (the type a block lacks), and
+ * `special.adder(path, object)` what stands in place of "Add option" where a new key is more than a name
+ * and a value (null: the usual row). All four reach nested objects too.
  * @param {{path: Array, value: any, ctx: object, register: (field: object) => void, depth?: number, firstKeys?: string[],
- *   rowExtras?: Function|null, knownOptions?: Function|null, special?: {row?: Function, more?: Function}|null}} options
+ *   rowExtras?: Function|null, knownOptions?: Function|null,
+ *   special?: {row?: Function, more?: Function, first?: Function, adder?: Function}|null}} options
  */
 export function genericEditor({ path, value, ctx, register, depth = 0, firstKeys = [], rowExtras = null, knownOptions = null, special = null }) {
   const obj = isPlainObject(value) ? value : {};
   const keys = Object.keys(obj);
   const ordered = [...firstKeys.filter((k) => keys.includes(k)), ...keys.filter((k) => !firstKeys.includes(k))];
-  const rows = [];
+  const rows = special?.first ? [...(special.first(path, obj) ?? [])] : [];
   for (const key of ordered) {
     const child = obj[key];
     const own = special?.row ? special.row([...path, key], key, child) : null;
@@ -1222,7 +1277,9 @@ export function genericEditor({ path, value, ctx, register, depth = 0, firstKeys
   // only where the caller can know names for this object (`knownOptions.applies`, when it has one).
   const knows = knownOptions && (typeof knownOptions.applies !== 'function' || knownOptions.applies(path));
   if (special?.more) rows.push(...(special.more(path, obj) ?? []));
-  if (depth <= 1) rows.push(addOptionRow(path, ctx, knows ? () => knownOptions(path) : null, () => keys));
+  const adder = special?.adder ? special.adder(path, obj) : null;
+  if (adder) rows.push(adder);
+  else if (depth <= 1) rows.push(addOptionRow(path, ctx, knows ? () => knownOptions(path) : null, () => keys));
   return h('div', { class: 'form__generic' }, rows);
 }
 
@@ -1253,9 +1310,9 @@ export function addOptionRow(path, ctx, known = null, setKeys = () => []) {
     return toChoices(Array.isArray(option?.choices) ? option.choices : []);
   };
   const valueCombo = known
-    ? createCombobox({ id: valueId, inputClass: 'input--path', placeholder: 'value, for example 0.0001', closed: false, listLabel: 'Values of the option', getChoices: valueChoices, current: () => valueInput.value, onEnter: () => submit() })
+    ? createCombobox({ id: valueId, inputClass: 'input--path', placeholder: 'value, for example 1e-4', closed: false, listLabel: 'Values of the option', getChoices: valueChoices, current: () => valueInput.value, onEnter: () => submit() })
     : null;
-  const valueInput = valueCombo ? valueCombo.input : h('input', { class: 'input input--path', id: valueId, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'value, for example 0.0001' });
+  const valueInput = valueCombo ? valueCombo.input : h('input', { class: 'input input--path', id: valueId, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'value, for example 1e-4' });
   const nameCombo = known
     ? createCombobox({
         id: keyId,
@@ -1286,6 +1343,7 @@ export function addOptionRow(path, ctx, known = null, setKeys = () => []) {
     const text = valueInput.value.trim();
     let problem = !key ? 'Enter the option name.' : /[.\s[\]/]/.test(key) ? 'An option name cannot contain dots, slashes, brackets or spaces.' : !text ? 'Enter a value.' : null;
     let value;
+    let floatLiteral;
     if (!problem) {
       // A listed value is written as it is listed (the text "601" stays text); anything else is read as
       // JSON, and plain text that is not JSON is taken as a string, so `adamw` works without quotes.
@@ -1297,13 +1355,20 @@ export function addOptionRow(path, ctx, known = null, setKeys = () => []) {
         } catch {
           value = text;
         }
+        // A number typed in scientific notation (1e-4) keeps that spelling in the YAML. What counts as
+        // a number is still decided by JSON alone, so text such as 007 stays text.
+        if (typeof value === 'number') {
+          if (Number.isFinite(value)) floatLiteral = parseNumber(text, 'number').floatLiteral;
+          else problem = 'Enter a finite number.';
+        }
       }
     }
     error.textContent = problem ?? '';
     error.hidden = !problem;
     if (problem) return;
     // `ctx.add`, where the form has one, also sends focus to the new row once it is drawn.
-    Promise.resolve((ctx.add ?? ctx.apply)([...path, key], value)).then(
+    const write = ctx.add ?? ctx.apply;
+    Promise.resolve(floatLiteral ? write([...path, key], value, floatLiteral) : write([...path, key], value)).then(
       () => {
         keyInput.value = '';
         valueInput.value = '';

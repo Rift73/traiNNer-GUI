@@ -65,6 +65,7 @@ from traiNNer.models.model_compile import (
     resolve_inductor_options,
 )
 from traiNNer.schedulers.recipe import build_scheduler, restart_schedulers
+from traiNNer.schedulers.resume_lr import rebase_resume_rates
 from traiNNer.utils import get_root_logger
 from traiNNer.utils.compile_cache import configure_compile_cache_runtime
 from traiNNer.utils.dist_util import master_only
@@ -1643,6 +1644,8 @@ class BaseModel:
                     if callable(getattr(optimizer, "eval", None)) and not native_schedule_free(optimizer):
                         stack.enter_context(evaluation_view(optimizer))
                     saved, originals = checkpoint_state(optimizer, exact=self.opt.checkpoint_rng)
+                    if (base_lr := optimizer.defaults.get("lr")) is not None:
+                        saved["recipe_lr"] = float(base_lr)
                     state["optimizers"].append(saved)
                     replay.append(originals)
                 if any(replay):
@@ -1742,6 +1745,7 @@ class BaseModel:
         restored = [checked_replay_weights(optimizer, saved, exact[i]) for i, (optimizer, saved)
                     in enumerate(zip(self.optimizers, resume_optimizers, strict=True))] if exact is not None else []
         configured_groups = [s.optimizer.param_groups for s in self.schedulers] if self.opt.train.restart_scheduler else []
+        resume_optimizers, resume_schedulers = rebase_resume_rates(self, resume_state)
         for i, o in enumerate(resume_optimizers):
             self.optimizers[i].load_state_dict(o)
             if hasattr(self.optimizers[i], "train"):

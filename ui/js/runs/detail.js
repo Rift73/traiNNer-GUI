@@ -12,7 +12,7 @@ import { runs, runStatus, isImported, runSourceLabel } from '../state/runs.js';
 import { catalog } from '../state/catalog.js';
 import { conn } from '../state/conn.js';
 import { compareHref, queueHref, runHref, curriculaHref, openAsRecipe } from '../actions.js';
-import { toast, confirmDialog, confirmOnPhone, promptDialog, tabs, badge, emptyState, notice, loading, copyText } from '../ui.js';
+import { toast, openDialog, confirmDialog, confirmOnPhone, promptDialog, tabs, badge, emptyState, notice, loading, copyText } from '../ui.js';
 import { highlightedPre } from '../recipe/yaml-highlight.js';
 import { createLogView } from './log.js';
 import { mountTelemetry } from './telemetry.js';
@@ -29,10 +29,50 @@ const TABS = [
 ];
 const FILL_TABS = new Set(['log', 'recipe']);
 /** Fields taken from a monitor answer (when present); everything else comes from the full detail. */
-const MONITOR_FIELDS = ['status', 'iteration', 'iterationsPerSecond', 'eta', 'vram', 'telemetryIteration', 'error', 'returncode', 'metrics'];
+const MONITOR_FIELDS = ['status', 'iteration', 'iterationsPerSecond', 'eta', 'estimatedFinishAt', 'vram', 'telemetryIteration', 'error', 'returncode', 'metrics', 'canSaveCheckpoint', 'checkpointRequest'];
+/** While a checkpoint asked for here is being written, the run is read this often, so its outcome shows soon. */
+const CHECKPOINT_POLL_MS = 1500;
 const FOLDERS = ['models/', 'models/resume_models/', 'training_states/'];
 /** Curriculum phase modes in words (studio/curricula.py: the first phase starts, later ones continue or fine-tune). */
 const PHASE_MODES = { start: 'Start', continue: 'Continue', finetune: 'Fine-tune' };
+/**
+ * The newest checkpoint a person asked this run's trainer to save (`checkpointRequest` of GET /api/run and of
+ * the monitor), or null: {id, status: 'pending'|'saved'|'failed', iteration?, error?}.
+ */
+function checkpointOf(run) {
+  const request = run?.checkpointRequest;
+  if (!request || typeof request !== 'object' || typeof request.id !== 'string') return null;
+  return ['pending', 'saved', 'failed'].includes(request.status) ? request : null;
+}
+/** " at iteration 1,200" for a saved request (the trainer names the iteration it confirmed), else "". */
+const savedAt = (request) => (Number.isFinite(request.iteration) ? ` at iteration ${fmt.int(request.iteration)}` : '');
+/** ": the trainer's reason" for a request that was not saved, or a full stop. */
+const notSavedWhy = (request) => (typeof request.error === 'string' && request.error ? `: ${request.error}` : '.');
+
+/** The optimizers a recipe can configure, by their key in `resumeSettings.learningRates`, in words. */
+const RESUME_RATES = [
+  ['g', 'Generator'],
+  ['d', 'Discriminator'],
+  ['ae', 'Autoencoder'],
+];
+
+/**
+ * What the service lets a stopped or failed run change when it resumes (GET /api/run `resumeSettings`), or
+ * null where it offers nothing. A value of null means the run's recipe sets none. There is one learning rate
+ * per optimizer the run configures; a run with a single optimizer needs no name for it.
+ * @returns {{batchSize: number|null, rates: Array<{key: string, label: string, value: number|null}>}|null}
+ */
+function resumeSettingsOf(run) {
+  const given = run?.resumeSettings;
+  if (!given || typeof given !== 'object') return null;
+  const number = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  const rates = given.learningRates && typeof given.learningRates === 'object' ? given.learningRates : {};
+  const configured = RESUME_RATES.filter(([key]) => rates[key] !== undefined);
+  return {
+    batchSize: number(given.batchSize),
+    rates: configured.map(([key, word]) => ({ key, label: configured.length > 1 ? `${word} learning rate` : 'Learning rate', value: number(rates[key]) })),
+  };
+}
 
 const hasProgress = (run) => Number.isFinite(run?.iteration) && Number.isFinite(run?.total);
 const nameOf = (run) => run?.name ?? String(run?.id ?? '');
@@ -114,7 +154,10 @@ export function createRunDetail(host, { id, summary = null }) {
   let pollCtrl = null;
   let pollTimer = 0;
   let polling = false;
-  const busy = { stop: false, resume: false };
+  const busy = { stop: false, resume: false, checkpoint: false };
+  // The newest checkpoint request this page has shown, as {id, status}: an outcome that arrives while the
+  // page watches (pending, then saved or failed) is also said in a toast, since the head can be out of view.
+  let seenCheckpoint = null;
 
   // ── header ──
   const errorSlot = h('div', { class: 'runs__error' });
@@ -122,10 +165,16 @@ export function createRunDetail(host, { id, summary = null }) {
   const nameEl = h('h2', { class: 'runs__name', tabindex: '-1' });
   const badgeSlot = h('span');
   const importedSlot = h('span');
+  // Offered while the run trains and its trainer says it can save on request (`canSaveCheckpoint`). While a
+  // save is under way it stays focusable (aria-disabled) and says so; a press then does nothing.
+  const saveBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: saveCheckpoint }, 'Save checkpoint');
   const stopBtn = h('button', { class: 'btn btn--danger btn--sm', type: 'button', onclick: stopRun }, 'Stop training');
   const resumeBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: resumeRun }, 'Resume');
   // Offered only where the service says this run can continue with another number of data loader workers.
   const workersBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: resumeWithWorkers }, 'Resume with other workers…');
+  // Offered where the service sends `resumeSettings`: batch size, learning rates and (where allowed) the
+  // workers in one dialog. It then stands in for the workers button, so a resume can change all of them at once.
+  const settingsBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: resumeWithSettings }, 'Resume with other settings…');
   const replayBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: replay }, 'Replay');
   const compareLink = h('a', { class: 'btn btn--sm', href: compareHref(id) }, 'Compare with…');
   // Refresh reads the detail again, and tells the parts that keep their own answers (the Files tab's ranking).
@@ -136,6 +185,8 @@ export function createRunDetail(host, { id, summary = null }) {
   const importedNote = h('p', { class: 'runs__note muted', hidden: true });
   const phaseSlot = h('div', { class: 'runs__phase-slot' });
   const failSlot = h('div');
+  // One line about the checkpoint asked for with "Save checkpoint": being written, saved at an iteration, or not saved.
+  const checkpointSlot = h('div', { class: 'runs__checkpoint' });
   // The disk warning of a training run (watchDisk below). Declared here: the first renderHead() runs before
   // the rest of this function has been reached.
   const diskSlot = h('div');
@@ -152,10 +203,11 @@ export function createRunDetail(host, { id, summary = null }) {
   const head = h(
     'header',
     { class: 'runs__head' },
-    h('div', { class: 'runs__title-row' }, nameEl, badgeSlot, importedSlot, h('div', { class: 'runs__actions' }, stopBtn, resumeBtn, workersBtn, replayBtn, compareLink, refreshBtn)),
+    h('div', { class: 'runs__title-row' }, nameEl, badgeSlot, importedSlot, h('div', { class: 'runs__actions' }, saveBtn, stopBtn, resumeBtn, workersBtn, settingsBtn, replayBtn, compareLink, refreshBtn)),
     importedNote,
     phaseSlot,
     failSlot,
+    checkpointSlot,
     diskSlot,
     progressEl,
     kv,
@@ -206,11 +258,16 @@ export function createRunDetail(host, { id, summary = null }) {
     const tag = imported && !st.imported ? 'Imported' : '';
     mountKeyed(importedSlot, tag, () => (tag ? badge(tag) : null));
     stopBtn.hidden = !(st.active && !imported);
-    resumeBtn.hidden = !(st.resumable && !imported);
-    workersBtn.hidden = !(st.resumable && !imported && run.resumeWorkerOverride === true);
+    const resumable = st.resumable && !imported;
+    const withSettings = resumable && resumeSettingsOf(run) !== null;
+    resumeBtn.hidden = !resumable;
+    workersBtn.hidden = !(resumable && !withSettings && run.resumeWorkerOverride === true);
+    settingsBtn.hidden = !withSettings;
+    renderCheckpoint(st, imported);
     stopBtn.disabled = busy.stop;
     resumeBtn.disabled = busy.resume;
     workersBtn.disabled = busy.resume;
+    settingsBtn.disabled = busy.resume;
     refreshBtn.disabled = detailBusy;
 
     importedNote.hidden = !imported;
@@ -243,7 +300,11 @@ export function createRunDetail(host, { id, summary = null }) {
     if (run.source === 'archive') facts.push(['Experiments folder', { mono: typeof run.sourceRoot === 'string' ? run.sourceRoot : '' }]);
     // A run that is not active keeps the trainer's last numbers: its estimate is stale, its speed is the last one.
     if (Number.isFinite(run.iterationsPerSecond)) facts.push([st.active ? 'Reported speed' : 'Last reported speed', `${fmt.num(run.iterationsPerSecond, 4)} it/s`]);
-    if (st.active && typeof run.eta === 'string' && run.eta) facts.push(["Trainer's estimate", run.eta]);
+    // The trainer's own estimate: the finish time the service dated it to (`estimatedFinishAt`), then the
+    // time left as the trainer reported it. An older service, or an estimate from an undated log line,
+    // gives no finish time: the time left is shown alone (fmt.eta).
+    const eta = st.active ? fmt.eta(run.eta, run.estimatedFinishAt) : '';
+    if (eta) facts.push(['ETA', eta]);
     const vram = run.vram && typeof run.vram === 'object' ? run.vram : null;
     if (vram && (Number.isFinite(vram.peakAllocatedGB) || Number.isFinite(vram.peakReservedGB))) {
       const parts = [];
@@ -373,7 +434,7 @@ export function createRunDetail(host, { id, summary = null }) {
 
   function pollDelay() {
     const st = runStatus(run.status);
-    if (st.active) return activeTab === 'log' ? 2500 : 5000;
+    if (st.active) return checkpointOf(run)?.status === 'pending' ? CHECKPOINT_POLL_MS : activeTab === 'log' ? 2500 : 5000;
     return 15000;
   }
 
@@ -428,6 +489,9 @@ export function createRunDetail(host, { id, summary = null }) {
     // A status change reads the full detail again, which replaces everything.
     const patch = {};
     for (const key of MONITOR_FIELDS) if (fields[key] !== undefined) patch[key] = fields[key];
+    // A finish time belongs to the estimate it was dated from: an answer with an estimate and no finish
+    // time clears the earlier one, so it is never shown beside a newer time left.
+    if (patch.eta !== undefined && patch.estimatedFinishAt === undefined) patch.estimatedFinishAt = null;
     run = { ...run, ...patch, id };
     if (logReset) logPart.replace(Array.isArray(log) ? log : []);
     else logPart.append(Array.isArray(log) ? log : []);
@@ -627,6 +691,97 @@ export function createRunDetail(host, { id, summary = null }) {
     };
   }
 
+  // ── a checkpoint on request ──
+  // "Save checkpoint" asks the trainer of a run in training for a full checkpoint now (POST
+  // /api/runs/checkpoint). The service answers at once with the request, pending; what became of it comes
+  // with the run's detail and monitor (`checkpointRequest`). One line in the head says the state of the
+  // newest request while the run trains: being written, saved at an iteration (only once the trainer has
+  // confirmed it), or not saved. A request that was not saved is still said after the run has ended.
+
+  function renderCheckpoint(st, imported) {
+    const request = imported ? null : checkpointOf(run);
+    const pending = busy.checkpoint || request?.status === 'pending';
+    saveBtn.hidden = !(st.active && !imported && run.canSaveCheckpoint === true);
+    setText(saveBtn, pending ? 'Saving checkpoint…' : 'Save checkpoint');
+    if (pending) saveBtn.setAttribute('aria-disabled', 'true');
+    else saveBtn.removeAttribute('aria-disabled');
+
+    // An outcome that arrives while this page watches the request is also said in a toast.
+    const before = seenCheckpoint;
+    seenCheckpoint = request ? { id: request.id, status: request.status } : null;
+    if (request && request.status !== 'pending' && before?.id === request.id && before.status === 'pending') sayCheckpoint(request);
+
+    // Not rebuilt under the focus of its own button; the next header render catches up.
+    if (checkpointSlot.contains(document.activeElement)) return;
+    const shown = request && (st.active || request.status === 'failed') ? request : null;
+    const key = shown ? [shown.id, shown.status, shown.iteration ?? '', shown.error ?? '', st.active].join('|') : '';
+    mountKeyed(checkpointSlot, key, () => {
+      if (!shown) return null;
+      // The line being written is announced (role="status"); an outcome is announced by its toast, not twice.
+      if (shown.status === 'pending') {
+        return notice('', [h('span', { class: 'spinner', 'aria-hidden': 'true' }), ' Saving a checkpoint. The trainer writes it after the update it is working on.']);
+      }
+      const line =
+        shown.status === 'saved'
+          ? notice('ok', `Checkpoint saved${savedAt(shown)}.`, h('button', { class: 'btn btn--sm', type: 'button', onclick: showFiles }, 'Show the files'))
+          : notice(st.active ? 'err' : 'warn', `The checkpoint asked for was not saved${notSavedWhy(shown)}`);
+      line.removeAttribute('role');
+      return line;
+    });
+  }
+
+  function sayCheckpoint(request) {
+    if (request.status === 'saved') {
+      toast(`Checkpoint of ${nameOf(run)} saved${savedAt(request)}.`, { kind: 'ok', action: { label: 'Show the files', run: showFiles } });
+      // The Files tab lists what exists: it is read again when it is the open tab (unless this answer is that reading).
+      if (activeTab === 'files' && !detailBusy) fetchDetail();
+    } else toast(`The checkpoint of ${nameOf(run)} was not saved${notSavedWhy(request)}`, { kind: 'err' });
+  }
+
+  /** "Show the files": the Files tab on a fresh reading, with the focus. */
+  function showFiles() {
+    if (destroyed || !loaded) return;
+    if (activeTab !== 'files') switchTab('files');
+    else fetchDetail();
+    const panel = panels.get('files').panel;
+    panel.scrollIntoView?.({ block: 'nearest' });
+    panel.focus({ preventScroll: true });
+  }
+
+  async function saveCheckpoint() {
+    const last = checkpointOf(run);
+    // While a save is under way the button stays focusable, and a press changes nothing.
+    if (busy.checkpoint || last?.status === 'pending') return;
+    busy.checkpoint = true;
+    renderHead();
+    try {
+      // The id of the request shown last tells the service that its outcome was seen: only then does it start
+      // a new save, so a second press, a retry after a lost answer and another window all share one.
+      const answer = await api.saveCheckpoint(id, run.attemptId, last?.id ?? null);
+      if (destroyed) return;
+      pollCtrl?.abort(); // a monitor answer read before the request must not put the earlier state back
+      run = { ...run, checkpointRequest: answer };
+      // The service can answer with a request that is already finished (asked for in another window and not
+      // shown here yet): that outcome is the answer to this press.
+      const request = checkpointOf(run);
+      if (request && request.status !== 'pending') {
+        seenCheckpoint = { id: request.id, status: request.status };
+        sayCheckpoint(request);
+      }
+    } catch (error) {
+      if (destroyed) return;
+      // A request that got no answer may still have arrived: pressing again is safe, it shares that save.
+      toast(`${error.offline ? 'Save checkpoint was not confirmed' : 'Save checkpoint was refused'}: ${error.message}`, { kind: 'err' });
+      fetchDetail();
+    } finally {
+      busy.checkpoint = false;
+      if (!destroyed) {
+        renderHead();
+        schedulePoll(pollDelay());
+      }
+    }
+  }
+
   // ── actions ──
 
   async function stopRun() {
@@ -674,10 +829,229 @@ export function createRunDetail(host, { id, summary = null }) {
     );
   }
 
+  /**
+   * Resume with another batch size, learning rate or worker count: one field per value the service offers
+   * (`resumeSettings`, and the workers where `resumeWorkerOverride` says so). Only values that differ from the
+   * run's own are sent, so pressing Resume with nothing changed is the plain resume. The dialog stays open
+   * while the service answers: a refusal is shown in it and does not cost what was typed.
+   */
+  function resumeWithSettings() {
+    const settings = resumeSettingsOf(run);
+    if (!settings) return;
+    const name = nameOf(run);
+    const whole = (text) => (/^[1-9]\d*$/.test(text) ? null : 'Enter a whole number, 1 or more.');
+    const rate = (text) => (/^(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text)) ? null : 'Enter a number, 0 or more, such as 0.0001 or 1e-4.');
+    const unset = "The run's recipe sets none.";
+    const rateNoteId = uid('resume-note');
+    let sending = false;
+    let open = true;
+    let closeDialog;
+    let resumeButton;
+
+    // One field: the run's own value to start from, its check, and how a changed value is sent and said.
+    const field = ({ label, current, help, check, inputmode = null, noteId = null, put, said }) => {
+      const inputId = uid('resume');
+      const error = h('p', { class: 'field__error', id: `${inputId}-error`, role: 'alert' });
+      const flag = (problem) => {
+        error.textContent = problem ?? '';
+        if (problem) input.setAttribute('aria-invalid', 'true');
+        else input.removeAttribute('aria-invalid');
+      };
+      const input = h('input', {
+        class: 'input',
+        id: inputId,
+        type: 'text',
+        inputmode,
+        autocomplete: 'off',
+        spellcheck: 'false',
+        value: current === null ? '' : String(current),
+        placeholder: current === null ? 'Not set' : null,
+        'aria-describedby': [`${inputId}-help`, noteId, `${inputId}-error`].filter(Boolean).join(' '),
+        oninput: () => sync(),
+        onchange: () => {
+          const problem = check(input.value.trim());
+          if (input.value.trim() && problem) flag(problem);
+        },
+        onkeydown: (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          submit();
+        },
+      });
+      return {
+        input,
+        el: h('div', { class: 'field runs__resume-field' }, h('label', { class: 'field__label', for: inputId }, label), input, h('p', { class: 'field__help', id: `${inputId}-help` }, help), error),
+        /** {} = keeps the run's value (untouched, emptied or typed the same), {problem} or {value, said}. */
+        read() {
+          const text = input.value.trim();
+          if (!text) return {};
+          const problem = check(text);
+          if (problem) return { problem };
+          const value = Number(text);
+          return value === current ? {} : { value, said: said(value), was: current };
+        },
+        flag,
+        put,
+      };
+    };
+
+    const batchRow = field({
+      label: 'Batch size per GPU',
+      current: settings.batchSize,
+      help: settings.batchSize === null ? unset : `The run used ${settings.batchSize}.`,
+      check: whole,
+      inputmode: 'numeric',
+      put: (params, value) => {
+        params.batchSize = value;
+      },
+      said: (value) => `batch size ${value} per GPU`,
+    });
+    // No number pad for a learning rate: it has no "e" and no minus, and a rate is often written 1e-4.
+    const rateRows = settings.rates.map(({ key, label, value: current }) =>
+      field({
+        label,
+        current,
+        help: current === null ? unset : `The run's recipe has ${current}.`,
+        check: rate,
+        noteId: rateNoteId,
+        put: (params, value) => {
+          params.learningRates = { ...params.learningRates, [key]: value };
+        },
+        said: (value) => `${label.toLowerCase()} ${value}`,
+      }),
+    );
+    const workers = Number.isInteger(run.trainWorkers) ? run.trainWorkers : null;
+    const workerRow =
+      run.resumeWorkerOverride === true
+        ? field({
+            label: 'Data loader workers for the training data',
+            current: workers,
+            help: `${workers === null ? '' : `The run used ${workers}. `}The service checks that the run's checkpoint allows the change.`,
+            check: whole,
+            inputmode: 'numeric',
+            put: (params, value) => {
+              params.trainWorkers = value;
+            },
+            said: (value) => `${value} data loader worker${value === 1 ? '' : 's'}`,
+          })
+        : null;
+    const rows = [batchRow, ...rateRows, workerRow].filter(Boolean);
+
+    // What pressing Resume will do, said before it is pressed.
+    const summaryText = h('div', { class: 'notice__body' });
+    const summary = h('div', { class: 'notice', role: 'status' }, summaryText);
+    const answer = h('div');
+    function sync() {
+      const changes = [];
+      let unread = 0;
+      for (const row of rows) {
+        const { problem, said, was } = row.read();
+        // A corrected field loses its message at once; a mistake is named when the field is left, or on Resume.
+        if (problem) unread += 1;
+        else row.flag(null);
+        if (said) changes.push(was === null ? said : `${said} instead of ${was}`);
+      }
+      const lines = [];
+      if (changes.length) lines.push(`Resume with ${changes.join('; ')}.`);
+      if (unread) lines.push(unread === 1 ? 'One field does not hold a number that can be used yet.' : `${unread} fields do not hold a number that can be used yet.`);
+      summaryText.className = lines.length ? 'notice__body' : 'notice__body muted';
+      setText(summaryText, lines.length ? lines.join(' ') : 'Nothing is changed yet: Resume continues the run as it was.');
+    }
+
+    async function submit() {
+      if (sending) return;
+      const params = {};
+      const said = [];
+      let wrong = null;
+      for (const row of rows) {
+        const state = row.read();
+        row.flag(state.problem ?? null);
+        if (state.problem) wrong ??= row;
+        else if (state.said) {
+          row.put(params, state.value);
+          said.push(state.said);
+        }
+      }
+      if (wrong) {
+        wrong.input.focus();
+        return;
+      }
+      sending = true;
+      busy.resume = true;
+      renderHead();
+      // aria-disabled, not disabled: a disabled button would drop the focus out of the dialog's controls.
+      resumeButton.setAttribute('aria-disabled', 'true');
+      mountNodes(answer, loading('Asking the service to resume this run…'));
+      let refusal = null;
+      try {
+        await runs.resume(id, said.length ? params : undefined);
+      } catch (error) {
+        refusal = error;
+      }
+      sending = false;
+      busy.resume = false;
+      // Before the dialog closes: the focus then returns to a button that is enabled again.
+      if (!destroyed) renderHead();
+      if (refusal) {
+        const text = `Resume was refused: ${refusal.message}`;
+        if (open) {
+          resumeButton.removeAttribute('aria-disabled');
+          mountNodes(answer, notice('err', text));
+          answer.scrollIntoView({ block: 'nearest' }); // a short sheet (a phone held sideways) scrolls: the answer is not left below its edge
+        } else toast(text, { kind: 'err' });
+      } else {
+        if (open) closeDialog(true);
+        toast(`Resume: ${name} is starting again from its newest training state${said.length ? ` with ${said.join(', ')}` : ''}.`, { kind: 'ok' });
+      }
+      if (!destroyed) fetchDetail();
+    }
+
+    const { closed, dialog } = openDialog({
+      title: `Resume ${name} with other settings`,
+      body: [
+        h(
+          'p',
+          null,
+          "Training continues from the newest training state this run saved, with its optimizer history and its place in the learning rate schedule. A field left as it is keeps the run's value.",
+        ),
+        batchRow.el,
+        rateRows.map((row) => row.el),
+        rateRows.length
+          ? h(
+              'p',
+              { class: 'field__help', id: rateNoteId },
+              'A learning rate here is the base value of its schedule. The schedule keeps its place, so training continues at the rate it gives for the new base at that point.',
+            )
+          : null,
+        workerRow?.el,
+        summary,
+        answer,
+      ],
+      foot: (close) => {
+        closeDialog = close;
+        resumeButton = h('button', { class: 'btn btn--primary', type: 'button', onclick: submit }, 'Resume');
+        return [h('button', { class: 'btn', type: 'button', onclick: () => close(null) }, 'Cancel'), resumeButton];
+      },
+    });
+    closed.then(() => {
+      open = false;
+    });
+    // A dialog is as wide as its longest sentence: this one keeps to a width its sentences read well in.
+    // (On the phone it is a sheet across the whole width, whatever is set here.)
+    dialog.style.width = 'min(520px, 94vw)';
+    sync();
+    // On a phone a focused field brings the keyboard up over half of the sheet before it has been read:
+    // there the person chooses the field. Elsewhere typing can start at once.
+    if (document.documentElement.dataset.edition !== 'mobile') {
+      rows[0].input.focus();
+      rows[0].input.select();
+    }
+  }
+
   /** Run one action with its button disabled, toast the outcome (the backend's own refusal text), then refetch. */
   async function act(kind, request, done, failed, opener = null) {
     // A disabled button cannot keep the focus: the one that started the action gets it back with the answer.
-    const held = opener ?? ([stopBtn, resumeBtn, workersBtn].includes(document.activeElement) ? document.activeElement : null);
+    const held = opener ?? ([stopBtn, resumeBtn, workersBtn, settingsBtn].includes(document.activeElement) ? document.activeElement : null);
     busy[kind] = true;
     renderHead();
     try {

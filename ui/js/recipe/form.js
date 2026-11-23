@@ -1,5 +1,6 @@
 // Options form of the Recipe screen: a view of recipe.get().config laid over the JSON Schema.
-// The YAML text stays the single source of truth; every edit goes through recipe.applyEdits().
+// The YAML text stays the single source of truth; every edit goes through recipe.applyEdits(), and
+// "Undo removal" puts back the text a removal found (recipe.setYaml).
 // Only the open section (or the search results) is built. Background updates refresh values in
 // place; rows are rebuilt only when the set of rows changes, and focus/caret are put back after.
 
@@ -14,15 +15,25 @@ import { toast, badge, notice, loading, issueList, confirmDialog, promptDialog, 
 import { loadSchema, makeSchema, hasAt, isPlainObject, kindFromValue, variantTags, withServiceOptions } from './schema.js';
 import {
   SECTIONS, SECTION_IDS, sectionById, buildLayout, sectionForPath, otherKeys, orderKeys, issueTarget,
-  BASICS, SPEED, DATASET_FIRST, PATH_FIRST, TRAIN_FIRST, TRAIN_OBJECTS, isLegacyLossKey, DEGRADATION_SWITCH,
+  BASICS, SPEED, DATASET_FIRST, PATH_FIRST, TRAIN_FIRST, TRAIN_OBJECTS, NETWORK_KEYS, isLegacyLossKey, DEGRADATION_SWITCH,
   shape, sectionSignature, degradationState, searchEntries, countText, setCount,
 } from './sections.js';
 import { createField, genericEditor, addOptionRow, pathKey, typeField } from './fields.js';
 import { createCombobox, matchChoice, toChoices } from '../components/combobox.js';
+import { VIDEO_DATASET } from '../state/video-prep.js';
+import { mountVideoPrep } from './video-prep.js';
 
 const SEARCH_LIMIT = 60;
 const toList = (v) => (Array.isArray(v) ? v : typeof v === 'string' && v ? [v] : []).filter((x) => typeof x === 'string' && x);
 const NOT_LISTED = 'Not listed for this task';
+/**
+ * The registered discriminators whose id does not say so, each read in the trainer's sources: dunet is the
+ * network_d of the shipped GAN templates; lqd and mcd extend it and are handled by class where network_d
+ * is built; sed is handled there by name; metagan, metagan2 and metagan3 are the MetaGAN family.
+ */
+const DISCRIMINATOR_IDS = new Set(['dunet', 'lqd', 'mcd', 'metagan', 'metagan2', 'metagan3', 'sed']);
+/** The one dataset type that reads ZIP archives: the trainer refuses ZIP storage on every other. */
+const ZIP_DATASET = 'RealESRGANDataset';
 /** The check's message for a dataset folder or file that does not exist. */
 const MISSING_PATH = /^Path was not found\b/;
 const IR_WORDS = folderWords('image_restoration');
@@ -50,6 +61,26 @@ function datasetsLede(task, fallback, wholeImages = false) {
   return `The ${folderNoun(words.lq)} and ${folderNoun(words.gt)} folders used for training and validation, and ${how}.`;
 }
 const ONE_LINE = 'Adding rewrites this list on one line; comments inside it are lost.';
+const NEUFLOW_RDUAL = "NeuFlow v2 weights for RDUAL's frozen motion estimator. Optional: when the generator checkpoint does not include them and this is empty, the first training downloads the official weights once and reuses them. A path set here must exist.";
+/** The three starts of an RDUAL training: [case, ...rest], a string in `` is an option name. */
+const RDUAL_CASES = [
+  ['A complete RDUAL checkpoint:', ' choose it as ', '`pretrain_network_g`', '. It includes the NeuFlow v2 weights, so nothing is downloaded.'],
+  ['A DUAL Light checkpoint:', ' choose it as ', '`pretrain_network_g`', ' and turn ', '`strict_load_g`', ' off.'],
+  ['From scratch:', ' leave ', '`pretrain_network_g`', ' empty.'],
+];
+const RDUAL_NOTE = 'In the last two cases the first training downloads the official NeuFlow v2 weights once and reuses them afterwards. To use your own file instead, choose it below: it must exist.';
+/** The words for a block that is added by choosing its type, by the catalog list that names its types. */
+const TYPED_WORDS = {
+  optimizers: { word: 'optimizer', choose: 'Choose an optimizer' },
+  schedulers: { word: 'schedule', choose: 'Choose a schedule' },
+  metrics: { word: 'metric', choose: 'Choose a metric' },
+};
+/**
+ * The last removal made in the form: {path, before, after}, the recipe text as the removal found it and
+ * left it. "Undo removal" is offered while the text is still `after`, so it puts back exactly what was
+ * there. Kept outside the form so it lasts while another screen is open.
+ */
+let lastRemoval = null;
 
 export function mountForm(el) {
   const root = h('div', { class: 'form' });
@@ -81,11 +112,12 @@ export function mountForm(el) {
 
   const config = () => recipe.get().config ?? {};
   const ctx = {
-    apply: (path, value) => recipe.applyEdits([{ path, value }]),
+    // floatLiteral: a number as typed in scientific notation (1e-4); the backend keeps that spelling.
+    apply: (path, value, floatLiteral) => recipe.applyEdits([typeof floatLiteral === 'string' ? { path, value, floatLiteral } : { path, value }]),
     // Deleting the key (not writing null or the default) is how an option goes back to its default.
     remove: (path) => {
       noteFocusForRemoval(path);
-      return recipe.applyEdits([{ path, remove: true }]).catch((error) => {
+      return removeAt(path).catch((error) => {
         focusAfter = null;
         throw error;
       });
@@ -93,12 +125,12 @@ export function mountForm(el) {
     edit: (edits) => recipe.applyEdits(edits),
     // A new key: the row that asked for it is redrawn, so once the checked recipe arrives focus goes to
     // the row of the key that was added (unless the person has moved on to another control).
-    add: (path, value) => {
+    add: (path, value, floatLiteral) => {
       const active = document.activeElement;
       // A new object (a schedule for one optimizer) has no row of its own: its type, else its first option.
       const inside = isPlainObject(value) ? [...('type' in value ? ['type'] : []), ...Object.keys(value).filter((k) => k !== 'type')].map((k) => pathKey([...path, k])) : [];
       if (!active || active === document.body || content.contains(active)) focusAfter = { config: recipe.get().config, keys: [pathKey(path), ...inside], at: Date.now() };
-      return recipe.applyEdits([{ path, value }]).catch((error) => {
+      return recipe.applyEdits([typeof floatLiteral === 'string' ? { path, value, floatLiteral } : { path, value }]).catch((error) => {
         focusAfter = null;
         throw error;
       });
@@ -110,8 +142,61 @@ export function mountForm(el) {
   // focus goes to the same row's control, else the next row's, else the section heading.
 
   // {config, keys: pathKeys in order of preference, at, marks?: `data-mark` values of buttons tried before
-  // the keys, from?: the button that asked (focus still on it counts as "has not moved on")}
+  // the keys, from?: the button that asked (focus still on it counts as "has not moved on"),
+  // under?: a pathKey whose first row is tried after the keys (a block that came back)}
   let focusAfter = null;
+
+  // ───────── undo of a removal ─────────
+  // A removal can be undone while nothing else has changed the recipe: the text goes back to what the
+  // removal found, comments and layout included. That is a different thing from adding: a block that is
+  // added is new, with the type the person chooses and no options set (addTyped).
+
+  let lastChange = null; // {before, after} of the latest change of the recipe text, whoever made it
+
+  /** Remove `path` through the service; the text around the removal is kept for "Undo removal". */
+  function removeAt(path) {
+    // With no other edit under way, the next change of the text is this removal's own. A removal that
+    // waits behind another edit cannot tell the two apart, so it is not offered for undo.
+    const alone = recipe.get().pending === 0;
+    const seen = lastChange;
+    return recipe.applyEdits([{ path, remove: true }]).then(() => {
+      if (alone && lastChange !== seen) lastRemoval = { path, ...lastChange };
+    });
+  }
+
+  /**
+   * "Undo removal" for the last thing removed at or under `base` (a path, or a test of the removed path).
+   * Hidden unless there is one and the recipe text is still what that removal left.
+   */
+  function undoOffer(base) {
+    const said = h('span', { class: 'mono' });
+    const mine = typeof base === 'function' ? base : (path) => base.every((part, i) => String(path[i]) === String(part));
+    const applies = () => Boolean(lastRemoval) && lastRemoval.after === recipe.get().yaml && mine(lastRemoval.path);
+    const button = h(
+      'button',
+      {
+        class: 'btn btn--sm',
+        type: 'button',
+        onclick: () => {
+          if (!applies()) return paint();
+          const { path, before } = lastRemoval;
+          lastRemoval = null;
+          // What comes back has rows again: focus goes to its own row, else its type, else its first row.
+          focusAfter = { config: recipe.get().config, keys: [pathKey(path), pathKey([...path, 'type'])], under: pathKey(path), at: Date.now() };
+          recipe.setYaml(before, { immediate: true });
+        },
+      },
+      'Undo removal',
+    );
+    const el = h('div', { class: 'form__actions form__undo', role: 'status', hidden: true }, h('span', null, said, ' was removed.'), button);
+    const paint = () => {
+      el.hidden = !applies();
+      if (!el.hidden) said.textContent = pathKey(lastRemoval.path);
+    };
+    paint();
+    updaters.push(paint);
+    return el;
+  }
 
   function noteFocusForRemoval(path) {
     // A confirm dialog may have left focus on the page body: that still counts as "in the form".
@@ -125,7 +210,8 @@ export function mountForm(el) {
     const keys = [...fields.keys()];
     const at = keys.findIndex(inside);
     const next = at >= 0 ? keys.slice(at).filter((k) => !inside(k)) : [];
-    focusAfter = { config: recipe.get().config, keys: [...(fields.has(key) ? [key] : []), ...next], at: Date.now() };
+    // A block that is asked for by its type once it is gone (addTyped): the field that asks comes first.
+    focusAfter = { config: recipe.get().config, keys: [...(fields.has(key) ? [key] : []), ...next], marks: [`${key}:add`], at: Date.now() };
   }
 
   const reachable = (el) => {
@@ -158,7 +244,8 @@ export function mountForm(el) {
         return;
       }
     }
-    for (const k of goal.keys) {
+    const within = goal.under ? [...fields.keys()].filter((k) => k.startsWith(`${goal.under}.`)) : [];
+    for (const k of [...goal.keys, ...within]) {
       const field = fields.get(k);
       if (field && reachable(field.el)) {
         field.focus();
@@ -185,6 +272,15 @@ export function mountForm(el) {
     const field = taskEntry(currentTask(c))?.networkField;
     return field === 'network_ae' || field === 'network_g' ? field : 'network_g';
   };
+
+  /** A dataset that trains on video clips (VideoClipDataset): its own panel and words. */
+  const isVideoDataset = (base, c = config()) => String(getAt(c, base)?.type ?? '').toLowerCase() === VIDEO_DATASET;
+  const isRdual = (c = config()) => String(c.network_g?.type ?? '').toLowerCase() === 'rdual';
+  /** A dataset of the type that can read ZIP archives, and one that does (ZIP storage chosen: dataroot_gt names files). */
+  const readsZip = (base, c = config()) => String(getAt(c, base)?.type ?? '').toLowerCase() === ZIP_DATASET.toLowerCase();
+  const isZipDataset = (base, c = config()) => readsZip(base, c) && getAt(c, [...base, 'io_backend', 'type']) === 'zip';
+  /** A recipe that sets up distillation or names teacher weights: the Network section offers to add the teacher. */
+  const wantsTeacher = (c = config()) => isPlainObject(c.train?.distillation) || (typeof c.path?.pretrain_network_g_teacher === 'string' && c.path.pretrain_network_g_teacher !== '');
 
   /** Issue slot for a block that has no single field (a dataset, a loss, an object group). */
   function blockTarget(path) {
@@ -393,7 +489,46 @@ export function mountForm(el) {
           return all.length && !all.some((t) => t.toLowerCase() === value.toLowerCase()) ? `Not one of the ${all.length} dataset types the installed trainer lists.` : null;
         };
       }
+      // Clip training reads video files, and makes its low quality clips itself.
+      if (isVideoDataset(path.slice(0, 2))) {
+        if (key === 'dataroot_gt') {
+          out.caption = 'Videos';
+          out.lead = 'Folder that holds the training videos, or single video files. Several entries are separated by commas.';
+          out.pickTitle = 'Folder with the training videos';
+        } else if (key === 'dataroot_lq') out.lead = 'Not used: the low quality clips are made on the fly.';
+      } else if (key === 'dataroot_gt') {
+        const base = path.slice(0, 2);
+        if (isZipDataset(base)) {
+          // ZIP storage reads archive files: the row asks for them, not for a folder.
+          out.lead = 'The .zip files that hold the images, in place of folders.';
+          out.browse = { mode: 'file', extensions: ['.zip'] };
+          out.pickTitle = 'Choose a ZIP archive of images';
+        } else {
+          // A .zip file where archives are not read: the row says what reads them.
+          out.note = (value, isSet) =>
+            isSet && toList(value).some((p) => /\.zip$/i.test(p))
+              ? { text: readsZip(base) ? 'A .zip file is read once io_backend.type is zip.' : `ZIP archives are read by ${ZIP_DATASET} only, with io_backend.type set to zip.`, warn: true }
+              : null;
+        }
+      }
     }
+    if (path.length === 4 && path[0] === 'datasets' && path[2] === 'io_backend' && key === 'type' && (kind.kind === 'string' || kind.kind === 'enum')) {
+      // The storage types the schema names; a dataset class added to the trainer may read another, so any
+      // text can be typed. ZIP is read by one dataset type: it is listed for that type alone, and the row
+      // says so when another type has it.
+      const base = path.slice(0, 2);
+      const named = (kind.options ?? kind.suggestions ?? []).filter((t) => typeof t === 'string');
+      out.kind = { ...kind, kind: 'string', options: undefined, suggestions: undefined };
+      out.choices = {
+        listLabel: 'Storage types',
+        getChoices: () => toChoices(named.filter((t) => t !== 'zip' || readsZip(base)).map((t) => ({ value: t, note: t === 'zip' ? '.zip archives' : null }))),
+      };
+      out.note = (value, isSet) => {
+        if (!isSet || value !== 'zip') return null;
+        return readsZip(base) ? 'dataroot_gt names the .zip files. ZIP storage takes no other io_backend option.' : { text: `ZIP storage is read by ${ZIP_DATASET} only.`, warn: true };
+      };
+    }
+    if (path.length === 2 && path[0] === 'path' && key === 'neuflow_weights' && isRdual()) out.lead = NEUFLOW_RDUAL;
     if (isBestWeights(path)) {
       out.caption = BEST_CAPTION;
       out.lead = BEST_HELP;
@@ -504,13 +639,125 @@ export function mountForm(el) {
           ),
         )
       : null;
+    const value = getAt(config(), path);
+    // An optimizer, a schedule or a metric the recipe does not have cannot take options yet: its place
+    // asks for the type. A value that is no block of options is said as it is, since choosing replaces it.
+    const absent = Boolean(blockListName(path)) && !isPlainObject(value);
+    const odd = absent && value !== null && value !== undefined;
     return h(
       'div',
       { class: 'form__sub' },
       subHeading(path, key, description, unknown ? h('span', { class: 'fld__tag fld__tag--unknown' }, 'Not in the schema') : null),
       blockTarget(path),
-      genericEditor({ path, value: getAt(config(), path), ctx, register, firstKeys: ['type'], rowExtras: knownRow, knownOptions: knownOptionsAt, special: scheduleSpecial }),
+      undoOffer(path),
+      absent
+        ? [h('p', { class: 'form__empty' }, odd ? `${key} is ${JSON.stringify(value)} in the recipe, which is not a block of options. Choosing a type replaces it.` : `${key} is not set. Choose its type to add it.`), addTyped(path)]
+        : genericEditor({ path, value, ctx, register, firstKeys: ['type'], rowExtras: knownRow, knownOptions: knownOptionsAt, special: blockSpecial }),
       remove,
+    );
+  }
+
+  // ───────── adding a block by its type ─────────
+  // An optimizer, a schedule and a metric take the options of their type, so one the recipe does not have
+  // is added by choosing that type: the installed ones are listed, any other id can be typed, and nothing
+  // is written before the button is pressed. The new block holds its type alone. The options that type
+  // takes are then rows of the block, each at its default until it is changed (unsetParameters).
+
+  const moreId = (path) => `more:${pathKey(path)}`;
+
+  /**
+   * The field and button that add a typed block at `base`, or under `base` by a name of its own.
+   * @param {Array} base the block's path; with `keyed`, the path of the mapping that holds such blocks
+   * @param {{label: string, placeholder: string, choices?: () => Array, suggest?: (type: string) => string}|null} keyed
+   *   the name a block goes under (a schedule's optimizer, a metric's name): `choices` lists the usual
+   *   names, `suggest` gives the name a picked type starts with. Any other name can be typed.
+   */
+  function addTyped(base, keyed = null) {
+    const known = knownList([...base, ...(keyed ? [''] : []), 'type']);
+    const { word, choose } = TYPED_WORDS[known.name];
+    const typeId = uid('addtype');
+    const keyId = uid('addkey');
+    const error = h('p', { class: 'field__error', role: 'alert', hidden: true });
+    const say = (message) => {
+      error.textContent = message ?? '';
+      error.hidden = !message;
+    };
+    let suggested = '';
+    const add = () => {
+      const typed = picker.input.value.trim();
+      const key = keyed ? keyInput.value.trim() : '';
+      const held = getAt(config(), base);
+      const problem = !typed
+        ? `${choose} from the list, or type its id.`
+        : !keyed
+          ? null
+          : !key
+            ? `Enter the ${keyed.label.toLowerCase()}.`
+            : /[.\s[\]/]/.test(key)
+              ? `The ${keyed.label.toLowerCase()} cannot contain dots, slashes, brackets or spaces.`
+              : isPlainObject(held) && key in held
+                ? `${pathKey(base)} already has ${key}.`
+                : null;
+      say(problem);
+      if (problem) return (typed ? keyInput : picker.input).focus();
+      // A listed type is written as it is listed; any other id is the person's own and is written as typed.
+      const hit = listedIn(known.name).find((item) => namedBy(item, typed));
+      const path = keyed ? [...base, key] : base;
+      picker.input.value = '';
+      if (keyed) keyInput.value = '';
+      suggested = '';
+      // The new block opens with the options of its type in view; focus goes to its type, its first row.
+      openGroups.add(moreId(path));
+      focusAfter = { config: recipe.get().config, keys: [pathKey([...path, 'type'])], at: Date.now() };
+      return recipe.applyEdits([{ path, value: { type: hit ? shownName(hit) : typed } }]).catch((failure) => {
+        focusAfter = null;
+        toast(`The ${word} was not added: ${failure.message}`, { kind: 'err' });
+      });
+    };
+    const picker = createCombobox({
+      id: typeId,
+      inputClass: 'input--path',
+      placeholder: choose,
+      closed: false,
+      listLabel: known.label,
+      // Where focus goes when the block is removed: the place to choose it again.
+      attrs: { 'data-mark': `${pathKey(base)}:add` },
+      getChoices: () => typeChoices(known),
+      onPick: (choice) => {
+        say(null);
+        if (!keyed) return;
+        // A name the person has not typed themselves follows the type that is picked.
+        if (keyed.suggest && (!keyInput.value.trim() || keyInput.value === suggested)) {
+          suggested = keyed.suggest(String(choice.value));
+          keyInput.value = suggested;
+        }
+        keyInput.focus();
+      },
+      onEnter: add,
+      onEscape: () => {
+        picker.input.value = '';
+        say(null);
+      },
+    });
+    const keyCombo = keyed?.choices
+      ? createCombobox({ id: keyId, inputClass: 'input--path', placeholder: keyed.placeholder, closed: false, listLabel: keyed.label, getChoices: () => toChoices(keyed.choices()), onPick: () => say(null), onEnter: add })
+      : null;
+    const keyInput = keyCombo ? keyCombo.input : keyed ? h('input', { class: 'input input--path', id: keyId, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: keyed.placeholder }) : null;
+    if (keyInput && !keyCombo) {
+      keyInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        add();
+      });
+    }
+    return h(
+      'div',
+      { class: `form__actions${keyed ? ' form__addkeyed' : ''}` },
+      h('label', { class: 'visually-hidden', for: typeId }, `Type of the ${word} to add`),
+      picker.el,
+      keyed ? [h('label', { class: 'visually-hidden', for: keyId }, keyed.label), keyCombo ? keyCombo.el : keyInput] : null,
+      h('button', { class: 'btn btn--sm', type: 'button', onclick: add }, `Add ${word}`),
+      error,
     );
   }
 
@@ -585,11 +832,49 @@ export function mountForm(el) {
       return { name: 'metrics', many: 'metrics', label: 'Metrics', note: (item) => (item.requiresReference === false ? 'needs no reference image' : null) };
     }
     if (path.length === 2 && /^network_/.test(a) && b === 'type') {
-      // Every installed network type; for the discriminator, those named as one come first.
-      const first = a === 'network_d' ? (item) => /discriminator/i.test(item.id) : null;
-      return { name: 'architectures', many: 'network types', label: 'Network types', first };
+      // Every installed network type; for the discriminator, those that fit one come first.
+      return { name: 'architectures', many: 'network types', label: 'Network types', order: a === 'network_d' ? discriminatorsFirst : null };
     }
     return null;
+  }
+
+  // network_d, network_g_teacher and network_ae are free-form in the schema, yet the trainer builds each
+  // from a registered network type, and the schema describes those types for network_g. The recipe check
+  // holds every one of these blocks to that description, so the form reads the option names, the values
+  // they start from and the values they list from it too. A type the schema does not describe (a network
+  // added to the trainer) or one that does not close its options takes any name: those are typed.
+
+  /** A network block of the recipe as a whole: network_g, network_d, network_g_teacher, network_ae. */
+  const isNetworkBlock = (path) => path.length === 1 && NETWORK_KEYS.includes(String(path[0]));
+  /** The schema's description of a network type; null for a type it does not describe. */
+  const networkDef = (type) => (typeof type === 'string' && type ? schema.variantFor(netKind, type) : null);
+  /**
+   * Whether a listed network type is a discriminator: its name says so, or it is one of the registered
+   * ones known by id. Nothing is read from a type's options. This orders and fills the lists; any other
+   * type can still be typed.
+   */
+  const fitsDiscriminator = (item) => /discriminator/i.test(item.id) || DISCRIMINATOR_IDS.has(item.id.toLowerCase());
+  /** `items` with the discriminators first: the ones named as one, then the ones known by id. */
+  const discriminatorsFirst = (items) => {
+    const fit = items.filter(fitsDiscriminator);
+    const named = fit.filter((item) => /discriminator/i.test(item.id));
+    return [...named, ...fit.filter((item) => !named.includes(item)), ...items.filter((item) => !fit.includes(item))];
+  };
+  /**
+   * The options the schema lists for the network type written at `path`, as the catalog lists parameters.
+   * `scale` is left out except for the discriminator: every other network gets the recipe's own scale,
+   * over whatever its block says.
+   */
+  function networkParameters(path) {
+    const def = networkDef(getAt(config(), [...path, 'type']));
+    if (!def) return [];
+    return Object.entries(schema.props(def))
+      .filter(([name]) => name !== 'type' && !(name === 'scale' && String(path[0]) !== 'network_d'))
+      .map(([name, prop]) => {
+        const kind = schema.kind(prop);
+        const choices = kind.kind === 'enum' ? kind.options : kind.suggestions;
+        return { name, ...(kind.hasDefault ? { default: kind.default } : {}), ...(Array.isArray(choices) && choices.length ? { choices } : {}) };
+      });
   }
 
   /**
@@ -605,6 +890,7 @@ export function mountForm(el) {
   }
   /** The parameters the catalog lists for the object at `path`, by the type the recipe gives it now. */
   function blockParameters(path) {
+    if (isNetworkBlock(path)) return networkParameters(path);
     const name = blockListName(path);
     const type = name ? getAt(config(), [...path, 'type']) : null;
     if (typeof type !== 'string') return [];
@@ -628,6 +914,11 @@ export function mountForm(el) {
       Object.values(metrics).map((m) => m?.type ?? null),
       scheduleShape(train.scheduler),
       Object.keys(each).map((k) => [k, scheduleShape(each[k])]),
+      // The same for the networks (a type decides the options offered), for whether a teacher is asked
+      // for, and for each dataset's type and storage (ZIP storage names files where the others name folders).
+      NETWORK_KEYS.map((k) => c[k]?.type ?? null),
+      wantsTeacher(c),
+      Object.values(isPlainObject(c.datasets) ? c.datasets : {}).map((d) => [d?.type ?? null, d?.io_backend?.type ?? null]),
     ]);
   };
   /**
@@ -638,6 +929,12 @@ export function mountForm(el) {
     if (!isPlainObject(node)) return [shape(node)];
     return [node.type ?? null, shape({ ...node, schedulers: null }), Array.isArray(node.schedulers) ? node.schedulers.map(scheduleShape) : null];
   }
+
+  /** The types a `knownList` answer names, as the choices of a list: each by the name it is written by. */
+  const typeChoices = (known) => {
+    const all = listedIn(known.name).filter((item) => !known.only || known.only(item));
+    return toChoices((known.order ? known.order(all) : all).map((item) => ({ value: shownName(item), note: known.note ? known.note(item) : null })));
+  };
 
   /** More of a generic row's spec: the list of known values and a note when the value is not among them. */
   function knownRow(path, key, value) {
@@ -660,15 +957,8 @@ export function mountForm(el) {
         },
       };
     }
-    const entries = () => {
-      const all = listedIn(known.name).filter((item) => !known.only || known.only(item));
-      return known.first ? [...all.filter(known.first), ...all.filter((item) => !known.first(item))] : all;
-    };
     return {
-      choices: {
-        listLabel: known.label,
-        getChoices: () => toChoices(entries().map((item) => ({ value: shownName(item), note: known.note ? known.note(item) : null }))),
-      },
+      choices: { listLabel: known.label, getChoices: () => typeChoices(known) },
       // Compared without regard to case: recipes write AdamW where the trainer's id is adamw.
       note: (now, isSet) => {
         const all = listedIn(known.name);
@@ -690,14 +980,72 @@ export function mountForm(el) {
   // whole (the service has no "insert at" edit). An entry that is not a mapping keeps its value and is
   // shown as it is; a list under a type the catalog does not list as holding schedules stays one row.
 
-  const scheduleSpecial = {
+  /** What the form draws in a free-form block beyond the recipe's own keys (fields.js genericEditor `special`). */
+  const blockSpecial = {
+    // A block that lacks its type asks for it first: nothing else about it is known without one.
+    first: (path, object) => (typedBlock(path) && !('type' in object) ? [leaf([...path, 'type'], 'type', kindFromValue(''), false, knownRow([...path, 'type'], 'type', '') ?? {})] : []),
     row: (path, key, value) => {
       const holder = path.slice(0, -1);
       return key === 'schedulers' && Array.isArray(value) && isSchedulePath(holder) && partsOf(scheduleEntry(holder)).length ? scheduleParts(path, value, true) : null;
     },
-    // A type that holds schedules and has no list yet: the place to add the first one.
-    more: (path, object) => (!('schedulers' in object) && isSchedulePath(path) && partsOf(scheduleEntry(path)).length ? [scheduleParts([...path, 'schedulers'], [], false)] : []),
+    more: (path, object) => [
+      ...unsetParameters(path, object),
+      // A type that holds schedules and has no list yet: the place to add the first one.
+      ...(!('schedulers' in object) && isSchedulePath(path) && partsOf(scheduleEntry(path)).length ? [scheduleParts([...path, 'schedulers'], [], false)] : []),
+    ],
+    // A schedule of one optimizer and a metric go under a name of their own, and each needs its type: the
+    // two are asked for together, where "Add option" would take a name and a value typed as JSON.
+    adder: (path, object) => {
+      const key = pathKey(path);
+      if (key === 'train.schedulers') {
+        const roles = Object.keys(schema.props(schema.props(rootProps.train).schedulers));
+        return [
+          Object.keys(object).length ? null : h('p', { class: 'form__empty' }, 'No optimizer has a schedule of its own.'),
+          addTyped(path, {
+            label: 'Optimizer',
+            placeholder: roles.length ? `for optimizer: ${roles.join(', ')}` : 'for optimizer',
+            choices: roles.length ? () => roles.filter((role) => !(role in object)).map((role) => ({ value: role, note: `optim_${role}` })) : null,
+          }),
+        ];
+      }
+      if (key === 'val.metrics') {
+        return [
+          Object.keys(object).length ? null : h('p', { class: 'form__empty' }, 'No metric is listed.'),
+          addTyped(path, { label: 'Metric name', placeholder: 'name, for example psnr', suggest: (type) => type.replace(/^calculate_/, '') }),
+        ];
+      }
+      return null;
+    },
   };
+
+  // ───────── the options a type takes ─────────
+  // The catalog lists the parameters of each optimizer, schedule and metric, most with the value they start
+  // from. Those the recipe does not set are rows too: drawn at that value and written only once the person
+  // changes one. A parameter the type cannot do without stands in the open; the others wait in a group.
+
+  /** The kind of a listed parameter: read from the value it starts from; without one, any value is taken. */
+  function parameterKind(parameter) {
+    const hasDefault = 'default' in parameter && parameter.default !== undefined;
+    const listed = Array.isArray(parameter.choices) && parameter.choices.some((choice) => typeof choice === 'string');
+    const base = listed ? kindFromValue('') : hasDefault && parameter.default !== null ? kindFromValue(parameter.default) : { kind: 'loose', nullable: hasDefault, description: '' };
+    return { ...base, hasDefault, default: parameter.default };
+  }
+
+  /** Rows for the parameters the type at `path` lists and `object` (the block as the recipe has it) does not set. */
+  function unsetParameters(path, object) {
+    if (!blockListName(path)) return [];
+    // A type that holds schedules has its `schedulers` drawn as that list, not as a row.
+    const holds = partsOf(scheduleEntry(path)).length > 0;
+    const unset = blockParameters(path).filter((p) => p.name !== 'type' && !(p.name in object) && !(holds && p.name === 'schedulers'));
+    const type = getAt(config(), [...path, 'type']);
+    const row = (p, lead) => leaf([...path, p.name], p.name, parameterKind(p), false, { ...(knownRow([...path, p.name], p.name, '') ?? {}), ...(lead ? { lead } : {}) });
+    const needed = unset.filter((p) => p.required === true && !('default' in p));
+    const rest = unset.filter((p) => !needed.includes(p));
+    return [
+      ...needed.map((p) => row(p, `${type} needs this option: it has no default.`)),
+      ...(rest.length ? [group(moreId(path), 'More options', rest.map((p) => row(p, null)), `${rest.length} not set`).el] : []),
+    ];
+  }
 
   /**
    * The schedules inside the schedule that holds `listPath` (… .schedulers).
@@ -720,17 +1068,40 @@ export function mountForm(el) {
         toast(`${failed}: ${error.message}`, { kind: 'err' });
       });
     };
+    /**
+     * The list as the checked recipe has it, once the edits under way have landed. Adding and moving write
+     * the whole list, and `list` is only what these rows were drawn from: a value changed inside one
+     * schedule since then is not in it, and one still on its way (the field that lost focus to the button)
+     * is not in the parsed recipe yet either. Writing from either would put the old value back.
+     */
+    const currentList = () =>
+      new Promise((resolve) => {
+        const read = () => {
+          const s = recipe.get();
+          if (s.pending || s.check === 'checking') return false;
+          const now = getAt(s.config ?? {}, listPath);
+          resolve(Array.isArray(now) ? now : []);
+          return true;
+        };
+        if (read()) return;
+        const off = recipe.subscribe(() => {
+          if (read()) off();
+        });
+      });
     const parts = list.map((child, i) => {
       const base = [...listPath, i];
       const label = `schedulers[${i}]`;
       const button = (act, text, disabled, onclick) =>
         h('button', { class: 'btn btn--sm btn--quiet', type: 'button', disabled, dataset: { mark: mark(i, act) }, 'aria-label': `${text} ${label}`, onclick }, text);
-      const move = (to, act) => (event) => {
-        const next = [...list];
+      const move = (to, act) => async (event) => {
+        const from = event.currentTarget;
+        const next = [...(await currentList())];
+        // The schedule is no longer there (the list changed meanwhile): nothing to move.
+        if (i >= next.length) return;
         const [moved] = next.splice(i, 1);
         next.splice(to, 0, moved);
         // Focus follows the schedule that moved: the same button on it, else its other move button.
-        writeList(next, { marks: [mark(to, act), mark(to, act === 'up' ? 'down' : 'up')], from: event.currentTarget }, 'The schedule was not moved');
+        writeList(next, { marks: [mark(to, act), mark(to, act === 'up' ? 'down' : 'up')], from }, 'The schedule was not moved');
       };
       const remove = async (event) => {
         const from = event.currentTarget;
@@ -745,18 +1116,15 @@ export function mountForm(el) {
         // The same button on the schedule that takes this place, else the last one's, else the box to add one.
         const left = Math.min(i, list.length - 2);
         focusAfter = { config: recipe.get().config, keys: [], marks: [...(left >= 0 ? [mark(left, 'remove')] : []), addMark], from, at: Date.now() };
-        recipe.applyEdits([{ path: base, remove: true }]).catch((error) => {
+        removeAt(base).catch((error) => {
           focusAfter = null;
           toast(`The schedule was not removed: ${error.message}`, { kind: 'err' });
         });
       };
+      // The type comes first even when the recipe left it out (blockSpecial.first).
       const body = isPlainObject(child)
-        ? [
-            // The type always comes first, even when the recipe left it out.
-            'type' in child ? null : leaf([...base, 'type'], 'type', kindFromValue(''), false, knownRow([...base, 'type'], 'type', '') ?? {}),
-            genericEditor({ path: base, value: child, ctx, register, depth: 1, firstKeys: ['type'], rowExtras: knownRow, knownOptions: knownOptionsAt, special: scheduleSpecial }),
-          ]
-        : [leaf(base, label, kindFromValue(child))];
+        ? genericEditor({ path: base, value: child, ctx, register, depth: 1, firstKeys: ['type'], rowExtras: knownRow, knownOptions: knownOptionsAt, special: blockSpecial })
+        : leaf(base, label, kindFromValue(child));
       return h(
         'div',
         { class: 'form__nested' },
@@ -777,14 +1145,15 @@ export function mountForm(el) {
       );
     });
 
-    const add = () => {
+    const add = async () => {
       const typed = picker.input.value.trim();
       if (!typed) return picker.input.focus();
       // A listed schedule is written as it is listed; any other id is the person's own and is written as typed.
       const hit = listedIn('schedulers').find((item) => namedBy(item, typed));
       picker.input.value = '';
+      const now = await currentList();
       // The section is redrawn with the new schedule in it: focus goes to its type, its first row.
-      return writeList([...list, { type: hit ? shownName(hit) : typed }], { keys: [pathKey([...listPath, list.length, 'type'])] }, 'The schedule was not added');
+      return writeList([...now, { type: hit ? shownName(hit) : typed }], { keys: [pathKey([...listPath, now.length, 'type'])] }, 'The schedule was not added');
     };
     const picker = createCombobox({
       id: addId,
@@ -834,19 +1203,23 @@ export function mountForm(el) {
     );
   }
 
+  /** A block whose options come with its type: an optimizer, a schedule, a metric, a network. */
+  const typedBlock = (path) => Boolean(blockListName(path)) || isNetworkBlock(path);
+
   /**
-   * What "Add option" offers for the free-form object at `path`: the parameters the catalog lists for its
-   * optimizer, schedule or metric, each with the value it starts from and the values it takes. null:
-   * nothing known.
+   * What "Add option" offers for the network block at `path`: the options the schema lists for its type,
+   * each with the value it starts from and the values it takes. null: nothing known. An optimizer, a
+   * schedule and a metric show their options as rows instead (unsetParameters), so their "Add option"
+   * takes the names the catalog does not list.
    */
   function knownOptionsAt(path) {
-    if (!blockListName(path)) return null;
+    if (!isNetworkBlock(path)) return null;
     return {
       options: blockParameters(path).map((p) => ({ name: p.name, hasDefault: 'default' in p && p.default !== undefined, default: p.default, choices: Array.isArray(p.choices) ? p.choices : null })),
     };
   }
   // The editor shows the name list only where one can exist.
-  knownOptionsAt.applies = (path) => Boolean(blockListName(path));
+  knownOptionsAt.applies = isNetworkBlock;
 
   function group(id, title, rows, stateText = '', { mono = false } = {}) {
     const stateEl = h('span', { class: 'form__groupstate' }, stateText);
@@ -870,6 +1243,10 @@ export function mountForm(el) {
   function renderProp(base, key, prop, depth = 0) {
     const path = [...base, key];
     const kind = schema.kind(prop);
+    // A block whose options come with its type (an optimizer, a schedule, the schedules per optimizer, a
+    // network): the schema names its `type` at most, and the lists above name the rest. It is edited as
+    // the free-form block it is, whatever shape the schema writes that object in.
+    if ((kind.kind === 'object' || kind.kind === 'json') && (typedBlock(path) || pathKey(path) === 'train.schedulers')) return genericBlock(path, key, kind.description);
     if (kind.kind === 'object' && depth < 2) {
       const props = schema.props(kind.node);
       const names = Object.keys(props);
@@ -912,6 +1289,43 @@ export function mountForm(el) {
     return [...names.map((k) => renderProp(base, k, props[k])), ...unknown.map((k) => unknownRow([...base, k], k))];
   }
 
+  /**
+   * "Starting weights for RDUAL": the three ways a RDUAL training starts, and the two files they can name. It
+   * does not say which case applies: nothing the service answers tells a complete checkpoint from another.
+   */
+  function rdualGuide() {
+    const pick = (key, title) => async () => {
+      const { pickPath } = await import('../components/path-picker.js');
+      const current = getAt(config(), ['path', key]);
+      const picked = await pickPath({ title, mode: 'file', start: typeof current === 'string' ? current : '', extensions: ['.safetensors', '.pth'], confirmLabel: 'Use this file' });
+      if (typeof picked !== 'string' || !picked) return;
+      ctx.apply(['path', key], picked).catch(refusedToast(`${key} was not changed`));
+    };
+    return h(
+      'div',
+      { class: 'notice form__rdual' },
+      h(
+        'div',
+        { class: 'notice__body' },
+        h('p', { class: 'form__rdualtitle' }, h('strong', null, 'Starting weights for RDUAL')),
+        h(
+          'ul',
+          { class: 'form__rduallist' },
+          RDUAL_CASES.map(([head, ...rest]) =>
+            h('li', { class: 'form__rdualcase' }, h('span', { class: 'form__rdualhead' }, head), rest.map((part) => (/^`.*`$/.test(part) ? h('code', { class: 'mono' }, part.slice(1, -1)) : part))),
+          ),
+        ),
+        h('p', { class: 'form__rdualnote' }, RDUAL_NOTE),
+        h(
+          'div',
+          { class: 'row form__rdualacts' },
+          h('button', { class: 'btn btn--sm', type: 'button', onclick: pick('pretrain_network_g', 'Choose the generator checkpoint') }, 'Choose generator checkpoint…'),
+          h('button', { class: 'btn btn--sm', type: 'button', onclick: pick('neuflow_weights', 'Choose the NeuFlow v2 weights') }, 'Choose NeuFlow weights…'),
+        ),
+      ),
+    );
+  }
+
   const defaultOf = (key) => (rootProps[key] ? schema.kind(rootProps[key]).default : undefined);
   const rootKeysOf = (id, order = []) => orderKeys([...layout.sectionOf].filter(([, s]) => s === id).map(([k]) => k), order);
 
@@ -923,7 +1337,7 @@ export function mountForm(el) {
     degradations: buildDegradations,
     datasets: buildDatasets,
     network: buildNetwork,
-    pretrained: () => objectRows(['path'], rootProps.path, PATH_FIRST),
+    pretrained: () => [isRdual() ? rdualGuide() : null, ...objectRows(['path'], rootProps.path, PATH_FIRST)],
     training: buildTraining,
     losses: buildLosses,
     validation: () => objectRows(['val'], rootProps.val),
@@ -1206,12 +1620,22 @@ export function mountForm(el) {
       const words = folderWords(currentTask());
       const single = words.paired === false;
       // A task's file option (detection's annotation_file) comes right after the image folder.
-      const order = words.file ? DATASET_FIRST.flatMap((k) => (k === 'dataroot_lq' ? [k, words.file.key] : [k])) : DATASET_FIRST;
+      const taskOrder = words.file ? DATASET_FIRST.flatMap((k) => (k === 'dataroot_lq' ? [k, words.file.key] : [k])) : DATASET_FIRST;
+      // The dataset type that reads folders or ZIP archives: its storage is asked for right after its folders.
+      const order = readsZip(base) ? taskOrder.flatMap((k) => (k === 'dataroot_lq' ? [k, 'io_backend'] : [k])) : taskOrder;
       const first = order.filter((k) => (k in dsProps || k in v) && !(single && k === 'dataroot_gt' && !(k in v)));
       const setRest = Object.keys(v).filter((k) => !first.includes(k));
       const more = Object.keys(dsProps).filter((k) => !first.includes(k) && !(k in v));
       const row = (k) => (k in dsProps ? renderProp(base, k, dsProps[k]) : unknownRow([...base, k], k));
-      const check = toList(v.dataroot_gt).length
+      // Video clips: the panel checks and prepares them; the paired image check does not apply.
+      const video = isVideoDataset(base, config());
+      let videoHost = null;
+      if (video && key === 'train') {
+        videoHost = h('div', { class: 'form__video' });
+        mountVideoPrep(videoHost);
+      }
+      // The Data screen checks folders: archives are left to the recipe check.
+      const check = !video && !isZipDataset(base) && toList(v.dataroot_gt).length
         ? h(
             'button',
             {
@@ -1256,6 +1680,7 @@ export function mountForm(el) {
             ),
           ),
           blockTarget(base),
+          videoHost,
           first.map(row),
           setRest.map(row),
           more.length ? group(`ds:${key}:more`, 'More dataset options', more.map(row), `${more.length} at their defaults`).el : null,
@@ -1291,7 +1716,7 @@ export function mountForm(el) {
         'Add dataset',
       ),
     );
-    return [pointer, ...blocks, add];
+    return [pointer, ...blocks, undoOffer(['datasets']), add];
   }
 
   // ───────── network ─────────
@@ -1395,57 +1820,73 @@ export function mountForm(el) {
     if (typeof ng.type === 'string' && ng.type) rows.push(listParameters());
 
     const ndDesc = rootProps.network_d ? schema.kind(rootProps.network_d).description : '';
-    if (isPlainObject(c.network_d)) {
-      const block = genericBlock(['network_d'], 'network_d', ndDesc);
-      // The discriminator's type always comes first, even when the recipe left it out.
-      if (!('type' in c.network_d)) block.children[0].after(leaf(['network_d', 'type'], 'type', kindFromValue(''), false, knownRow(['network_d', 'type'], 'type', '') ?? {}));
-      rows.push(block);
-    } else {
+    // A discriminator without a type asks for it first, like every typed block (blockSpecial.first).
+    if (isPlainObject(c.network_d)) rows.push(genericBlock(['network_d'], 'network_d', ndDesc));
+    else {
       rows.push(
-        h(
-          'div',
-          { class: 'form__sub' },
-          subHeading(['network_d'], 'network_d', ndDesc),
-          h('p', { class: 'form__empty' }, 'No discriminator. Recipes that use a GAN loss need one.'),
-          h(
-            'div',
-            { class: 'form__actions' },
-            h(
-              'button',
-              {
-                class: 'btn btn--sm',
-                type: 'button',
-                onclick: async () => {
-                  // The installed network types whose name says discriminator; any other type can be typed.
-                  const named = listedIn('architectures').filter((item) => /discriminator/i.test(item.id)).map((item) => item.id);
-                  const type = await promptDialog({
-                    title: 'Add discriminator',
-                    label: 'Discriminator type',
-                    help: named.length
-                      ? 'The network type of the discriminator, as the trainer names it. The list holds the installed types with discriminator in their name; another type can be typed.'
-                      : 'The network type of the discriminator, as the trainer names it, for example unetdiscriminatorsn.',
-                    confirmLabel: 'Add discriminator',
-                    choices: named.length ? named : null,
-                  });
-                  if (!type) return;
-                  // This button goes away once the discriminator exists: focus goes to its type.
-                  focusAfter = { config: recipe.get().config, keys: [pathKey(['network_d', 'type'])], at: Date.now() };
-                  recipe.applyEdits([{ path: ['network_d'], value: { type } }]).catch((error) => {
-                    focusAfter = null;
-                    toast(`The discriminator was not added: ${error.message}`, { kind: 'err' });
-                  });
-                },
-              },
-              'Add discriminator',
-            ),
-          ),
-        ),
+        addNetwork('network_d', {
+          noun: 'discriminator',
+          empty: 'No discriminator. Recipes that use a GAN loss need one.',
+          listed: 'the installed types that fit a discriminator',
+          example: 'unetdiscriminatorsn',
+          names: () => discriminatorsFirst(listedIn('architectures')).filter(fitsDiscriminator).map((item) => item.id),
+        }),
       );
     }
     for (const key of ['network_g', 'network_g_teacher', 'network_ae']) {
       if (key !== nf && key in c) rows.push(genericBlock([key], key, rootProps[key] ? schema.kind(rootProps[key]).description : ''));
+      else if (key === 'network_g_teacher' && nf === 'network_g' && wantsTeacher(c)) {
+        rows.push(
+          addNetwork(key, {
+            noun: 'teacher network',
+            empty: 'No teacher network. Distillation needs one, with its weights in path.pretrain_network_g_teacher.',
+            listed: 'the installed types for this task',
+            // Without the discriminators: every other installed type for the task stays listed.
+            names: () => networkChoices().ids.filter((id) => !fitsDiscriminator({ id })),
+          }),
+        );
+      } else if (key !== nf) {
+        // A network that leaves no place behind when it is removed can still be put back.
+        rows.push(undoOffer([key]));
+      }
     }
     return rows;
+  }
+
+  /**
+   * The place of a network the recipe does not have yet (network_d, network_g_teacher): a line on what it
+   * is for and a button that asks for its type. `names()` are the installed types listed for it (`listed`
+   * says which those are); any other type can be typed.
+   */
+  function addNetwork(key, { noun, empty, listed, names, example = '' }) {
+    const add = async () => {
+      const ids = names();
+      const typed = await promptDialog({
+        title: `Add ${noun}`,
+        label: `${noun.charAt(0).toUpperCase()}${noun.slice(1)} type`,
+        help: `The network type of the ${noun}, as the trainer names it${ids.length ? `. The list holds ${listed}; another type can be typed.` : example ? `, for example ${example}.` : '.'}`,
+        confirmLabel: `Add ${noun}`,
+        choices: ids.length ? ids : null,
+      });
+      if (!typed) return;
+      // A listed type is written as it is listed; any other is the person's own and is written as typed.
+      const hit = listedIn('architectures').find((item) => namedBy(item, typed));
+      // This button goes away once the network exists: focus goes to its type.
+      focusAfter = { config: recipe.get().config, keys: [pathKey([key, 'type'])], at: Date.now() };
+      recipe.applyEdits([{ path: [key], value: { type: hit ? hit.id : typed } }]).catch((error) => {
+        focusAfter = null;
+        toast(`The ${noun} was not added: ${error.message}`, { kind: 'err' });
+      });
+    };
+    return h(
+      'div',
+      { class: 'form__sub' },
+      subHeading([key], key, rootProps[key] ? schema.kind(rootProps[key]).description : ''),
+      undoOffer([key]),
+      h('p', { class: 'form__empty' }, empty),
+      // The mark: where focus goes when the network is removed.
+      h('div', { class: 'form__actions' }, h('button', { class: 'btn btn--sm', type: 'button', dataset: { mark: `${key}:add` }, onclick: add }, `Add ${noun}`)),
+    );
   }
 
   // ───────── training and losses ─────────
@@ -1593,6 +2034,7 @@ export function mountForm(el) {
     });
     const add = h('button', { class: 'btn btn--sm', type: 'button', onclick: addLoss }, 'Add a loss');
     rows.push(
+      undoOffer(['train', 'losses']),
       h(
         'div',
         { class: 'form__actions' },
@@ -1685,6 +2127,8 @@ export function mountForm(el) {
       } else rows.push(renderProp([], key, rootProps[key]));
     }
     if (!rows.length) rows.push(h('p', { class: 'form__empty' }, 'Every option of this recipe is shown in a section above.'));
+    // A key the schema does not know leaves no row behind when it is removed: it can still be put back.
+    rows.push(undoOffer((path) => sectionForPath(path, layout) === 'other'));
     return rows;
   }
 
@@ -1882,6 +2326,13 @@ export function mountForm(el) {
       for (let n = p.length; n > 0 && !node; n -= 1) node = content.querySelector(`[data-path="${CSS.escape(pathKey(p.slice(0, n)))}"]`);
     }
     if (!node) return;
+    // A whole dataset that has the training videos panel: the panel to the top, its title focused.
+    const panel = p.length === 2 && p[0] === 'datasets' && !target ? node.closest('.form__block')?.querySelector('.vprep') : null;
+    if (panel) {
+      panel.scrollIntoView({ block: 'start' });
+      panel.querySelector('.vprep__title')?.focus({ preventScroll: true });
+      return;
+    }
     for (let d = node.parentElement; d && d !== content; d = d.parentElement) if (d.tagName === 'DETAILS') d.open = true;
     node.scrollIntoView({ block: 'center' });
     if (target) target.focus();
@@ -1944,7 +2395,10 @@ export function mountForm(el) {
     );
   }
 
-  const unsubscribe = recipe.subscribe(() => render());
+  const unsubscribe = recipe.subscribe((s, prev) => {
+    if (s.yaml !== prev.yaml) lastChange = { before: prev.yaml, after: s.yaml };
+    render();
+  });
   const unfocus = recipe.onFocusRequest(focusPath);
   start();
 

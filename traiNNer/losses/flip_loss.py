@@ -51,6 +51,7 @@
 
 # Code by Pontus Ebelin (formerly Andersson), Jim Nilsson, and Tomas Akenine-Moller.
 
+import math
 import sys
 
 import numpy as np
@@ -217,14 +218,33 @@ def compute_ldrflip(
     test_y = (test[:, 0:1, :, :] + 16) / 116
 
     # Edge and point detection
-    edges_reference = feature_detection(
-        ref_y, edge_filter, feature_filter_radius
-    )
-    points_reference = feature_detection(
-        ref_y, point_filter, feature_filter_radius
-    )
-    edges_test = feature_detection(test_y, edge_filter, feature_filter_radius)
-    points_test = feature_detection(test_y, point_filter, feature_filter_radius)
+    if (
+        test_y.is_cuda
+        and test_y.dtype == torch.float32
+        and torch.compiler.is_compiling()
+        and not torch.are_deterministic_algorithms_enabled()
+    ):
+        # All four directions use the same padded luminance plane.
+        filters = torch.cat(
+            (edge_filter, edge_filter.transpose(2, 3), point_filter, point_filter.transpose(2, 3))
+        ).to(test_y)
+
+        def directions(image):
+            r = feature_filter_radius
+            padded = nn.functional.pad(image, (r, r, r, r), mode="replicate")
+            return nn.functional.conv2d(padded, filters).chunk(2, dim=1)
+
+        edges_reference, points_reference = directions(ref_y)
+        edges_test, points_test = directions(test_y)
+    else:
+        edges_reference = feature_detection(
+            ref_y, edge_filter, feature_filter_radius
+        )
+        points_reference = feature_detection(
+            ref_y, point_filter, feature_filter_radius
+        )
+        edges_test = feature_detection(test_y, edge_filter, feature_filter_radius)
+        points_test = feature_detection(test_y, point_filter, feature_filter_radius)
 
     # Feature metric
     deltaE_f = torch.max(
@@ -238,7 +258,7 @@ def compute_ldrflip(
         ),
     )
     deltaE_f = torch.clamp(deltaE_f, min=eps)  # clamp to stabilize training
-    deltaE_f = torch.pow(((1 / np.sqrt(2)) * deltaE_f), qf)
+    deltaE_f = torch.pow(((1 / math.sqrt(2.0)) * deltaE_f), qf)
 
     # --- Final error ---
     return torch.pow(deltaE_c, 1 - deltaE_f)

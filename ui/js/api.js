@@ -208,6 +208,15 @@ export const api = {
    */
   fsList: (params, opts) => post('/api/fs/list', compact(params), opts),
   /**
+   * Where the video indexes of a clip-training recipe stand (only datasets.train is read; its type must be
+   * VideoClipDataset). {yaml} => {total, ready, pending, invalid, files:[{name, path, status:
+   * 'ready'|'missing'|'stale'|'invalid', reason}]}; pending = total - ready, so it includes the invalid
+   * ones; reason is a sentence ('' when ready). A problem with the whole request (folder not found, no
+   * supported videos, no descale size, another dataset type) is a 400 with the service's sentence.
+   * The indexes themselves are written by the analysis job {kind: 'index-video-clips', yaml}.
+   */
+  videoIndexStatus: (yaml, opts) => post('/api/video-index/status', { yaml }, opts),
+  /**
    * Measure how one ground-truth image and its low-quality image line up (runs on the trainer
    * machine's CPU when asked, never during training). {gt, lq, scale?, radius?, gtKey?, lqKey?}; the
    * answer is drawn by the Data screen's alignment panel (views/data.js), which names its fields.
@@ -240,7 +249,20 @@ export const api = {
   /** Starts training now. 422 carries `issues`; 409 means the trainer is occupied by the queue. */
   startRun: (yaml, requestId, opts) => post('/api/runs', compact({ yaml, requestId }), opts),
   stopRun: (id, opts) => post('/api/runs/stop', { id }, opts),
-  /** `params.trainWorkers` (a positive integer) only for a run whose detail says `resumeWorkerOverride: true`. */
+  /**
+   * Ask the trainer of a run in training to write a full checkpoint now, where the run's detail (or
+   * monitor answer) says `canSaveCheckpoint: true`. `previousRequestId` is the id of the newest
+   * `checkpointRequest` this page has seen, or null: a new save starts only when that one is finished, so
+   * a repeated call shares one save. => {id, status: 'pending'|'saved'|'failed', iteration?, error?}
+   * (the request, not the run). The outcome arrives in `checkpointRequest` of the run and its monitor.
+   */
+  saveCheckpoint: (id, attemptId, previousRequestId, opts) => post('/api/runs/checkpoint', { id, attemptId, previousRequestId: previousRequestId ?? null }, opts),
+  /**
+   * `params.trainWorkers` (a positive integer) only for a run whose detail says `resumeWorkerOverride: true`.
+   * `params.batchSize` (a positive integer) and `params.learningRates` ({g?, d?, ae?}, each a number 0 or
+   * more) only for a run whose detail has `resumeSettings: {batchSize: number|null, learningRates: {g?, d?,
+   * ae?: number|null}}`, and only the values that differ from it.
+   */
   resumeRun: (id, params, opts) => post('/api/runs/resume', { id, ...params }, opts),
   /**
    * Logged history of one attempt. Without `metric`: the list of series. With it: its points.

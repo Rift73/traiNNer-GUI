@@ -218,7 +218,9 @@ function createView(el, initialParam) {
     // Speed and the trainer's estimate only while the run is active: afterwards they are the last, stale values.
     const tele = [];
     if (st.active && Number.isFinite(run.iterationsPerSecond)) tele.push(`${fmt.num(run.iterationsPerSecond, 3)} it/s`);
-    if (st.active && typeof run.eta === 'string' && run.eta) tele.push(`trainer's estimate ${run.eta}`);
+    // The same words as the run's overview: the finish time when the service dated the estimate, else the time left alone.
+    const eta = st.active ? fmt.eta(run.eta, run.estimatedFinishAt) : '';
+    if (eta) tele.push(`ETA ${eta}`);
     row.telemetry.hidden = !tele.length;
     setText(row.telemetry, tele.join(', '));
     const from = run.source === 'archive' ? runSourceLabel(run) : '';

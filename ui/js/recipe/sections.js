@@ -32,7 +32,7 @@ export const INTERNAL = new Set([
 ]);
 
 export const DATASET_FIRST = ['name', 'type', 'dataroot_gt', 'dataroot_lq', 'lq_size', 'gt_size', 'batch_size_per_gpu', 'accum_iter', 'num_worker_per_gpu', 'use_hflip', 'use_rot'];
-export const PATH_FIRST = ['pretrain_network_g', 'param_key_g', 'strict_load_g', 'pretrain_network_d', 'strict_load_d', 'resume_state'];
+export const PATH_FIRST = ['pretrain_network_g', 'param_key_g', 'strict_load_g', 'neuflow_weights', 'pretrain_network_d', 'strict_load_d', 'resume_state'];
 export const TRAIN_FIRST = ['total_iter', 'warmup_iter', 'ema_decay', 'grad_clip', 'grad_clip_max_norm', 'ema_switch_iter', 'ema_update_after_step', 'ema_power'];
 /** train.* objects shown as their own sub-headings with a generic editor */
 export const TRAIN_OBJECTS = ['optim_g', 'optim_d', 'scheduler'];
@@ -198,13 +198,15 @@ export function shape(v, depth = 0) {
 export function sectionSignature(id, c, layout, hasCatalog) {
   switch (id) {
     case 'datasets':
-      return shape(c.datasets);
+      // The type too: a video clip dataset has its own panel and its own words.
+      return JSON.stringify([shape(c.datasets), isPlainObject(c.datasets) ? Object.values(c.datasets).map((d) => String(d?.type ?? '').toLowerCase()) : null]);
+    case 'pretrained':
+      // The network decides whether the RDUAL guide opens the section.
+      return JSON.stringify([shape(c.path), String(c.network_g?.type ?? '').toLowerCase()]);
     case 'network':
       return JSON.stringify([c.network_g?.type, c.network_ae?.type, shape(c.network_g), shape(c.network_d), shape(c.network_g_teacher), shape(c.network_ae), hasCatalog]);
     case 'basics':
       return JSON.stringify([typeof c.task === 'string' ? c.task : null, shape(c.task_options), hasCatalog]);
-    case 'pretrained':
-      return shape(c.path);
     case 'training':
       return shape(isPlainObject(c.train) ? { ...c.train, losses: null } : c.train);
     case 'losses': {

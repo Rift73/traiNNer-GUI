@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from sys import float_info
 from typing import TYPE_CHECKING
 
 from .tasks import task_name
 
 if TYPE_CHECKING:
     from .options import ReduxOptions
+
+
+def recipe_learning_rate(value: object) -> float | None:
+    """Read a finite, nonnegative numeric LR from a recipe or API request."""
+    if type(value) is not int and type(value) is not float:
+        return None
+    return float(value) if 0 <= value <= float_info.max else None
 
 
 def resume_recipe(opt: ReduxOptions) -> dict:

@@ -84,6 +84,22 @@ distinct `train.vosr_target` and `vosrloss` modes and their runtime assets.
   new run with a fresh compatible discriminator; do not reuse discriminator
   optimizer state. Generator pretrained weights can still be reused.
 
+  For an RGB GAN recipe, choose one of these in **Network → network_d → type**.
+  Start with fresh discriminator weights and optimizer state when switching types.
+
+  - `msa_discriminator` combines channel and spatial attention on the quarter-, half- and full-resolution skips of a U-Net. It returns one dense logit map. The default base width is 64. [MSA-ESRGAN paper](https://doi.org/10.1038/s41598-024-78813-5)
+  - `dual_discriminator` adds DUAL neighborhood attention to the stride-eight DUnet features. Defaults are `num_feat: 64`, `context_heads: 2`, and `context_window: 16`. The dense head scores individual output pixels.
+  - `sed` selects U+SeD. Its frozen CLIP RN50 encoder computes features once from the
+    paired HR crop and shares them across the generator, real and fake discriminator
+    passes. Use RGB crops with both HR dimensions divisible by 16. Leave
+    `network_d.encoder_weights` unset to use `~/.cache/clip/RN50.pt` in the trainer's
+    WSL distribution. If the cache file is missing, the trainer downloads the official
+    archive when it first initializes the encoder. To use an existing local copy,
+    set `network_d.encoder_weights` to its WSL path. For example, a file on the Windows
+    F drive is under `/mnt/f/`. An explicit path must exist. The trainer checks the
+    archive's SHA-256 before loading it.
+    [SeD](https://github.com/lbc12345/SeD) · [OpenAI RN50 weights](https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt)
+
 ### network_ae
 
   The options for the autoencoder model.

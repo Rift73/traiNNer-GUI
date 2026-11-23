@@ -259,6 +259,113 @@
   padding: var(--s3) var(--gutter) var(--gutter);
 }
 
+/* Provenance: records nested two and three deep. A nested list (runs__prov-group) and a long value
+   (runs__prov-long) go under their name at the full width, the list indented behind a rule; short
+   values stay beside their names. js/runs/provenance.js puts the classes on both halves of an entry. */
+.runs__prov-attempt,
+.runs__prov-attempt > .stack {
+  gap: var(--s5);
+}
+
+.runs__prov-title {
+  font-size: var(--text-md);
+}
+
+.runs__prov-kv {
+  row-gap: var(--s2);
+}
+
+.runs__prov-kv > .runs__prov-group,
+.runs__prov-kv > .runs__prov-long {
+  grid-column: 1 / -1;
+}
+
+.runs__prov-kv > dd.runs__prov-group,
+.runs__prov-kv > dd.runs__prov-long {
+  margin-top: calc(2px - var(--s2));
+}
+
+.runs__prov-kv > dt.runs__prov-group {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.runs__prov-kv > dd.runs__prov-group {
+  padding-left: var(--s3);
+  border-left: 2px solid var(--rule);
+}
+
+/* a figure is never split between its digits */
+.runs__prov-kv > dd.runs__prov-num {
+  white-space: nowrap;
+}
+
+/* A list of records (the feature assets): one under the other, a hairline between. */
+ol.runs__prov-list {
+  gap: var(--s2);
+  padding: 0;
+  list-style: none;
+}
+
+ol.runs__prov-list > li + li {
+  padding-top: var(--s2);
+  border-top: 1px solid var(--rule);
+}
+
+/* Installed packages: the name takes the room, the version keeps to the right. */
+.runs__prov-packages {
+  grid-template-columns: minmax(0, 1fr) fit-content(40%);
+}
+
+/* Inputs: each row a record. The option, the path under it at the full width, then size and time, each
+   with its name (the column heads are kept for a screen reader only). */
+.runs__prov-inputs,
+.runs__prov-inputs tbody,
+.runs__prov-inputs tr,
+.runs__prov-inputs th,
+.runs__prov-inputs td {
+  display: block;
+}
+
+.runs__prov-inputs thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.runs__prov-inputs tbody > tr {
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.table.runs__prov-inputs tbody th,
+.table.runs__prov-inputs tbody td {
+  position: static;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.runs__prov-inputs tbody th {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.runs__prov-inputs tbody td {
+  margin-top: 2px;
+}
+
+.runs__prov-inputs td[data-label]::before {
+  content: attr(data-label);
+  margin-right: var(--s2);
+  color: var(--ink-3);
+}
+
 /* Validation: the run's tabs are what stays at the top; the Images / Scores switch scrolls with its
    content. One sample: its two pickers side by side, then a stage nearly as tall as the screen. */
 .val__viewbar {
@@ -814,4 +921,79 @@
 .studies__cell-link,
 .curricula__link-inline {
   min-width: var(--control-h);
+}
+
+/* ───────── training videos (js/recipe/video-prep.js) ───────── */
+
+/* Brought to the top of the screen (revealVideoPanel): clear of the row that stays at the top, as .fld is. */
+.vprep {
+  scroll-margin-top: 76px;
+}
+
+/* One column: the buttons go under the path, and every control is a finger high. */
+.vprep__source {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.vprep__btn {
+  min-height: var(--control-h);
+}
+
+.vprep__summary {
+  padding: var(--s2) 0;
+}
+
+/* ───────── tables: figures stay whole, a wide table pans in its own frame ───────── */
+/* css/mobile.css lets text break inside a word, so a path cannot run off the screen. In a table cell
+   squeezed to a few pixels that also breaks a number between its digits. These four tables keep their
+   figures on one line; where that needs more than the screen is wide, the table pans, not the page. */
+
+/* Recipe, Compare (js/recipe/source-pane.js): an option, two values and the action do not fit a phone.
+   The table keeps a width its values can be read at and pans sideways inside .src__scroll; the state and
+   "Use B's value" are the last column of the same pan. The last column's heading is words for a screen
+   reader only, placed out of flow: the table is what it is placed in, so it pans with the table instead
+   of making the whole screen wider. */
+.src__table {
+  position: relative;
+  min-width: 40rem;
+}
+
+/* Data, counts per folder pair (js/views/data.js): 52 px columns leave a count 28 px, which splits 14,642.
+   Nine figures wide with slim sides holds a count and the word "Paired"; the folders keep the rest. The
+   first column is as wide as its heading, "Pair", which 40 px with full sides broke in two. */
+.data__countcol {
+  width: 9ch;
+}
+
+.data__roots th:nth-child(n + 3),
+.data__roots td:nth-child(n + 3) {
+  padding-right: var(--s1);
+  padding-left: var(--s1);
+}
+
+.data__rootcol {
+  width: calc(4ch + var(--s3) + var(--s1));
+}
+
+.data__roots th:first-child,
+.data__roots td:first-child {
+  padding-right: var(--s1);
+}
+
+/* Runs, Training samples, detection boxes (js/runs/samples.js): six columns of corners are wider than a
+   phone. As grid items the block and the slot grow to the table's width and are cut off at the edge of
+   the run; held to the column, the table pans inside its own frame (.samples__table-wrap). */
+.samples__detection,
+.samples__boxes {
+  min-width: 0;
+}
+
+.samples__boxes {
+  max-width: 100%;
+}
+
+/* Runs, Files, disk space (js/runs/storage.js): a size is its number and its unit, "1.89 GB", on one line.
+   The saves table is as wide as that makes it and pans inside its own frame (.storage__table-wrap). */
+.storage span.num {
+  white-space: nowrap;
 }

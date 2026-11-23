@@ -117,7 +117,7 @@ def input_paths(config: dict):
     paths = config.get("path")
     if isinstance(paths, dict):
         for key, val in paths.items():
-            if val is not None and (key.startswith("pretrain_network_") or key == "resume_state"):
+            if val is not None and (key.startswith("pretrain_network_") or key in ("resume_state", "neuflow_weights")):
                 yield ["path", key], val
 
 
@@ -127,7 +127,16 @@ def launch_text(text: str, config: dict, root: Path) -> str:
     for key, value in input_paths(config):
         if isinstance(value, str) and (value.startswith(("~", "\\\\", "//")) or
                                        (len(value) > 2 and value[1:2] == ":")):
-            edits.append({"path":key, "value":str(local_path(value, root))})
+            if key == ["path", "neuflow_weights"]:
+                from trainner_config.rdual import rdual_neuflow_required
+                from .run_checkpoints import import_sources, rdual_options
+                opt = rdual_options(config)
+                if opt is None:
+                    continue
+                companions = import_sources(config, root) if opt.path.resume_state else None
+                if rdual_neuflow_required(opt, root, resolve_path=local_path, resume_files=companions) is False:
+                    continue
+            edits.append({"path": key, "value": str(local_path(value, root))})
     return render(text, edits) if edits else text
 
 
@@ -289,13 +298,22 @@ def preflight(text: str, library: RecipeLibrary) -> dict[str, Any]:
 
         objectives = resolve_objectives(opt)
         metrics = opt.val.metrics if opt.val and opt.val.val_enabled and opt.val.metrics_enabled else None
-        assets = feature_assets(objectives, metrics, library.root)
+        assets = feature_assets(objectives, metrics, library.root, network_d=opt.network_d)
         if assets:
             summary["featureAssets"] = assets
         for item in assets:
             if item["status"] == "present":
                 continue
-            if item["provider"] == "checkout":
+            if item["provider"] == "OpenAI CLIP RN50":
+                if item["status"] == "missing" and item["autoDownload"]:
+                    issue(item["usedBy"][0],
+                          f"SeD will download the official OpenAI CLIP RN50.pt to {item['file']} on first use.",
+                          "warning")
+                else:
+                    issue(item["usedBy"][0],
+                          f"SeD needs the official OpenAI CLIP RN50.pt. The file at {item['file']} "
+                          f"is {item['status']}. Set network_d.encoder_weights to a readable local copy.")
+            elif item["provider"] == "checkout":
                 issue(item["usedBy"][0], f"Required bundled coefficient file is {item['status']}: {item['file']}")
             else:
                 issue(item["usedBy"][0],
@@ -481,7 +499,25 @@ def preflight(text: str, library: RecipeLibrary) -> dict[str, Any]:
         zip_splits.add(phase)
         for field, message in _zip_dataset_issues(dataset, library.root):
             issue(f"datasets.{phase}.{field}", message)
+    rdual = str(summary["architecture"]).lower() == "rdual"
+    indexed_train = isinstance(ds, dict) and str(ds.get("type", "")).lower() == "videoclipdataset"
+    if indexed_train and ds.get("dataroot_gt"):
+        from .video_indexing import index_inputs, inspect_inputs
+        try:
+            indexed = inspect_inputs(index_inputs(config, library.root))
+            if indexed["pending"]:
+                sample = next(item for item in indexed["files"] if item["status"] != "ready")
+                issue("datasets.train.dataroot_gt",
+                      f'{indexed["ready"]} of {indexed["total"]} video indexes ready. {sample["reason"]}')
+        except (OSError, ValueError) as exc:
+            issue("datasets.train.dataroot_gt", exc)
     for path, val in input_paths(config):
+        if path[0] == "path" and (path[1] == "neuflow_weights" or
+                rdual and (path[1] in ("pretrain_network_g", "pretrain_network_g_ema")
+                           or opt.path.resume_state and path[1].startswith("pretrain_network_"))):
+            continue  # RDUAL resolves active generator/flow assets after full-state selection below.
+        if indexed_train and path[:3] == ["datasets", "train", "dataroot_gt"]:
+            continue  # The shared clip inventory accepts folders and explicit video files.
         if path[0] == "datasets":
             phase, field = path[1:3]
             if phase.split("_", 1)[0] == "val" and not validation_enabled:
@@ -514,5 +550,23 @@ def preflight(text: str, library: RecipeLibrary) -> dict[str, Any]:
             issues.extend(resume_issues)
         except (OSError, ValueError) as exc:
             issue("path.resume_state", exc)
+    if rdual:
+        from trainner_config.official_weights import neuflow_cache_path
+        from trainner_config.rdual import preflight_rdual
+        resume_files = summary.get("resume", {}).get("files")
+        opt.auto_resume = False  # Managed launches use an explicit numbered state.
+        rdual_issues, inputs = preflight_rdual(opt, library.root, resolve_path=local_path, resume_files=resume_files)
+        for field, message in rdual_issues:
+            if not any(item["path"] == field and item["message"] == message for item in issues):
+                issue(field, message)
+        flow_field = "path.neuflow_weights"
+        if opt.path.neuflow_weights is None and (flow := inputs.get(flow_field)) == neuflow_cache_path():
+            if not any(field == flow_field for field, _ in rdual_issues):
+                try:
+                    flow.stat()
+                except FileNotFoundError:
+                    issue(flow_field, f"RDUAL will download official NeuFlow v2 weights to {flow} on first use.", "warning")
+                except OSError as exc:
+                    issue(flow_field, exc)
     return {"ok":all(i["level"] != "error" for i in issues), "summary":summary,
             "issues":issues, "config":config}

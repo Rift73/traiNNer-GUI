@@ -14,14 +14,12 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
-from safetensors.torch import load_file
 from torch import Tensor, nn
 
 from traiNNer.archs.rsr_arch import RSR
 from traiNNer.models.rdual_model import (
     ENCODE_CHUNK,
     GRAD_CHUNK,
-    NEUFLOW_PRETRAIN_PATH,
     RDUALModel,
     clip_training_problems,
 )
@@ -64,22 +62,7 @@ class RSRModel(RDUALModel):
             if collect_before_capture else nullcontext()
         )
         if bare.temporal_read == "aligned":
-            # The generator and its EMA copy exist and the pretrain is loaded:
-            # every copy whose checkpoint lacked the frozen flow gets the
-            # upstream weights.
-            networks = [bare]
-            if self.net_g_ema is not None:
-                networks.append(self.net_g_ema.ema_model)
-            missing = [net for net in networks if not bool(net.flow_loaded)]
-            if missing:
-                if not os.path.exists(NEUFLOW_PRETRAIN_PATH):
-                    raise FileNotFoundError(
-                        "The aligned RSR checkpoint has no NeuFlow v2 weights and "
-                        f"{NEUFLOW_PRETRAIN_PATH} does not exist"
-                    )
-                flow_weights = load_file(NEUFLOW_PRETRAIN_PATH, device="cpu")
-                for net in missing:
-                    net.load_flow_weights(flow_weights)
+            self._prepare_neuflow(bare)
         return bare.step_functions(compile)
 
     def model_to_device(

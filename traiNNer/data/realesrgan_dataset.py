@@ -11,6 +11,7 @@ from multiprocessing.util import Finalize
 import numpy as np
 import pyvips
 import torch
+from trainner_config.options import OTF_IMAGE_BACKENDS
 from trainner_data.lmdb import PairedLmdbReader
 from trainner_data.manifests import lmdb_keys, manifest_filename
 from trainner_data.zip_images import ZipImageReader
@@ -328,6 +329,8 @@ class RealESRGANDataset(BaseDataset):
         self.lmdb: PairedLmdbReader | None = None
         self.storage: list[str] = []
         backend = opt.io_backend["type"]
+        if backend not in OTF_IMAGE_BACKENDS:
+            raise ValueError(f"Unsupported OTF image storage {backend!r}.")
         self.gt_folders = opt.dataroot_gt
         if backend == "zip":
             from trainner_data.zip_images import validate_zip_dataset
@@ -361,8 +364,6 @@ class RealESRGANDataset(BaseDataset):
                 self.paths.extend(keys)
                 self.storage.extend([folder] * len(keys))
             return
-        if backend not in ("disk", "zip"):
-            raise ValueError(f"Unsupported OTF image storage {backend!r}.")
 
         manifest_paths = None
         if opt.meta_info is not None:

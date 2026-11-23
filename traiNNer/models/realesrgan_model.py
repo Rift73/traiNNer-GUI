@@ -12,6 +12,7 @@ import torch
 import torchvision
 from torch import Tensor, nn
 from torch.nn import functional as F  # noqa: N812
+from trainner_config.options import OTF_DEGRADATIONS
 
 from traiNNer.data.codec_approx import (
     approximate_video,
@@ -26,7 +27,6 @@ from traiNNer.data.degradations import (
     resize_pt,
 )
 from traiNNer.data.dvd_response import dvd_pair
-from traiNNer.data.neosr_sample_stages import clean_resize, sample_mask, sharpen_samples
 from traiNNer.data.gpu_degradations import (
     channel_shift_pt,
     chroma_shift_pt,
@@ -43,6 +43,7 @@ from traiNNer.data.gpu_degradations import (
     scanline_pt,
     temporal_ghosting_pt,
 )
+from traiNNer.data.neosr_sample_stages import clean_resize, sample_mask, sharpen_samples
 from traiNNer.data.otf_degradations import (
     apply_dithering,
     apply_dithering_palette,
@@ -216,6 +217,9 @@ class RealESRGANModel(SRModel):
         batch could not have different resize scaling factors. Therefore, we employ this training pair pool
         to increase the degradation diversity in a batch.
 
+        A zero queue size disables the pool. Positive sizes are rounded down
+        to whole batches, with space for at least one batch.
+
         The pool stays in place: queue_order maps each logical position to its
         slot. Once the pool is full, each call shuffles the logical order with
         one permutation and exchanges only the batch's slots, the first b
@@ -230,6 +234,9 @@ class RealESRGANModel(SRModel):
         the byte pool and the new FP32 allocation briefly coexist. GT and the
         logical permutation are independent of LQ storage.
         """
+
+        if self.queue_size == 0:
+            return
 
         assert self.lq is not None
         assert self.gt is not None
@@ -267,28 +274,37 @@ class RealESRGANModel(SRModel):
             self._queue_lq_lut = lut = None
 
         if self.queue_lr is None:
-            assert self.queue_size % b == 0, (
-                f"queue size {self.queue_size} should be divisible by batch size {b}"
-            )
+            if self.queue_size < 0:
+                raise ValueError("RealESRGAN queue_size must be nonnegative.")
+            capacity = max(b, self.queue_size // b * b)
+            if capacity != self.queue_size:
+                get_root_logger().warning(
+                    "RealESRGAN pair pool capacity is %d for batch size %d "
+                    "(configured queue_size=%d).",
+                    capacity,
+                    b,
+                    self.queue_size,
+                )
             self.queue_lr = torch.zeros(
-                self.queue_size, c, h, w, device=self.lq.device, dtype=incoming.dtype
+                capacity, c, h, w, device=self.lq.device, dtype=incoming.dtype
             )
             self._queue_lq_lut = lut
             _, c, h, w = self.gt.size()
             self.queue_gt = torch.zeros(
-                self.queue_size, c, h, w, device=self.gt.device, dtype=self.gt.dtype
+                capacity, c, h, w, device=self.gt.device, dtype=self.gt.dtype
             )
             self.queue_ptr = 0
             # Filling writes the slots in order, so the logical order starts as
             # the slot order.
-            self.queue_order = torch.arange(self.queue_size)
-        if self.queue_ptr == self.queue_size:  # the pool is full
+            self.queue_order = torch.arange(capacity)
+        capacity = self.queue_lr.size(0)
+        if self.queue_ptr == capacity:  # the pool is full
             # do dequeue and enqueue
             # shuffle the logical order
             assert self.queue_lr is not None
             assert self.queue_gt is not None
             assert self.queue_order is not None
-            idx = torch.randperm(self.queue_size)
+            idx = torch.randperm(capacity)
             self.queue_order = self.queue_order[idx]
             # slots of the first b logical positions
             picked = self.queue_order[0:b]
@@ -365,11 +381,7 @@ class RealESRGANModel(SRModel):
         combos = self.opt.otf_degradation_combos
         if combos is None:
             # No combo system configured — all degradations eligible
-            return {
-                "ntsc", "rainbow", "ghosting", "interlace", "scanline",
-                "lowpass", "overshoot", "shift", "subsampling", "dithering",
-                "compress", "hf_noise", "nlmeans",
-            }
+            return set(OTF_DEGRADATIONS)
 
         active: set[str] = set()
 

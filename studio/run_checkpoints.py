@@ -10,12 +10,16 @@ import shutil
 import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import run_observe as observe
 from .paths import artifact_version, local_path
 from .workspace import WindowsProject
 from .yaml_edit import read_recipe, render
+
+if TYPE_CHECKING:
+    from trainner_config.options import ReduxOptions
+
 
 NUMBERED_STATE = re.compile(r"([1-9][0-9]{0,18})\.state")
 
@@ -197,11 +201,46 @@ def import_sources(config: dict[str, Any], root: Path) -> dict[str, Path]:
     return paths
 
 
+def rdual_options(config: dict) -> ReduxOptions | None:
+    network = config.get("network_g")
+    if not isinstance(network, dict) or str(network.get("type", "")).lower() != "rdual":
+        return None
+    import msgspec
+    from trainner_config.options import ReduxOptions
+
+    opt = msgspec.convert(config, type=ReduxOptions, strict=True)
+    opt.is_train = True
+    # Studio selects the latest state by writing its explicit numbered path.
+    opt.auto_resume = False
+    return opt
+
+
+def _rdual_import_inputs(
+    opt: ReduxOptions, root: Path, checkpoint: dict[str, Path]
+) -> dict[str, Path]:
+    from trainner_config.rdual import preflight_rdual
+
+    issues, inputs = preflight_rdual(opt, root, resolve_path=local_path, resume_files=checkpoint)
+    if issues:
+        raise ValueError("\n".join(f"{field}: {message}" for field, message in issues))
+    return {field.removeprefix("path."): path.resolve() for field, path in inputs.items()}
+
+
 def prepare_import(
     text: str, config: dict[str, Any], root: Path, experiment: Path
 ) -> tuple[str, list[dict[str, Any]]]:
     paths = import_sources(config, root)
-    plan = _import_plan(paths, paths, None)
+    extras = {}
+    if (opt := rdual_options(config)) is not None:
+        inputs = _rdual_import_inputs(opt, root, paths)
+        if "neuflow_weights" in inputs:
+            from trainner_config.rdual import resolve_neuflow_weights
+
+            # The trainer verifies the official cache at startup. Local
+            # fallbacks keep their private copy in the imported experiment.
+            if not resolve_neuflow_weights(opt, root, local_path).official:
+                extras["neuflow_weights"] = inputs["neuflow_weights"]
+    plan = _import_plan({**extras, **paths}, paths, None)
     installed = {item["option"]: experiment / item["path"] for item in plan}
     return _with_paths(text, installed, config), plan
 
@@ -212,20 +251,21 @@ def _import_plan(
     experiment = checkpoint["resume_state"].parent.parent if checkpoint else None
     plan = []
     for role, source in paths.items():
-        info = source.stat()
         relative = (
             source.relative_to(experiment)
             if role in checkpoint
             else Path("reproduction-inputs") / role / source.name
         )
-        entry = {
-            "option": role,
-            "source": str(source),
-            "path": str(relative),
-            "version": _stamp(info),
-        }
-        if pins is not None:
-            pin = pins[role]
+        entry = {"option": role, "source": str(source), "path": str(relative)}
+        pin = pins[role] if pins is not None else None
+        if pin is not None and "fileVersion" not in pin:
+            if entry["source"] != pin["path"]:
+                raise ValueError("The official NeuFlow cache path changed. Prepare the recipe again.")
+            plan.append({**entry, "downloadNeuflow": True, "sha256": pin["sha256"]})
+            continue
+        info = source.stat()
+        entry["version"] = _stamp(info)
+        if pin is not None:
             if (
                 not stat.S_ISREG(info.st_mode)
                 or str(source) != pin["path"]
@@ -243,7 +283,7 @@ def _import_plan(
         state = checkpoint["resume_state"]
         weights = [path for role, path in checkpoint.items() if role != "resume_state"]
         if not matches_published_weights(state, weights):
-            writes = {item["option"]: item["version"][3] for item in plan}
+            writes = {item["option"]: item["version"][3] for item in plan if item["option"] in checkpoint}
             if any(writes[role] > writes["resume_state"] for role in checkpoint):
                 raise ValueError(
                     "The source models are newer than the training state. Select a completed checkpoint."
@@ -255,12 +295,38 @@ def prepared_import_plan(config: dict, root: Path, pins: dict) -> list[dict]:
     """Resolve roles from trainer inputs, including implicit full-state companions."""
     from .preflight import input_paths
 
-    paths = {
-        field[1]: local_path(value, root).resolve()
-        for field, value in input_paths(config)
-        if field[0] == "path"
-    }
-    checkpoint = import_sources(config, root) if "resume_state" in paths else {}
+    checkpoint = import_sources(config, root) if (config.get("path") or {}).get("resume_state") else {}
+    opt = rdual_options(config)
+    paths = {}
+    for field, value in input_paths(config):
+        if field[0] != "path":
+            continue
+        role = field[1]
+        if role == "neuflow_weights":
+            continue
+        if opt is not None and (
+            role in {"pretrain_network_g", "pretrain_network_g_ema"}
+            or (checkpoint and role.startswith("pretrain_network_"))
+        ):
+            continue
+        paths[role] = local_path(value, root).resolve()
+    if opt is not None:
+        paths.update(_rdual_import_inputs(opt, root, checkpoint))
+        if "neuflow_weights" in pins and "neuflow_weights" not in paths:
+            from trainner_config.rdual import neuflow_weights_path, rdual_neuflow_required
+
+            # A recorded replay may pin the fallback used with an older PTH
+            # whose embedded-flow value cannot be determined without loading it.
+            required = rdual_neuflow_required(opt, root, resolve_path=local_path, resume_files=checkpoint)
+            if required is None:
+                paths["neuflow_weights"] = neuflow_weights_path(opt, root, local_path).resolve()
+        flow_pin = pins.get("neuflow_weights")
+        if flow_pin is not None and "fileVersion" not in flow_pin and "neuflow_weights" in paths:
+            from trainner_config.official_weights import neuflow_cache_path
+
+            if opt.path.neuflow_weights is not None:
+                raise ValueError("Expected an implicit NeuFlow default. Prepare the recipe again.")
+            paths["neuflow_weights"] = neuflow_cache_path()
     for role, source in checkpoint.items():
         if paths.get(role, source) != source:
             raise ValueError(
@@ -516,6 +582,14 @@ def stage_import(
             if (control / "stop").exists():
                 return False
             source = Path(entry["source"])
+            if entry.get("downloadNeuflow"):
+                from trainner_config.official_weights import ensure_neuflow, neuflow_cache_path
+
+                if source != neuflow_cache_path():
+                    raise ValueError("The official NeuFlow cache path changed. Prepare the recipe again.")
+                print(f"Verifying official NeuFlow v2 weights at {source} for replay.", flush=True)
+                source = ensure_neuflow().resolve(strict=True)
+                entry.update(source=str(source), version=_version(source))
             destination = staged / entry["path"]
             destination.parent.mkdir(parents=True, exist_ok=True)
             _copy_checkpoint(source, destination, entry)

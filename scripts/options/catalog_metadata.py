@@ -3,13 +3,14 @@
 import ast
 import inspect
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal, get_args, get_origin
 
 from studio.recipes import template_catalog_index
 from traiNNer.archs import ARCH_REGISTRY, SPANDREL_REGISTRY, TESTARCH_REGISTRY
 from traiNNer.metrics import METRIC_REGISTRY, requires_reference
+from trainner_config.metrics import metric_direction
 
 
 def _json_default(value: object) -> object:
@@ -38,11 +39,17 @@ def _literal_choices(annotation: object) -> tuple:
     return ()
 
 
-def _parameters(factory: Callable[..., Any], supplied: set[str]) -> dict[str, Any]:
+def _parameters(
+    factory: Callable[..., Any],
+    supplied: set[str],
+    *,
+    fallback_choices: Mapping[str, tuple] | None = None,
+) -> dict[str, Any]:
     try:
         signature = inspect.signature(factory)
     except (ValueError, TypeError):
         return {"signatureAvailable": False, "parameters": []}
+    fallback_choices = fallback_choices or {}
     options = []
     accepts_extra = False
     for key, param in signature.parameters.items():
@@ -60,7 +67,7 @@ def _parameters(factory: Callable[..., Any], supplied: set[str]) -> dict[str, An
             except TypeError:
                 # An internal Torch sentinel or callable is not a YAML value.
                 pass
-        if choices := _literal_choices(param.annotation):
+        if choices := _literal_choices(param.annotation) or fallback_choices.get(key):
             try:
                 field["choices"] = _json_default(choices)
             except TypeError:
@@ -80,7 +87,12 @@ def _optimizer_metadata() -> list[dict]:
     optimizers = []
     for name in sorted(OPTIMIZER_REGISTRY.keys()):
         factory = OPTIMIZER_REGISTRY.get(name)
-        signature = _parameters(factory, {"params", "self", "type"})
+        # Null disables ADOPT clipping. Omission keeps its callable default.
+        signature = _parameters(
+            factory,
+            {"params", "self", "type"},
+            fallback_choices={"clip_lambda": (None,)} if name == "adopt" else None,
+        )
         if factory in AUTO_FUSED_OPTIMIZERS:
             for parameter in signature["parameters"]:
                 if parameter["name"] == "fused":
@@ -122,6 +134,33 @@ def _scheduler_metadata() -> list[dict]:
     return schedulers
 
 
+def _metric_metadata() -> list[dict]:
+    input_order = {"input_order": ("HWC", "CHW")}
+    fallback_choices = {
+        "calculate_psnr": input_order,
+        "calculate_ssim": input_order,
+        "calculate_neosr_topiq": {"dataset": ("kadid", "pipal")},
+    }
+    metrics = []
+    for name, factory in sorted(METRIC_REGISTRY):
+        signature = _parameters(
+            factory,
+            {"img", "img2", "device", "type", "better"},
+            fallback_choices=fallback_choices.get(name),
+        )
+        # Validation consumes ranking direction before calling the scorer.
+        signature["parameters"].append(
+            {
+                "name": "better",
+                "required": False,
+                "default": metric_direction({"type": name}),
+                "choices": ["higher", "lower"],
+            }
+        )
+        metrics.append({"id": name, "requiresReference": requires_reference(name), **signature})
+    return metrics
+
+
 def catalog_metadata() -> dict:
     arch_sources = {}
     for origin, registry in (("arch", ARCH_REGISTRY), ("spandrel", SPANDREL_REGISTRY), ("testarch", TESTARCH_REGISTRY)):
@@ -132,9 +171,5 @@ def catalog_metadata() -> dict:
         "templateSummaries": template_catalog_index(Path(__file__).resolve().parents[2]),
         "optimizers": _optimizer_metadata(),
         "schedulers": _scheduler_metadata(),
-        "metrics": [
-            {"id": name, "requiresReference": requires_reference(name),
-             **_parameters(factory, {"img", "img2", "device"})}
-            for name, factory in sorted(METRIC_REGISTRY)
-        ],
+        "metrics": _metric_metadata(),
     }

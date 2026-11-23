@@ -1,18 +1,32 @@
 """Episode index for clip training: frame timestamps, motion, shot cuts and the
 re-upscale error of sampled frames, from one decoding pass with PyAV.
 
-Also the RGB conversion of the decoded frames: 8-bit yuv420p, limited range,
-BT.709 matrix and left-sited chroma, set explicitly because the source carries
-no colour tags (FFmpeg would assume BT.601).
+Also the RGB conversion of 8-bit yuv420p frames with limited range, a BT.709
+matrix and left-sited chroma. Untagged video uses these same conventions.
 """
 
 import json
+import os
+import stat
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import av
 import numpy as np
 from av.video.frame import VideoFrame
+from trainner_data.file_version import artifact_version
+from trainner_data.video_indexes import (
+    INDEX_VERSION,
+    check_color,
+    clip_settings,
+    clip_stream,
+    index_path,
+    inspect_clips,
+    source_record,
+    video_stream,
+)
 
 from traiNNer.data.descale import descale, upscale
 
@@ -27,9 +41,13 @@ ERROR_EVERY = 8
 
 def open_video(path: str | Path, threads: int) -> av.container.InputContainer:
     container = av.open(str(path))
-    stream = container.streams.video[0]
-    stream.thread_type = "AUTO"
-    stream.codec_context.thread_count = threads
+    try:
+        stream = video_stream(container)
+        stream.thread_type = "AUTO"
+        stream.codec_context.thread_count = threads
+    except (ValueError, av.FFmpegError):
+        container.close()
+        raise
     return container
 
 
@@ -39,8 +57,7 @@ def _plane(frame: VideoFrame, i: int) -> np.ndarray:
 
 
 def _check_format(frame: VideoFrame) -> None:
-    if frame.format.name != "yuv420p":
-        raise ValueError(f"Expected yuv420p frames, got {frame.format.name}")
+    check_color(frame.format.name, frame.color_range, frame.colorspace)
 
 
 def luma(frame: VideoFrame) -> np.ndarray:
@@ -94,7 +111,7 @@ def yuv_window(
 def reduced_luma(frame: VideoFrame) -> np.ndarray:
     """The Y plane averaged over MOTION_REDUCTION-pixel blocks, 0..255 units."""
     y = _plane(frame, 0)
-    n = MOTION_REDUCTION
+    n = min(MOTION_REDUCTION, *y.shape)
     h, w = y.shape[0] // n * n, y.shape[1] // n * n
     blocks = y[:h, :w].reshape(h // n, n, w // n, n)
     return blocks.mean(axis=(1, 3), dtype=np.float32)
@@ -127,17 +144,24 @@ def find_cuts(
 
 
 def descale_error(
-    frame: VideoFrame, width: int, height: int, kernel: str, border: str
+    frame: VideoFrame,
+    width: int,
+    height: int,
+    kernel: str,
+    border: str,
+    descale_linear_light: str | None = None,
 ) -> float:
-    """99.9th percentile of the luma re-upscale error (0..1), descaled in the
-    stored domain. Frames with 1080p-native text or overlays score high."""
+    """99.9th percentile of the luma re-upscale error in stored values."""
     y = luma(frame)
     back = upscale(
-        descale(y, width, height, kernel, border=border),
+        descale(
+            y, width, height, kernel, border=border, linear_light=descale_linear_light
+        ),
         y.shape[1],
         y.shape[0],
         kernel,
         border=border,
+        linear_light=descale_linear_light,
     )
     error = np.abs(back - y).ravel()
     k = int(0.999 * (error.size - 1))
@@ -151,53 +175,158 @@ def index_video(
     kernel: str = "bilinear",
     border: str = "zero",
     threads: int = 4,
+    *,
+    descale_linear_light: str | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    settings = clip_settings(
+        {
+            "width": width,
+            "height": height,
+            "kernel": kernel,
+            "border": border,
+            "descale_linear_light": descale_linear_light,
+        }
+    )
+    if type(threads) is not int or threads < 1:
+        raise ValueError("Decoder threads must be a positive integer.")
+    if check_cancel is not None:
+        check_cancel()
+
+    source = Path(path).stat()
     pts: list[int] = []
     motion: list[float] = []
-    errors: list[dict[str, float]] = []
+    errors: list[dict[str, int | float]] = []
     with open_video(path, threads) as container:
         stream = container.streams.video[0]
+        metadata = clip_stream(stream, settings)
         previous = None
         for i, frame in enumerate(container.decode(stream)):
-            if frame.pts is None:
-                raise ValueError(f"{path}: frame {i} has no pts")
-            pts.append(int(frame.pts))
+            if check_cancel is not None:
+                check_cancel()
+            _check_format(frame)
+            if (frame.width, frame.height) != metadata.size:
+                raise ValueError(f"Frame dimensions changed at frame {i}.")
+            if frame.time_base != stream.time_base:
+                raise ValueError(f"Time base changed at frame {i}.")
+            if frame.pts is None or (pts and frame.pts <= pts[-1]):
+                raise ValueError(f"Missing or non-increasing timestamp at frame {i}.")
+            pts.append(frame.pts)
             small = reduced_luma(frame)
             motion.append(
                 0.0 if previous is None else float(np.abs(small - previous).mean())
             )
             previous = small
             if i % ERROR_EVERY == 0:
-                p999 = descale_error(frame, width, height, kernel, border)
+                p999 = descale_error(frame, **settings)
                 errors.append({"frame": i, "p999": p999})
-        time_base = stream.time_base
-    if np.any(np.diff(pts) <= 0):
-        raise ValueError(f"{path}: pts are not strictly increasing")
+    if check_cancel is not None:
+        check_cancel()
+    if not pts:
+        raise ValueError("The video stream has no decoded frames.")
     return {
+        "version": INDEX_VERSION,
+        "source": source_record(source, *metadata.size),
         "frames": len(pts),
-        "time_base": [time_base.numerator, time_base.denominator],
+        "time_base": list(metadata.time_base),
         "pts": pts,
         "motion": [round(m, 4) for m in motion],
         "cuts": find_cuts(motion),
         "cut_rule": {"floor": CUT_FLOOR, "ratio": CUT_RATIO, "window": CUT_WINDOW},
-        "descale": {
-            "width": width,
-            "height": height,
-            "kernel": kernel,
-            "border": border,
-        },
+        "descale": settings,
         "descale_error": errors,
     }
 
 
-def index_path(video: str | Path) -> Path:
-    video = Path(video)
-    return video.parent / "index" / f"{video.stem}.json"
+def _index_entry_version(path: Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+        raise ValueError(f"{path} must be a regular index file.")
+    return artifact_version(info)
+
+
+def _write_index(
+    video: Path, *, check_cancel: Callable[[], None] | None = None, **options: Any
+) -> tuple[Path, int]:
+    if check_cancel is not None:
+        check_cancel()
+    out = index_path(video)
+    source_version = artifact_version(video.stat())
+    previous_index = _index_entry_version(out)
+    out.parent.mkdir(exist_ok=True)
+    temporary = None
+    try:
+        data = index_video(video, check_cancel=check_cancel, **options)
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=out.parent, prefix=".writing-", delete=False
+        ) as file:
+            temporary = Path(file.name)
+            json.dump(data, file, allow_nan=False)
+            file.flush()
+            os.fsync(file.fileno())
+        if source_version != artifact_version(video.stat()):
+            raise ValueError(f"{video} changed during indexing. Prepare it again.")
+        if previous_index != _index_entry_version(out):
+            raise ValueError(
+                f"{out} changed during indexing. Check the current index and retry."
+            )
+        if check_cancel is not None:
+            check_cancel()
+        os.replace(temporary, out)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return out, data["frames"]
 
 
 def write_index(video: str | Path, **options: Any) -> Path:
-    out = index_path(video)
-    out.parent.mkdir(exist_ok=True)
-    data = index_video(video, **options)
-    out.write_text(json.dumps(data))
-    return out
+    """Build and atomically replace the selected video's sidecar."""
+    return _write_index(Path(video), **options)[0]
+
+
+def prepare_clips(
+    roots: Sequence[Path],
+    settings: Mapping[str, Any],
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    check_cancel: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Reuse ready indexes and rebuild missing or stale ones, one episode at a time."""
+    options = clip_settings(settings)
+    report = inspect_clips(roots, options, check_cancel=check_cancel, sample_limit=None)
+    if report["errors"]:
+        raise ValueError(report["errors"][0])
+    episodes = report["episodes"]
+    for row in episodes:
+        if row["status"] == "incompatible":
+            raise ValueError(row["message"])
+
+    total, skipped = report["total"], report["ready"]
+    for i, row in enumerate(episodes):
+        if check_cancel is not None:
+            check_cancel()
+        event = {"stage": "indexing", "total": total, "path": row["path"]}
+        if row["status"] == "ready":
+            action = "skipped"
+        else:
+            if progress is not None:
+                progress(dict(event, completed=i, action="indexing"))
+            path = Path(row["path"])
+            try:
+                _, frames = _write_index(path, check_cancel=check_cancel, **options)
+            except av.FFmpegError as exc:
+                raise ValueError(f"{path}: indexing failed: {exc}") from exc
+            row.pop("message", None)
+            row.update(status="ready", frames=frames, legacy=False)
+            action = "indexed"
+        if progress is not None:
+            progress(dict(event, completed=i + 1, action=action))
+    if progress is not None:
+        progress({"stage": "done", "completed": total, "total": total, "path": None})
+    report.update(
+        ready=total, missing=0, stale=0, indexed=total - skipped, skipped=skipped
+    )
+    report["episodes"] = episodes[:25]
+    return report

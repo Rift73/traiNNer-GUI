@@ -69,7 +69,7 @@ def make_exp_dirs(opt: ReduxOptions, is_resume: bool = False) -> None:
             mkdir_and_rename(path_opt.pop("results_root"))
     for key, path in path_opt.items():
         if (
-            key == "transfer_g"
+            key in {"transfer_g", "neuflow_weights"}
             or ("strict_load" in key)
             or ("pretrain_network" in key)
             or ("resume_state" in key)

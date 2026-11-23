@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 # The pinned dispatcher applies selected modes in this order, once per distinct name.
 NEOSR_BATCH_ORDER = ("cutmix", "mixup", "resizemix", "cutblur")
+NATIVE_BATCH_MODES = ("none", *NEOSR_BATCH_ORDER, "downup", "up")
 NEOSR_BATCH_FIELDS = ("augmentation", "aug_prob", "aug_multi_prob", "aug_antialias")
 
 
@@ -29,7 +30,7 @@ def validate_training_batchaug(opt: "ReduxOptions", task: str) -> None:
         weights = train.moa_probs
         if len(weights) != len(train.moa_augs) or not all(isfinite(w) and w >= 0 for w in weights) or not 0 < sum(weights) < float("inf"):
             raise ValueError("train.moa_probs needs one finite nonnegative weight per augmentation and a positive finite total.")
-        if any(mode not in ("none", "downup", "up", *NEOSR_BATCH_ORDER) and w for mode, w in zip(train.moa_augs, weights, strict=True)):
+        if any(mode not in NATIVE_BATCH_MODES and w for mode, w in zip(train.moa_augs, weights, strict=True)):
             raise ValueError("train.moa_augs contains an unknown native augmentation with a positive weight.")
         if size == 1:
             raise ValueError("Native batch augmentation requires batch_size_per_gpu above one.")

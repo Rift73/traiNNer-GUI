@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import yaml
@@ -59,9 +60,21 @@ def read_recipe(text: str) -> dict[str, Any]:
     return config
 
 
-def _flow(value: Any) -> str:
-    return yaml.dump(value, Dumper=Dumper, default_flow_style=True, allow_unicode=True,
-                     width=1_000_000, sort_keys=False).rstrip("\n").removesuffix("\n...")
+def _flow(value: Any, *, in_flow: bool = False, style: str | None = None) -> str:
+    # Let the emitter apply flow-sequence quoting rules to a string splice.
+    is_text = isinstance(value, str)
+    wrapped = in_flow and is_text
+    quote = style if is_text and style in ("'", '"') else None
+    text = yaml.dump(
+        [value] if wrapped else value,
+        Dumper=Dumper,
+        default_flow_style=True,
+        default_style=quote,
+        allow_unicode=True,
+        width=1_000_000,
+        sort_keys=False,
+    ).rstrip("\n").removesuffix("\n...")
+    return text[1:-1] if wrapped else text
 
 
 def _child(node: yaml.Node, key: str | int) -> yaml.Node:
@@ -82,6 +95,8 @@ def _assign(config: Any, path: list[str | int], value: Any) -> Any:
     if not path:
         return value
     key, *rest = path
+    if config is None and isinstance(key, str):
+        config = {}
     if isinstance(config, dict) and isinstance(key, str):
         return {**config, key: _assign(config.get(key, {}), rest, value)}
     if isinstance(config, list) and type(key) is int and 0 <= key < len(config):
@@ -149,8 +164,19 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
                 raise ValueError("This removal also affects an anchor or neighboring field. Edit it explicitly in YAML.")
             text, original = candidate, desired
             continue
-        desired = _assign(original, path, edit["value"])
-        if _same(desired, original):
+        value = edit["value"]
+        literal = edit.get("floatLiteral")
+        if literal is not None:
+            if (not isinstance(literal, str) or len(literal) > 128
+                    or not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]+", literal)
+                    or type(value) not in (int, float)):
+                raise ValueError("Provide a finite scientific-notation literal matching the numeric edit.")
+            number = float(literal)
+            if not math.isfinite(number) or number != value:
+                raise ValueError("The scientific-notation literal does not match the numeric edit.")
+            value = number
+        desired = _assign(original, path, value)
+        if literal is None and _same(desired, original):
             continue
         # Compose only for changed fields so comments, quotes and unrelated
         # hand-written options survive a form edit.
@@ -158,6 +184,12 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
         parent: Any = original
         wanted: Any = desired
         for offset, key in enumerate(path):
+            if parent is None and isinstance(node, yaml.ScalarNode):
+                # A bare key or explicit null can be populated like an absent optional block.
+                start, end = node.start_mark.index, node.end_mark.index
+                space = " " if start == end and text[start-1:start] == ":" else ""
+                candidate = text[:start] + space + _flow(wanted) + text[end:]
+                break
             try:
                 child = _child(node, key)
             except KeyError:
@@ -166,16 +198,22 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
                 first = node.start_mark
                 at = first.index - first.column
                 prefix = text[at:first.index]
-                if node.value and not node.flow_style and not prefix.strip():
+                if node.flow_style and text[first.index:first.index+1] == "{":
+                    # Splice into the braces so sibling comments and typed literals survive.
+                    insert = first.index + 1
+                    pair = _flow(key, in_flow=True) + ": " + _flow(wanted[key], in_flow=True)
+                    candidate = text[:insert] + pair + (", " if node.value else "") + text[insert:]
+                elif node.value and not node.flow_style and not prefix.strip():
                     patch = prefix + _flow(key) + ": " + _flow(wanted[key]) + "\n"
                     candidate = text[:at] + patch + text[at:]
                 else:
                     candidate = text[:first.index] + _flow(wanted) + text[node.end_mark.index:]
                 break
+            in_flow = bool(getattr(node, "flow_style", False))
             node, parent, wanted = child, parent[key], wanted[key]
             if offset == len(path) - 1:
                 start, end = node.start_mark.index, node.end_mark.index
-                replacement = _flow(wanted)
+                replacement = _flow(wanted, in_flow=in_flow, style=getattr(node, "style", None))
                 # A block collection or block scalar can consume the newline
                 # ending the final item. Keep the next key on its own line.
                 old = text[start:end]
@@ -184,6 +222,16 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
                 elif "\n" in old and end < len(text) and old.rsplit("\n", 1)[-1].strip() == "":
                     replacement += "\n" + old.rsplit("\n", 1)[-1]
                 candidate = text[:start] + replacement + text[end:]
+        if literal is not None:
+            # The edited path may have been inserted as part of a whole new mapping.
+            # Locate that scalar in the result so identical numbers elsewhere keep their spelling.
+            scalar = yaml.compose(candidate, Loader=Loader)
+            for key in path:
+                scalar = _child(scalar, key)
+            if not isinstance(scalar, yaml.ScalarNode):
+                raise ValueError("Scientific notation requires a numeric scalar.")
+            candidate = (candidate[:scalar.start_mark.index] + "!!float " + literal
+                         + candidate[scalar.end_mark.index:])
         if not _same(read_recipe(candidate), desired):
             raise ValueError("This edit also affects a YAML anchor or merged field. Edit it explicitly in YAML.")
         text, original = candidate, desired

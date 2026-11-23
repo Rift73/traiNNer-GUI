@@ -31,6 +31,19 @@ def is_phone_access_route(route: str) -> bool:
     return route == PHONE_ACCESS_ROUTE or route.startswith(PHONE_ACCESS_ROUTE + "/")
 
 
+def phone_qr_png(url: str) -> bytes:
+    import cv2
+
+    modules = cv2.QRCodeEncoder_create().encode(url)
+    # Use a white quiet zone and keep module edges sharp at a readable size.
+    bordered = cv2.copyMakeBorder(modules, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+    image = cv2.resize(bordered, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
+    ok, png = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("Could not encode the phone access QR code as PNG.")
+    return png.tobytes()
+
+
 def required(obj, key, kind=str):
     val = obj.get(key)
     if not isinstance(val, kind):
@@ -273,6 +286,9 @@ class Services:
             return self.analyses.submit(body)
         if route == "/api/analysis/cancel":
             return self.analyses.cancel(required(body, "id"))
+        if route == "/api/video-index/status":
+            from .video_indexing import video_index_status
+            return video_index_status(required(body, "yaml"), self.root)
         if route == "/api/data/alignment":
             from .alignment import inspect_pair
             return inspect_pair(body,self.root)
@@ -344,10 +360,22 @@ class Services:
                 raise RecipeRejected(check["issues"])
             return self.runs.start(launch_text(text, check["config"], self.root), request_id,
                                    input_precondition=condition)
+        if route == "/api/runs/checkpoint":
+            previous = body.get("previousRequestId")
+            if previous is not None and not isinstance(previous, str):
+                raise ValueError("previousRequestId must be a checkpoint request ID or null.")
+            return self.runs.request_checkpoint(required(body, "id"), required(body, "attemptId"), previous)
         if route == "/api/runs/stop":
             return self.runs.stop(required(body,"id"))
         if route == "/api/runs/resume":
-            return self.runs.resume(required(body,"id"), train_workers=body.get("trainWorkers"))
+            overrides = {}
+            if "batchSize" in body:
+                overrides["batch_size"] = required(body, "batchSize", int)
+            if "learningRates" in body:
+                overrides["learning_rates"] = required(body, "learningRates", dict)
+            return self.runs.resume(
+                required(body, "id"), train_workers=body.get("trainWorkers"), **overrides
+            )
         raise FileNotFoundError("Unknown API endpoint.")
 
 
@@ -440,16 +468,7 @@ class Handler(BaseHTTPRequestHandler):
         ):
             raise RuntimeError(invalid_url)
 
-        import cv2
-
-        modules = cv2.QRCodeEncoder_create().encode(url)
-        # Use a white quiet zone and keep module edges sharp at a readable size.
-        bordered = cv2.copyMakeBorder(modules, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
-        image = cv2.resize(bordered, None, fx=8, fy=8, interpolation=cv2.INTER_NEAREST)
-        ok, png = cv2.imencode(".png", image)
-        if not ok:
-            raise RuntimeError("Could not encode the phone access QR code as PNG.")
-        self._bytes(png.tobytes(), "image/png")
+        self._bytes(phone_qr_png(url), "image/png")
 
     def _dispatch(self):
         request = urlsplit(self.path)

@@ -140,6 +140,7 @@ class SRModel(BaseModel):
     """Base SR model for single image super-resolution."""
 
     d_conditioner: MediumCondition | LQCondition | None = None
+    sed_conditioner: nn.Module | None = None
     d_input_conditioning: bool = False
     _loss_schedules: dict[str, LossSchedule] | None = None
     _spike_clippers: dict[str, SpikeClip] | None = None
@@ -362,6 +363,11 @@ class SRModel(BaseModel):
                             "LQ-D enabled: shared detached degraded RGB only; "
                             "no HR-derived medium statistics."
                         )
+                    elif self.opt.network_d["type"].lower() == "sed":
+                        # Keep frozen HR features outside D's optimizer, checkpoint and phase toggles.
+                        self.sed_conditioner = self.net_d.build_conditioner().to(
+                            self.device, memory_format=self.memory_format
+                        ).eval()
                     # load pretrained models
                     if self.opt.path.pretrain_network_d is not None:
                         self.load_network(
@@ -497,10 +503,23 @@ class SRModel(BaseModel):
             for clipper in self._spike_clippers.values():
                 clipper.window.zero_()
 
-    def _discriminator_input(self, image: Tensor, condition: Tensor | None) -> Tensor:
+    def _discriminator_condition(self, gt: Tensor, lq: Tensor) -> Tensor | None:
+        if self.sed_conditioner is not None:
+            return self.sed_conditioner(gt)
+        if self.d_conditioner is None:
+            return None
         if isinstance(self.d_conditioner, LQCondition):
-            return lq_discriminator_input(image, condition)
-        return medium_discriminator_input(image, condition)
+            return self.d_conditioner(lq, (gt.shape[-2], gt.shape[-1]))
+        return self.d_conditioner(gt, lq if self.d_input_conditioning else None)
+
+    def _discriminate(self, image: Tensor, condition: Tensor | None) -> Tensor:
+        assert self.net_d is not None
+        if self.sed_conditioner is not None:
+            assert condition is not None
+            return self.net_d(image, condition)
+        if isinstance(self.d_conditioner, LQCondition):
+            return self.net_d(lq_discriminator_input(image, condition))
+        return self.net_d(medium_discriminator_input(image, condition))
 
     def _discard_accumulated_gradients(self) -> None:
         self._window_log_sums = None
@@ -1366,16 +1385,7 @@ class SRModel(BaseModel):
 
         n_samples = self.gt.shape[0]
         loss_dict: dict[str, Tensor | float] = OrderedDict()
-        d_condition: Tensor | None = None
-        if gan_active and self.d_conditioner is not None:
-            if isinstance(self.d_conditioner, LQCondition):
-                d_condition = self.d_conditioner(
-                    self.lq, (self.gt.shape[-2], self.gt.shape[-1])
-                )
-            else:
-                d_condition = self.d_conditioner(
-                    self.gt, self.lq if self.d_input_conditioning else None
-                )
+        d_condition = self._discriminator_condition(self.gt, self.lq) if gan_active else None
 
         lq = rgb2pixelformat_pt(
             self.lq, self.opt.input_pixel_format
@@ -1530,9 +1540,7 @@ class SRModel(BaseModel):
 
                     if label == "l_g_gan":
                         assert self.net_d is not None
-                        fake_g_pred = self.net_d(
-                            self._discriminator_input(adversarial_output, d_condition)
-                        )
+                        fake_g_pred = self._discriminate(adversarial_output, d_condition)
                         l_g_loss = loss(fake_g_pred, True, is_disc=False)
                         if multipliers is not None:
                             raw_gan_term = l_g_loss.detach()
@@ -1774,16 +1782,12 @@ class SRModel(BaseModel):
                     real_input = self.gt.detach()
                     if wavelet is not None:
                         real_input = wavelet(real_input)
-                    real_d_pred = self.net_d(
-                        self._discriminator_input(real_input, d_condition)
-                    )
+                    real_d_pred = self._discriminate(real_input, d_condition)
                     l_d_real = cri_gan(real_d_pred, True, is_disc=True)
                     loss_dict["l_d_real"] = l_d_real
                     loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
                     # fake
-                    fake_d_pred = self.net_d(
-                        self._discriminator_input(adversarial_output.detach(), d_condition)
-                    )
+                    fake_d_pred = self._discriminate(adversarial_output.detach(), d_condition)
                     l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
                     loss_dict["l_d_fake"] = l_d_fake
                     loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())

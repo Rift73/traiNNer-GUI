@@ -1,4 +1,3 @@
-import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,18 +10,23 @@ import torch
 from av.video.frame import VideoFrame
 from chainner_ext import ResizeFilter, resize
 from numpy.random import Generator
+from trainner_data.video_indexes import (
+    clip_paths,
+    clip_settings,
+    probe_clip,
+    read_clip_index,
+)
 
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.data.clip_hr import clip_axes
 from traiNNer.data.descale import descale, encode_light, linearize
-from traiNNer.data.video_index import index_path, open_video, to_rgb, yuv_window
+from traiNNer.data.video_index import open_video, to_rgb, yuv_window
 from traiNNer.utils import RNG
 from traiNNer.utils.redux_options import DatasetOptions
 from traiNNer.utils.registry import DATASET_REGISTRY
 
 T = TypeVar("T")
 
-_VIDEO_SUFFIXES = (".mkv", ".mp4", ".m2ts", ".mov")
 _OPEN_CONTAINERS = 2  # per worker process
 _HR_FILTERS = {
     "catrom": ResizeFilter.CubicCatrom,
@@ -68,7 +72,8 @@ class VideoClipDataset(BaseDataset):
     one whole frame. All videos must share one frame size.
 
     Each video needs the index written by scripts/data_preparation/
-    index_video_clips.py in <dataroot>/index/. Clips stay inside one shot,
+    index_video_clips.py in an index/ folder next to the video. The data roots
+    can be folders or selected videos. Clips stay inside one shot,
     except a cut_clip_prob share that crosses a cut between clean shots; shots
     with a sampled frame whose descale error is above descale_error_threshold
     are never used. One clip length from clip_lengths is drawn per batch.
@@ -85,25 +90,49 @@ class VideoClipDataset(BaseDataset):
                 f"VideoClipDataset does not support downscale_algorithm "
                 f"{opt.downscale_algorithm!r}"
             )
+        if opt.io_backend.get("type", "disk") != "disk":
+            raise ValueError("VideoClipDataset requires video files on disk.")
         roots = opt.dataroot_gt
         if roots is None:
             raise ValueError("VideoClipDataset needs dataroot_gt")
         if isinstance(roots, str):
             roots = [roots]
         self.clip_lengths = list(opt.clip_lengths)
+        if not self.clip_lengths or any(length < 1 for length in self.clip_lengths):
+            raise ValueError("VideoClipDataset needs positive clip_lengths.")
         self.crop = opt.lq_size * opt.scale
+        if self.crop < 1:
+            raise ValueError("VideoClipDataset needs a positive crop size.")
         hr_w, hr_h = opt.hr_size
         if self.crop > min(hr_w, hr_h):
             raise ValueError(f"Crop {self.crop} is larger than hr_size {hr_w}x{hr_h}")
+        width, height = opt.descale_size
+        settings = clip_settings(
+            {
+                "width": width,
+                "height": height,
+                "kernel": opt.descale_kernel,
+                "border": opt.descale_border,
+                "descale_linear_light": opt.descale_linear_light,
+            }
+        )
+        paths = clip_paths([Path(root) for root in roots])
         self.videos: list[_Video] = []
         motions: list[np.ndarray] = []
-        for root in roots:
-            for path in sorted(Path(root).iterdir()):
-                if path.suffix.lower() in _VIDEO_SUFFIXES:
-                    motions.append(self._load(path, opt.descale_error_threshold))
-        if not self.videos:
-            raise ValueError(f"No indexed videos in {roots}")
-        self.frame_size = self._frame_size()
+        frame_size = None
+        for path in paths:
+            stream = probe_clip(path, settings)
+            if frame_size is None:
+                frame_size = stream.size
+            elif stream.size != frame_size:
+                raise ValueError(
+                    f"{path}: frame size {stream.size[0]}x{stream.size[1]} differs from "
+                    f"{frame_size[0]}x{frame_size[1]} in {paths[0]}. Select videos with one frame size."
+                )
+            index = read_clip_index(path, settings, stream)
+            motions.append(self._load(path, index, opt.descale_error_threshold))
+        assert frame_size is not None
+        self.frame_size = frame_size[1], frame_size[0]
         rows, cols = clip_axes(*self.frame_size, opt)
         self.window = (rows.size, cols.size)
         self.window_origins = (rows.origins, cols.origins)
@@ -124,9 +153,8 @@ class VideoClipDataset(BaseDataset):
         self._containers: dict[str, av.container.InputContainer] = {}
         self._pid = os.getpid()
 
-    def _load(self, path: Path, threshold: float) -> np.ndarray:
+    def _load(self, path: Path, index: dict, threshold: float) -> np.ndarray:
         """Adds the video; returns the mean motion of each shot."""
-        index = json.loads(index_path(path).read_text())
         frames = index["frames"]
         starts = np.asarray(index["cuts"], dtype=np.int64)
         ends = np.append(starts[1:], frames)
@@ -147,22 +175,6 @@ class VideoClipDataset(BaseDataset):
             _Video(str(path), path.name, index["pts"], starts, ends, clean, shot_motion)
         )
         return shot_motion
-
-    def _frame_size(self) -> tuple[int, int]:
-        """(height, width) shared by the frames of every video."""
-        sizes = {}
-        for video in self.videos:
-            with av.open(video.path) as container:
-                stream = container.streams.video[0]
-                sizes[video.path] = (stream.height, stream.width)
-        first, size = next(iter(sizes.items()))
-        for path, other in sizes.items():
-            if other != size:
-                raise ValueError(
-                    f"VideoClipDataset needs one frame size: {first} is "
-                    f"{size[1]}x{size[0]}, {path} is {other[1]}x{other[0]}"
-                )
-        return size
 
     def _shot_table(self, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(video, shot, cumulative weight) of every shot that holds a clip."""
@@ -249,12 +261,20 @@ class VideoClipDataset(BaseDataset):
             if frame.pts != wanted[len(frames)]:
                 raise ValueError(
                     f"{entry.name}: decoded pts {frame.pts}, index has "
-                    f"{wanted[len(frames)]} for frame {first + len(frames)}"
+                    f"{wanted[len(frames)]} for frame {first + len(frames)}. "
+                    "Prepare the video index again."
+                )
+            if (frame.height, frame.width) != self.frame_size:
+                raise ValueError(
+                    f"{entry.name}: frame dimensions changed during decoding."
                 )
             frames.append(convert(frame))
             if len(frames) == count:
                 return frames
-        raise ValueError(f"{entry.name}: stream ended before frame {first + count - 1}")
+        raise ValueError(
+            f"{entry.name}: stream ended before frame {first + count - 1}. "
+            "Prepare the video index again."
+        )
 
     def decode_frames(self, video: int, first: int, count: int) -> list[np.ndarray]:
         """RGB float32 frames first .. first + count - 1."""

@@ -84,21 +84,24 @@ def inventory(root: Path,state: Path):
             "scope":"train.py, trainer packages, native data components and pyproject at launch"}
 
 
+def _input_file(path: Path) -> dict:
+    try:
+        info = path.stat()
+        return {"path": str(path), "size": info.st_size, "mtimeNs": str(info.st_mtime_ns),
+                "fileVersion": artifact_version(info)}
+    except OSError as exc:
+        return {"path": str(path), "error": str(exc)}
+
+
 def capture_attempt(root: Path,state: Path,attempt: Path) -> None:
     recipe = (attempt/"options.yml").read_bytes()
     config = read_recipe(recipe.decode("utf-8-sig"))
     record = {"version":1,"recipeSha256":_sha(recipe),"environment":environment(root,state),
               "declaredSeed":config.get("manual_seed"),"inputs":{}}
     for name,value in (config.get("path") or {}).items():
-        if not value or not (name.startswith("pretrain_network_") or name=="resume_state"):
+        if not value or not (name.startswith("pretrain_network_") or name in {"resume_state", "neuflow_weights"}):
             continue
-        path = (root / value).resolve()
-        try:
-            info = path.stat()
-            record["inputs"][name] = {"path":str(path),"size":info.st_size,"mtimeNs":str(info.st_mtime_ns),
-                                     "fileVersion":artifact_version(info)}
-        except OSError as exc:
-            record["inputs"][name] = {"path":str(path),"error":str(exc)}
+        record["inputs"][name] = _input_file((root / value).resolve())
     try:
         record["source"] = inventory(root,state)
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as e:
@@ -151,9 +154,20 @@ def write_effective(attempt: Path, opt, model, loader, initial_step: int) -> Non
 
     metrics = opt.val.metrics if opt.val and opt.val.val_enabled and opt.val.metrics_enabled else None
     assets = feature_assets(resolve_objectives(opt), metrics, Path(__file__).resolve().parents[1],
-                            hub=Path(torch.hub.get_dir()))
+                            hub=Path(torch.hub.get_dir()), network_d=opt.network_d)
     if assets:
         record["featureAssets"] = assets
+    if str((opt.network_g or {}).get("type", "")).lower() == "rdual":
+        flow = model.neuflow_weights
+        flow_receipt = _input_file(flow) if flow is not None else None
+        if flow_receipt is not None and opt.path.neuflow_weights is None:
+            from trainner_config.official_weights import NEUFLOW_SHA256
+            from trainner_config.rdual import resolve_neuflow_weights
+
+            source = resolve_neuflow_weights(opt, Path.cwd())
+            if source.official and flow == source.path.resolve():
+                flow_receipt["expectedSha256"] = NEUFLOW_SHA256
+        record["neuflowWeights"] = flow_receipt
     if (transfer := getattr(model, "transfer_g_receipt", None)) is not None:
         record["transferG"] = transfer
     atomic_text(attempt/"runtime.json",json.dumps(record,ensure_ascii=True)+"\n")

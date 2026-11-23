@@ -6,8 +6,10 @@ import hashlib
 import json
 import re
 
+from trainner_config.official_weights import NEUFLOW_SHA256, neuflow_cache_path
+
 _SHA = re.compile(r"[0-9a-f]{64}")
-_ROLE = re.compile(r"resume_state|pretrain_network_[a-z0-9_]+")
+_ROLE = re.compile(r"resume_state|neuflow_weights|pretrain_network_[a-z0-9_]+")
 
 
 def _digest(body: dict) -> str:
@@ -21,6 +23,9 @@ def input_precondition(
     files = {}
     for row in inspected:
         if row["kind"] == "dataset":
+            continue
+        if row["status"] == "downloadPending":
+            files["neuflow_weights"] = {"path": row["path"], "sha256": NEUFLOW_SHA256}
             continue
         current = row["current"]
         files[row["field"][1]] = {
@@ -61,6 +66,11 @@ def checked_files(condition: dict, text: str) -> dict:
             "The prepared checkpoint file observations are missing or invalid."
         )
     for role, pin in files.items():
+        if role == "neuflow_weights" and pin == {
+            "path": str(neuflow_cache_path()),
+            "sha256": NEUFLOW_SHA256,
+        }:
+            continue
         if (
             not isinstance(role, str)
             or not _ROLE.fullmatch(role)

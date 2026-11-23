@@ -76,6 +76,15 @@ def _windows_cli() -> str | None:
 
 
 def _find_cli() -> str:
+    if sys.platform == "linux":
+        if cli := os.environ.get("TRAINNER_GUI_TAILSCALE_CLI"):
+            if (
+                not os.path.isabs(cli)
+                or cli.lower().endswith(".exe")
+                or not shutil.which(cli)
+            ):
+                raise TailnetError("The selected Linux Tailscale CLI is unavailable.")
+            return cli
     if sys.platform == "linux" and (
         os.environ.get("WSL_DISTRO_NAME") or "microsoft" in platform.release().lower()
     ):
@@ -99,10 +108,20 @@ def daemon_unreachable(detail: str) -> bool:
     )
 
 
+def _cli_args(cli: str, *args: str) -> list[str]:
+    if (
+        sys.platform == "linux"
+        and cli == os.environ.get("TRAINNER_GUI_TAILSCALE_CLI")
+        and (socket := os.environ.get("TRAINNER_GUI_TAILSCALE_SOCKET"))
+    ):
+        return [cli, f"--socket={socket}", *args]
+    return [cli, *args]
+
+
 def _read_json(cli: str, *args: str) -> Any:
     command = "tailscale " + " ".join(args)
     try:
-        result = _query(cli, *args)
+        result = _query(*_cli_args(cli, *args))
     except subprocess.TimeoutExpired as exc:
         raise TailnetDisconnected(f"{command} timed out.") from exc
     except OSError as exc:
@@ -318,7 +337,7 @@ class _ServeProcess(subprocess.Popen[bytes]):
         self.target = target
         windows = info.cli.lower().endswith(".exe")
         command = (_windows_serve(info.cli, info.port, target) if windows
-                   else [info.cli, "serve", f"--https={info.port}", target])
+                   else _cli_args(info.cli, "serve", f"--https={info.port}", target))
         super().__init__(
             command,
             stdin=subprocess.PIPE if windows else subprocess.DEVNULL,

@@ -15,12 +15,15 @@ Usage:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache, lru_cache
+from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType
 
 import numpy as np
@@ -55,20 +58,49 @@ _PALETTE_WORKERS = 16
 _csrc_dir = Path(__file__).resolve().parent.parent / "csrc"
 
 
+def _stage_dither_sources(sources: list[Path], cache_root: Path) -> list[Path]:
+    """Give the two self-contained sources stable paths across trainer checkouts."""
+    blobs = [source.read_bytes() for source in sources]
+    digest = sha256(b"".join(sha256(blob).digest() for blob in blobs)).hexdigest()
+    root = cache_root.resolve() / "trainner_dither_sources"
+    bundle = root / digest
+    if not bundle.is_dir():
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=root) as temp:
+            pending = Path(temp) / "sources"
+            pending.mkdir()
+            for source, blob in zip(sources, blobs, strict=True):
+                (pending / source.name).write_bytes(blob)
+            try:
+                pending.rename(bundle)
+            except OSError as exc:
+                # A racing publisher's complete, nonempty directory wins.
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+
+    staged = [bundle / source.name for source in sources]
+    if any(path.read_bytes() != blob for path, blob in zip(staged, blobs, strict=True)):
+        raise RuntimeError(f"Invalid staged CUDA dither sources in {bundle}")
+    return staged
+
+
 @cache
 def _extension() -> ModuleType | None:
     if not torch.cuda.is_available():
         logger.info("CUDA dithering unavailable (no CUDA device); using the CPU path.")
         return None
     try:
-        from torch.utils.cpp_extension import load
+        from torch.utils.cpp_extension import get_default_build_root, load
 
+        sources = [_csrc_dir / "dither.cpp", _csrc_dir / "dither_kernel.cu"]
+        if torch.version.cuda is not None:
+            root = os.environ.get("TORCH_EXTENSIONS_DIR")
+            sources = _stage_dither_sources(
+                sources, Path(get_default_build_root() if root is None else root)
+            )
         return load(
             name="dither_cuda_ext",
-            sources=[
-                str(_csrc_dir / "dither.cpp"),
-                str(_csrc_dir / "dither_kernel.cu"),
-            ],
+            sources=[str(source) for source in sources],
             verbose=False,
         )
     except Exception as exc:

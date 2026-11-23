@@ -60,8 +60,9 @@ Execution:
     Everything else (evaluation, export, CPU, FP32) uses PyTorch SDPA (local,
     context and retrieval NA as masked SDPA over gathered key unions). A missing
     Triton is reported once per layer. Inductor keeps its own options in every
-    compile mode. compile_cache_key_tag ('dual-family-attention-v10...')
-    versions this compiler-facing contract.
+    compile mode. compile_cache_key_tag ('dual-family-attention-v11...')
+    versions this compiler-facing contract. On SM120, B8 BF16 Light training
+    with 192px LQ inputs specializes the 48-channel Fourier context kernel.
     The same execution policy applies to every preset and output scale; runtime
     device, dtype and attention geometry determine which backend can execute.
     use_checkpoint=True enables selective whole-layer checkpointing in training:
@@ -2342,7 +2343,7 @@ class DUAL(nn.Module):
         self.routing_na = routing_na
         self.regional_na = regional_na
         self.compile_cache_key_tag = (
-            f"dual-family-attention-v10:selective-checkpoint={use_checkpoint}"
+            f"dual-family-attention-v11:selective-checkpoint={use_checkpoint}"
             + (":routing-na" if routing_na else "")
             + (":regional-na" if regional_na else "")
         )
@@ -3730,6 +3731,25 @@ if _HAS_DIRECT_ATTENTION:
         return low, high
 
     @triton.jit
+    def _context48_load(ptr, offsets, valid):
+        # Context attention appends 16 Fourier channels to the 32 content channels.
+        content = tl.load(ptr + offsets + tl.arange(0, 32)[None, :], mask=valid[:, None], other=0.0)
+        fourier = tl.load(ptr + offsets + 32 + tl.arange(0, 16)[None, :], mask=valid[:, None], other=0.0)
+        return content, fourier
+
+    @triton.jit
+    def _na_valid_pairs(start_y, start_x, query_valid, key_y, key_x, key_in,
+                        WINDOW_Y: tl.constexpr, WINDOW_X: tl.constexpr):
+        return (
+            query_valid[:, None]
+            & key_in[None, :]
+            & (key_y[None, :] >= start_y[:, None])
+            & (key_y[None, :] < start_y[:, None] + WINDOW_Y)
+            & (key_x[None, :] >= start_x[:, None])
+            & (key_x[None, :] < start_x[:, None] + WINDOW_X)
+        )
+
+    @triton.jit
     def _na_scores(
         query,
         key,
@@ -3751,14 +3771,7 @@ if _HAS_DIRECT_ATTENTION:
         HAS_TABLE: tl.constexpr,
         DTYPE_CODE: tl.constexpr,
     ):
-        valid = (
-            query_valid[:, None]
-            & key_in[None, :]
-            & (key_y[None, :] >= start_y[:, None])
-            & (key_y[None, :] < start_y[:, None] + WINDOW_Y)
-            & (key_x[None, :] >= start_x[:, None])
-            & (key_x[None, :] < start_x[:, None] + WINDOW_X)
-        )
+        valid = _na_valid_pairs(start_y, start_x, query_valid, key_y, key_x, key_in, WINDOW_Y, WINDOW_X)
         score = tl.dot(query, tl.trans(key)) * scale
         if HAS_TABLE:
             relative = (query_y[:, None] - key_y[None, :] + WINDOW_Y - 1) * (
@@ -3771,6 +3784,14 @@ if _HAS_DIRECT_ATTENTION:
             )
             score += _rounded_bias(bias, DTYPE_CODE)
         return tl.where(valid, score, -float("inf")), valid
+
+
+    @triton.jit
+    def _na_clamped_tile_count(tile_pos, origin, q_length: tl.constexpr, k_length: tl.constexpr,
+                               WINDOW: tl.constexpr, TILE: tl.constexpr):
+        last_q = tl.minimum((tile_pos + 1) * TILE - 1, q_length - 1)
+        last_start = _na_window_start(last_q, k_length, WINDOW)
+        return tl.cdiv(last_start + WINDOW - origin, TILE)
 
     @triton.jit
     def _na_forward_kernel(
@@ -3812,6 +3833,7 @@ if _HAS_DIRECT_ATTENTION:
         BLOCKS_X: tl.constexpr,
         BLOCK_QK: tl.constexpr,
         BLOCK_V: tl.constexpr,
+        CONTEXT48: tl.constexpr = False,
     ):
         tile = tl.program_id(0)
         # int64: batch-head x tokens x slots can exceed 2**31.
@@ -3835,14 +3857,18 @@ if _HAS_DIRECT_ATTENTION:
         query_x = tile_x * TILE + local % TILE
         query_valid = (query_y < height) & (query_x < width)
         query_token = query_y * width + query_x
-        query = tl.load(
-            query_ptr
-            + qk_base
-            + query_token[:, None] * qk_stride_token
-            + qk_channel[None, :],
-            mask=query_valid[:, None] & qk_valid[None, :],
-            other=0.0,
-        )
+        if CONTEXT48:
+            q_coord = qk_base + query_token[:, None] * qk_stride_token
+            qc, qf = _context48_load(query_ptr, q_coord, query_valid)
+        else:
+            query = tl.load(
+                query_ptr
+                + qk_base
+                + query_token[:, None] * qk_stride_token
+                + qk_channel[None, :],
+                mask=query_valid[:, None] & qk_valid[None, :],
+                other=0.0,
+            )
         start_y = _na_window_start(query_y // STRIDE, key_height, WINDOW_Y)
         start_x = _na_window_start(query_x // STRIDE, key_width, WINDOW_X)
         origin_y = _na_window_start(tile_y * TILE // STRIDE, key_height, WINDOW_Y)
@@ -3852,42 +3878,61 @@ if _HAS_DIRECT_ATTENTION:
         row_sum = tl.zeros((TILE * TILE,), tl.float32)
         accumulator = tl.zeros((TILE * TILE, BLOCK_V), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
-        for block in tl.range(0, BLOCKS_Y * BLOCKS_X, num_stages=2):
-            block_y = block // BLOCKS_X
-            block_x = block - block_y * BLOCKS_X
+        if CONTEXT48:
+            rows = _na_clamped_tile_count(tile_y, origin_y, height, key_height, WINDOW_Y, TILE)
+            cols = _na_clamped_tile_count(tile_x, origin_x, width, key_width, WINDOW_X, TILE)
+        else:
+            rows, cols = BLOCKS_Y, BLOCKS_X
+        for block in tl.range(0, rows * cols, num_stages=2):
+            if CONTEXT48:
+                # The clamped edge can remove one tile from this row.
+                block_y = tl.where(cols == BLOCKS_X, block // BLOCKS_X, block // (BLOCKS_X - 1))
+            else:
+                block_y = block // BLOCKS_X
+            block_x = block - block_y * cols
             key_y = origin_y + block_y * TILE + local // TILE
             key_x = origin_x + block_x * TILE + local % TILE
             key_in = (key_y < key_height) & (key_x < key_width)
             key_token = key_y * key_width + key_x
-            key = tl.load(
-                key_ptr
-                + k_base
-                + key_token[:, None] * k_stride_token
-                + qk_channel[None, :],
-                mask=key_in[:, None] & qk_valid[None, :],
-                other=0.0,
-            )
-            score, _ = _na_scores(
-                query,
-                key,
-                scale,
-                table_ptr,
-                table_stride_relative,
-                table_stride_head,
-                head,
-                query_y,
-                query_x,
-                start_y,
-                start_x,
-                query_valid,
-                key_y,
-                key_x,
-                key_in,
-                WINDOW_Y,
-                WINDOW_X,
-                HAS_TABLE,
-                DTYPE_CODE,
-            )
+            if CONTEXT48:
+                k_coord = k_base + key_token[:, None] * k_stride_token
+                kc, kf = _context48_load(key_ptr, k_coord, key_in)
+            else:
+                key = tl.load(
+                    key_ptr
+                    + k_base
+                    + key_token[:, None] * k_stride_token
+                    + qk_channel[None, :],
+                    mask=key_in[:, None] & qk_valid[None, :],
+                    other=0.0,
+                )
+            if CONTEXT48:
+                valid = _na_valid_pairs(start_y, start_x, query_valid, key_y, key_x, key_in, WINDOW_Y, WINDOW_X)
+                score = tl.dot(qc, tl.trans(kc))
+                score = tl.dot(qf, tl.trans(kf), score) * scale
+                score = tl.where(valid, score, -float("inf"))
+            else:
+                score, _ = _na_scores(
+                    query,
+                    key,
+                    scale,
+                    table_ptr,
+                    table_stride_relative,
+                    table_stride_head,
+                    head,
+                    query_y,
+                    query_x,
+                    start_y,
+                    start_x,
+                    query_valid,
+                    key_y,
+                    key_x,
+                    key_in,
+                    WINDOW_Y,
+                    WINDOW_X,
+                    HAS_TABLE,
+                    DTYPE_CODE,
+                )
             new_max = tl.maximum(row_max, tl.max(score, axis=1))
             safe_max = tl.where(new_max == -float("inf"), 0.0, new_max)
             probability = tl.exp(score - safe_max[:, None])
@@ -3966,6 +4011,8 @@ if _HAS_DIRECT_ATTENTION:
         BLOCKS_X: tl.constexpr,
         BLOCK_QK: tl.constexpr,
         BLOCK_V: tl.constexpr,
+        CONTEXT48: tl.constexpr = False,
+        PIPE_STAGES: tl.constexpr = 2,
     ):
         # dQ per query tile; with a table also dS per query and window slot.
         tile = tl.program_id(0)
@@ -3990,11 +4037,15 @@ if _HAS_DIRECT_ATTENTION:
         query_x = tile_x * TILE + local % TILE
         query_valid = (query_y < height) & (query_x < width)
         query_token = query_y * width + query_x
-        query_offset = (
-            qk_base + query_token[:, None] * qk_stride_token + qk_channel[None, :]
-        )
-        query_mask = query_valid[:, None] & qk_valid[None, :]
-        query = tl.load(query_ptr + query_offset, mask=query_mask, other=0.0)
+        if CONTEXT48:
+            q_coord = qk_base + query_token[:, None] * qk_stride_token
+            qc, qf = _context48_load(query_ptr, q_coord, query_valid)
+        else:
+            query_offset = (
+                qk_base + query_token[:, None] * qk_stride_token + qk_channel[None, :]
+            )
+            query_mask = query_valid[:, None] & qk_valid[None, :]
+            query = tl.load(query_ptr + query_offset, mask=query_mask, other=0.0)
         grad_output = tl.load(
             grad_output_ptr
             + o_base
@@ -4011,23 +4062,40 @@ if _HAS_DIRECT_ATTENTION:
         origin_y = _na_window_start(tile_y * TILE // STRIDE, key_height, WINDOW_Y)
         origin_x = _na_window_start(tile_x * TILE // STRIDE, key_width, WINDOW_X)
 
-        grad_query = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
+        if CONTEXT48:
+            dqc = tl.zeros((TILE*TILE, 32), tl.float32)
+            dqf = tl.zeros((TILE*TILE, 16), tl.float32)
+        else:
+            grad_query = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
-        for block in tl.range(0, BLOCKS_Y * BLOCKS_X, num_stages=2):
-            block_y = block // BLOCKS_X
-            block_x = block - block_y * BLOCKS_X
+        if CONTEXT48:
+            rows = _na_clamped_tile_count(tile_y, origin_y, height, key_height, WINDOW_Y, TILE)
+            cols = _na_clamped_tile_count(tile_x, origin_x, width, key_width, WINDOW_X, TILE)
+        else:
+            rows, cols = BLOCKS_Y, BLOCKS_X
+        for block in tl.range(0, rows * cols, num_stages=PIPE_STAGES):
+            if CONTEXT48:
+                # The clamped edge can remove one tile from this row.
+                block_y = tl.where(cols == BLOCKS_X, block // BLOCKS_X, block // (BLOCKS_X - 1))
+            else:
+                block_y = block // BLOCKS_X
+            block_x = block - block_y * cols
             key_y = origin_y + block_y * TILE + local // TILE
             key_x = origin_x + block_x * TILE + local % TILE
             key_in = (key_y < key_height) & (key_x < key_width)
             key_token = key_y * key_width + key_x
-            key = tl.load(
-                key_ptr
-                + k_base
-                + key_token[:, None] * k_stride_token
-                + qk_channel[None, :],
-                mask=key_in[:, None] & qk_valid[None, :],
-                other=0.0,
-            )
+            if CONTEXT48:
+                k_coord = k_base + key_token[:, None] * k_stride_token
+                kc, kf = _context48_load(key_ptr, k_coord, key_in)
+            else:
+                key = tl.load(
+                    key_ptr
+                    + k_base
+                    + key_token[:, None] * k_stride_token
+                    + qk_channel[None, :],
+                    mask=key_in[:, None] & qk_valid[None, :],
+                    other=0.0,
+                )
             value = tl.load(
                 value_ptr
                 + v_base
@@ -4036,31 +4104,41 @@ if _HAS_DIRECT_ATTENTION:
                 mask=key_in[:, None] & v_valid[None, :],
                 other=0.0,
             )
-            score, valid = _na_scores(
-                query,
-                key,
-                scale,
-                table_ptr,
-                table_stride_relative,
-                table_stride_head,
-                head,
-                query_y,
-                query_x,
-                start_y,
-                start_x,
-                query_valid,
-                key_y,
-                key_x,
-                key_in,
-                WINDOW_Y,
-                WINDOW_X,
-                HAS_TABLE,
-                DTYPE_CODE,
-            )
+            if CONTEXT48:
+                valid = _na_valid_pairs(start_y, start_x, query_valid, key_y, key_x, key_in, WINDOW_Y, WINDOW_X)
+                score = tl.dot(qc, tl.trans(kc))
+                score = tl.dot(qf, tl.trans(kf), score) * scale
+                score = tl.where(valid, score, -float("inf"))
+            else:
+                score, valid = _na_scores(
+                    query,
+                    key,
+                    scale,
+                    table_ptr,
+                    table_stride_relative,
+                    table_stride_head,
+                    head,
+                    query_y,
+                    query_x,
+                    start_y,
+                    start_x,
+                    query_valid,
+                    key_y,
+                    key_x,
+                    key_in,
+                    WINDOW_Y,
+                    WINDOW_X,
+                    HAS_TABLE,
+                    DTYPE_CODE,
+                )
             probability = tl.where(valid, tl.exp(score - lse[:, None]), 0.0)
             grad_probability = tl.dot(grad_output, tl.trans(value))
             grad_score = probability * (grad_probability - delta[:, None])
-            if DTYPE_CODE == 1:
+            if CONTEXT48:
+                ds = grad_score.to(tl.bfloat16)
+                dqc += tl.dot(ds, kc)
+                dqf += tl.dot(ds, kf)
+            elif DTYPE_CODE == 1:
                 grad_query += tl.dot(grad_score.to(tl.bfloat16), key)
             else:
                 grad_query += tl.dot(grad_score.to(tl.float16), key)
@@ -4074,7 +4152,11 @@ if _HAS_DIRECT_ATTENTION:
                     mask=valid,
                 )
 
-        tl.store(grad_query_ptr + query_offset, grad_query * scale, mask=query_mask)
+        if CONTEXT48:
+            tl.store(grad_query_ptr + q_coord + tl.arange(0, 32)[None, :], dqc * scale, mask=query_valid[:, None])
+            tl.store(grad_query_ptr + q_coord + 32 + tl.arange(0, 16)[None, :], dqf * scale, mask=query_valid[:, None])
+        else:
+            tl.store(grad_query_ptr + query_offset, grad_query * scale, mask=query_mask)
 
     @triton.jit
     def _na_backward_key_value_kernel(
@@ -4117,6 +4199,7 @@ if _HAS_DIRECT_ATTENTION:
         TILE: tl.constexpr,
         BLOCK_QK: tl.constexpr,
         BLOCK_V: tl.constexpr,
+        CONTEXT48: tl.constexpr = False,
     ):
         # dK/dV per key tile, iterating the query blocks that can see it.
         tile = tl.program_id(0)
@@ -4145,7 +4228,11 @@ if _HAS_DIRECT_ATTENTION:
         key_mask = key_in[:, None] & qk_valid[None, :]
         value_offset = v_base + key_token[:, None] * v_stride_token + v_channel[None, :]
         value_mask = key_in[:, None] & v_valid[None, :]
-        key = tl.load(key_ptr + key_offset, mask=key_mask, other=0.0)
+        if CONTEXT48:
+            k_coord = k_base + key_token[:, None] * k_stride_token
+            kc, kf = _context48_load(key_ptr, k_coord, key_in)
+        else:
+            key = tl.load(key_ptr + key_offset, mask=key_mask, other=0.0)
         value = tl.load(value_ptr + value_offset, mask=value_mask, other=0.0)
         low_y, high_y = _na_query_span(
             tile_y * TILE,
@@ -4166,7 +4253,11 @@ if _HAS_DIRECT_ATTENTION:
         blocks_y = (high_y - low_y + TILE) // TILE
         blocks_x = (high_x - low_x + TILE) // TILE
 
-        grad_key = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
+        if CONTEXT48:
+            dkc = tl.zeros((TILE * TILE, 32), tl.float32)
+            dkf = tl.zeros((TILE * TILE, 16), tl.float32)
+        else:
+            grad_key = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
         grad_value = tl.zeros((TILE * TILE, BLOCK_V), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
         for block in tl.range(0, blocks_y * blocks_x, num_stages=2):
@@ -4176,14 +4267,18 @@ if _HAS_DIRECT_ATTENTION:
             query_x = low_x + block_x * TILE + local % TILE
             query_valid = (query_y <= high_y) & (query_x <= high_x)
             query_token = query_y * width + query_x
-            query = tl.load(
-                query_ptr
-                + qk_base
-                + query_token[:, None] * qk_stride_token
-                + qk_channel[None, :],
-                mask=query_valid[:, None] & qk_valid[None, :],
-                other=0.0,
-            )
+            if CONTEXT48:
+                q_coord = qk_base + query_token[:, None] * qk_stride_token
+                qc, qf = _context48_load(query_ptr, q_coord, query_valid)
+            else:
+                query = tl.load(
+                    query_ptr
+                    + qk_base
+                    + query_token[:, None] * qk_stride_token
+                    + qk_channel[None, :],
+                    mask=query_valid[:, None] & qk_valid[None, :],
+                    other=0.0,
+                )
             grad_output = tl.load(
                 grad_output_ptr
                 + o_base
@@ -4195,38 +4290,61 @@ if _HAS_DIRECT_ATTENTION:
             row = batch_head * (height * width) + query_token
             lse = tl.load(lse_ptr + row, mask=query_valid, other=0.0)
             delta = tl.load(delta_ptr + row, mask=query_valid, other=0.0)
-            score, valid = _na_scores(
-                query,
-                key,
-                scale,
-                table_ptr,
-                table_stride_relative,
-                table_stride_head,
-                head,
-                query_y,
-                query_x,
-                _na_window_start(query_y // STRIDE, key_height, WINDOW_Y),
-                _na_window_start(query_x // STRIDE, key_width, WINDOW_X),
-                query_valid,
-                key_y,
-                key_x,
-                key_in,
-                WINDOW_Y,
-                WINDOW_X,
-                HAS_TABLE,
-                DTYPE_CODE,
-            )
-            probability = tl.where(valid, tl.exp(score - lse[:, None]), 0.0)
-            grad_probability = tl.dot(grad_output, tl.trans(value))
-            grad_score = probability * (grad_probability - delta[:, None])
-            if DTYPE_CODE == 1:
-                grad_key += tl.dot(tl.trans(grad_score.to(tl.bfloat16)), query)
-                grad_value += tl.dot(tl.trans(probability.to(tl.bfloat16)), grad_output)
+            if CONTEXT48:
+                # One row per key gives dK and dV their native matrix orientation.
+                start_y = _na_window_start(query_y // STRIDE, key_height, WINDOW_Y)
+                start_x = _na_window_start(query_x // STRIDE, key_width, WINDOW_X)
+                valid = (key_in[:, None] & query_valid[None, :]
+                         & (key_y[:, None] >= start_y[None, :])
+                         & (key_y[:, None] < start_y[None, :] + WINDOW_Y)
+                         & (key_x[:, None] >= start_x[None, :])
+                         & (key_x[:, None] < start_x[None, :] + WINDOW_X))
+                score = tl.dot(kc, tl.trans(qc))
+                score = tl.dot(kf, tl.trans(qf), score) * scale
+                probability = tl.where(valid, tl.exp(score - lse[None, :]), 0.0)
+                grad_probability = tl.dot(value, tl.trans(grad_output))
+                grad_score = probability * (grad_probability - delta[None, :])
+                ds = grad_score.to(tl.bfloat16)
+                dkc += tl.dot(ds, qc)
+                dkf += tl.dot(ds, qf)
+                grad_value += tl.dot(probability.to(tl.bfloat16), grad_output)
             else:
-                grad_key += tl.dot(tl.trans(grad_score.to(tl.float16)), query)
-                grad_value += tl.dot(tl.trans(probability.to(tl.float16)), grad_output)
+                score, valid = _na_scores(
+                    query,
+                    key,
+                    scale,
+                    table_ptr,
+                    table_stride_relative,
+                    table_stride_head,
+                    head,
+                    query_y,
+                    query_x,
+                    _na_window_start(query_y // STRIDE, key_height, WINDOW_Y),
+                    _na_window_start(query_x // STRIDE, key_width, WINDOW_X),
+                    query_valid,
+                    key_y,
+                    key_x,
+                    key_in,
+                    WINDOW_Y,
+                    WINDOW_X,
+                    HAS_TABLE,
+                    DTYPE_CODE,
+                )
+                probability = tl.where(valid, tl.exp(score - lse[:, None]), 0.0)
+                grad_probability = tl.dot(grad_output, tl.trans(value))
+                grad_score = probability * (grad_probability - delta[:, None])
+                if DTYPE_CODE == 1:
+                    grad_key += tl.dot(tl.trans(grad_score.to(tl.bfloat16)), query)
+                    grad_value += tl.dot(tl.trans(probability.to(tl.bfloat16)), grad_output)
+                else:
+                    grad_key += tl.dot(tl.trans(grad_score.to(tl.float16)), query)
+                    grad_value += tl.dot(tl.trans(probability.to(tl.float16)), grad_output)
 
-        tl.store(grad_key_ptr + key_offset, grad_key * scale, mask=key_mask)
+        if CONTEXT48:
+            tl.store(grad_key_ptr + k_coord + tl.arange(0, 32)[None, :], dkc * scale, mask=key_in[:, None])
+            tl.store(grad_key_ptr + k_coord + 32 + tl.arange(0, 16)[None, :], dkf * scale, mask=key_in[:, None])
+        else:
+            tl.store(grad_key_ptr + key_offset, grad_key * scale, mask=key_mask)
         tl.store(grad_value_ptr + value_offset, grad_value, mask=value_mask)
 
     def _na_check(
@@ -4282,6 +4400,33 @@ if _HAS_DIRECT_ATTENTION:
             "BLOCK_V": triton.next_power_of_2(value.shape[-1]),
         }
 
+    def _use_context48_kernel(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        height: int,
+        width: int,
+        key_height: int,
+        key_width: int,
+        window_y: int,
+        window_x: int,
+        stride: int,
+        has_table: bool,
+    ) -> bool:
+        # DUAL Light PU2 training on 192px LQ crops, measured on SM120.
+        return (
+            not has_table
+            and stride == 1
+            and height == width == key_height == key_width == 96
+            and window_y == window_x
+            and window_x in (32, 64)
+            and query.shape == (8, 4, 96 * 96, 48)
+            and value.shape[-1] == 32
+            and query.dtype == key.dtype == value.dtype == torch.bfloat16
+            and query.device.type == "cuda"
+            and torch.cuda.get_device_capability(query.device) == (12, 0)
+        )
+
     @triton_op("dual_standalone::neighborhood_attention", mutates_args={})
     def _neighborhood_attention(
         query: torch.Tensor,
@@ -4322,6 +4467,10 @@ if _HAS_DIRECT_ATTENTION:
             (batch, num_heads, tokens), device=query.device, dtype=torch.float32
         )
         tiles = triton.cdiv(height, _NA_TILE) * triton.cdiv(width, _NA_TILE)
+        context48 = _use_context48_kernel(
+            query, key, value, height, width, key_height, key_width,
+            window_y, window_x, stride, has_table,
+        )
         wrap_triton(_na_forward_kernel)[(tiles, batch * num_heads)](
             query,
             key,
@@ -4343,6 +4492,7 @@ if _HAS_DIRECT_ATTENTION:
             scale=scale,
             BLOCKS_Y=_na_blocks(window_y, stride),
             BLOCKS_X=_na_blocks(window_x, stride),
+            CONTEXT48=context48,
             num_warps=_NA_FWD_WARPS,
             **_na_meta(query, value, window_y, window_x, has_table, dtype_code),
         )
@@ -4391,6 +4541,12 @@ if _HAS_DIRECT_ATTENTION:
             *table.stride(),
         )
         meta = _na_meta(query, value, window_y, window_x, has_table, dtype_code)
+        context48 = _use_context48_kernel(
+            query, key, value, height, width, key_height, key_width,
+            window_y, window_x, stride, has_table,
+        )
+        # The measured B8 C64 dQ wins at two stages, B8 C32 at three.
+        dq_stages = 3 if context48 and window_x == 32 else 2
         wrap_triton(_na_backward_query_kernel)[grid](
             query,
             key,
@@ -4411,6 +4567,8 @@ if _HAS_DIRECT_ATTENTION:
             scale=scale,
             BLOCKS_Y=_na_blocks(window_y, stride),
             BLOCKS_X=_na_blocks(window_x, stride),
+            CONTEXT48=context48,
+            PIPE_STAGES=dq_stages,
             num_warps=_NA_BWD_WARPS,
             **meta,
         )
@@ -4433,6 +4591,7 @@ if _HAS_DIRECT_ATTENTION:
             key_width=key_width,
             STRIDE=stride,
             scale=scale,
+            CONTEXT48=context48,
             num_warps=_NA_BWD_WARPS,
             **meta,
         )

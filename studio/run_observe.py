@@ -7,6 +7,7 @@ import math
 import os
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -220,6 +221,28 @@ def _log_page(
     }
 
 
+def _estimated_finish(line: str, duration: str) -> str | None:
+    # Both trainer loggers stamp reports in the trainer host's local time.
+    stamp, separator, _ = line.partition(" INFO: ")
+    if not separator:
+        return None
+    days, _, clock = duration.rpartition(", ")
+    hours, minutes, seconds = clock.split(":")
+    try:
+        if stamp.endswith(" |"):
+            sample = datetime.strptime(stamp, "%d-%m-%Y %I:%M %p |")
+        else:
+            sample = datetime.fromisoformat(stamp)
+        remaining = timedelta(days=int(days.split()[0]) if days else 0,
+                              hours=int(hours), minutes=int(minutes), seconds=float(seconds))
+        if remaining < timedelta(0):
+            return None
+        finish = sample.astimezone(UTC) + remaining
+        return finish.isoformat(timespec="seconds")
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def _telemetry(line: str, iteration: int) -> dict[str, Any]:
     report: dict[str, Any] = {}
     if match := SPEED.search(line):
@@ -238,6 +261,8 @@ def _telemetry(line: str, iteration: int) -> dict[str, Any]:
             report["wallUpdatesPerSecond"] = rate
     if match := ETA.search(line):
         report["eta"] = match[1]
+        if finish := _estimated_finish(line, match[1]):
+            report["estimatedFinishAt"] = finish
     if match := VRAM.search(line):
         allocated, reserved = float(match[1]), float(match[2])
         if math.isfinite(allocated) and math.isfinite(reserved):

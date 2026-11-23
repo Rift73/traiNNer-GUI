@@ -562,6 +562,7 @@ options/_templates/train/RCAN/RCAN_unshuffle_OTF_fidelity.yml
 options/_templates/train/RCAN/RCAN_unshuffle_OTF_gan.yml
 options/_templates/train/RCAN/RCAN_unshuffle_fidelity.yml
 options/_templates/train/RCAN/RCAN_unshuffle_gan.yml
+options/_templates/train/RDUAL/RDUAL_OTF_fidelity.yml
 options/_templates/train/RGT/RGT_OTF_fidelity.yml
 options/_templates/train/RGT/RGT_OTF_gan.yml
 options/_templates/train/RGT/RGT_S_OTF_fidelity.yml
@@ -696,6 +697,7 @@ retest.py
 schemas/redux-config.schema.json
 scripts/check-managed-studio-update.py
 scripts/check-managed-wsl-runtime.py
+scripts/data_preparation/index_video_clips.py
 scripts/install_runtime.py
 scripts/managed-wsl-launcher.sh
 scripts/options/architecture_choices.py
@@ -707,6 +709,7 @@ scripts/options/generate_docs_from_msgspec.py
 scripts/options/generate_schema.py
 scripts/options/index_factories.py
 scripts/options/onnx_default_options.yml
+scripts/options/recipe_fields.py
 scripts/options/test_default_options_single.yml
 scripts/options/train_default_options_otf1.yml
 scripts/options/train_default_options_otf2.yml
@@ -718,6 +721,9 @@ scripts/package-windows-files.txt
 scripts/package-windows-weight-notices.txt
 scripts/package-windows.py
 scripts/provision-wsl.sh
+scripts/remote-runtime.sh
+scripts/remote-setup.sh
+scripts/remote-tailnet.sh
 scripts/windows/README.md
 studio/API.md
 studio/CHECKPOINT_SELECTION.md
@@ -764,6 +770,7 @@ studio/preflight.py
 studio/provenance.py
 studio/queue.py
 studio/recipes.py
+studio/remote_tailnet.py
 studio/reproduction.py
 studio/reproduction_paths.py
 studio/reproduction_pins.py
@@ -788,6 +795,7 @@ studio/tensorboard_history.py
 studio/training_samples.py
 studio/update_gate.py
 studio/validation_summary.py
+studio/video_indexing.py
 studio/video_sources.py
 studio/video_split.py
 studio/weight_convert.py
@@ -828,6 +836,7 @@ traiNNer/archs/drft_arch.py
 traiNNer/archs/drft_tensorrt_rewrite.py
 traiNNer/archs/drt_arch.py
 traiNNer/archs/dual_arch.py
+traiNNer/archs/dual_discriminator_arch.py
 traiNNer/archs/dunet_arch.py
 traiNNer/archs/dwt_arch.py
 traiNNer/archs/efrlfn_arch.py
@@ -863,6 +872,7 @@ traiNNer/archs/metagan_arch.py
 traiNNer/archs/moesr_arch.py
 traiNNer/archs/mosr_arch.py
 traiNNer/archs/mosrv2_arch.py
+traiNNer/archs/msa_discriminator_arch.py
 traiNNer/archs/nafnet_arch.py
 traiNNer/archs/omnisr_arch.py
 traiNNer/archs/patchgan_arch.py
@@ -878,6 +888,8 @@ traiNNer/archs/rtmosr_arch.py
 traiNNer/archs/safmn_arch.py
 traiNNer/archs/scunet_aaf6aa_arch.py
 traiNNer/archs/sebica_arch.py
+traiNNer/archs/sed_arch.py
+traiNNer/archs/sed_encoder.py
 traiNNer/archs/seemore_arch.py
 traiNNer/archs/span_arch.py
 traiNNer/archs/spanf_arch.py
@@ -1043,6 +1055,7 @@ traiNNer/schedulers/cosineannealingrestartlr_scheduler.py
 traiNNer/schedulers/cosineannealingwarmuplr_scheduler.py
 traiNNer/schedulers/kneelr_scheduler.py
 traiNNer/schedulers/recipe.py
+traiNNer/schedulers/resume_lr.py
 traiNNer/tasks/__init__.py
 traiNNer/tasks/aether_deployment.py
 traiNNer/tasks/dispatch.py
@@ -1126,8 +1139,10 @@ trainner_config/metrics.py
 trainner_config/neosr_batchaug.py
 trainner_config/object_detection_task.py
 trainner_config/objectives.py
+trainner_config/official_weights.py
 trainner_config/options.py
 trainner_config/parameter_filters.py
+trainner_config/rdual.py
 trainner_config/registry_index.py
 trainner_config/resampling.py
 trainner_config/resume.py
@@ -1146,6 +1161,7 @@ trainner_data/paired_identity.py
 trainner_data/supervised_identity.py
 trainner_data/supervised_manifest.py
 trainner_data/task_folders.py
+trainner_data/video_indexes.py
 trainner_data/zip_images.py
 ui/DESIGN.md
 ui/assets/mark.svg
@@ -1185,6 +1201,7 @@ ui/css/taskdata.css
 ui/css/timing.css
 ui/css/tokens.css
 ui/css/validation.css
+ui/css/video-prep.css
 ui/css/weights.css
 ui/index.html
 ui/js/actions.js
@@ -1208,6 +1225,7 @@ ui/js/recipe/resume.js
 ui/js/recipe/schema.js
 ui/js/recipe/sections.js
 ui/js/recipe/source-pane.js
+ui/js/recipe/video-prep.js
 ui/js/recipe/yaml-highlight.js
 ui/js/runs/analysis.js
 ui/js/runs/archives.js
@@ -1239,12 +1257,14 @@ ui/js/runs/taskdata.js
 ui/js/runs/telemetry.js
 ui/js/runs/timing.js
 ui/js/runs/validation.js
+ui/js/runs/videoindex.js
 ui/js/state/catalog.js
 ui/js/state/conn.js
 ui/js/state/data.js
 ui/js/state/queue.js
 ui/js/state/recipe.js
 ui/js/state/runs.js
+ui/js/state/video-prep.js
 ui/js/store.js
 ui/js/theme-boot.js
 ui/js/ui.js

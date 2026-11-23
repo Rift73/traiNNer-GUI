@@ -2,6 +2,7 @@
 
 _RESIDUAL_CONVS = {"resi_connection": ("1conv", "3conv")}
 _RESIDUAL_CONV_OR_IDENTITY = {"resi_connection": ("1conv", "identity")}
+_DRFT_EXAMPLES = {"resi_connection": ("1conv", "3conv", "identity")}
 _DAT_EXAMPLES = {
     **_RESIDUAL_CONVS,
     "upsampler": ("pixelshuffle", "pixelshuffledirect"),
@@ -24,6 +25,11 @@ _MODULE_EXAMPLES: dict[str, dict[str, tuple[str, ...]]] = {
     "traiNNer.archs.drct_arch": {
         **_RESIDUAL_CONV_OR_IDENTITY,
         "upsampler": ("pixelshuffle",),
+    },
+    "traiNNer.archs.drft_arch": _DRFT_EXAMPLES,
+    "traiNNer.archs.drt_arch": {
+        **_DRFT_EXAMPLES,
+        "reconstruction": ("progressive", "direct"),
     },
     # DUAL's rib and none require context_na to be disabled.
     "traiNNer.archs.dual_arch": {"c_pos_bias": ("rfb", "rib", "none")},

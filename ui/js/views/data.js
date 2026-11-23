@@ -11,6 +11,8 @@ import { folderWords } from '../state/catalog.js';
 import { analysisHref } from '../actions.js';
 import { toast, issueList, notice, roleChip, countIssues, badge, openDialog } from '../ui.js';
 import { createCompare } from '../components/compare.js';
+import { videoPrep, counts as videoCounts, jobActive, exampleUnchosen, VIDEO_DATASET } from '../state/video-prep.js';
+import { revealVideoPanel } from '../recipe/video-prep.js';
 
 const SCALES = [1, 2, 3, 4, 8];
 const EMPTY_BEFORE = 'Check your folders to look at real images here.';
@@ -21,6 +23,11 @@ const SOURCE_WORDS = { folder: 'Folders', meta_info: 'Manifest (meta_info file)'
 const OVERLAP_PREFIX = 'Same physical file as validation path';
 const CLASSIFICATION = 'image_classification';
 const DETECTION = 'object_detection';
+// The trainer's image dataset that degrades the ground truth on the fly (RealESRGANDataset): the one class
+// here that never reads dataroot_lq. Its clip counterpart, VIDEO_DATASET, has an entry of its own.
+const OTF_DATASET = 'realesrgandataset';
+/** A dataset type as the trainer looks it up: lower case, with or without the registry's _traiNNer suffix. */
+const datasetKind = (type) => String(type ?? '').toLowerCase().replace(/_trainner$/, '');
 const UNCHECKED_WHAT = { [CLASSIFICATION]: 'classification folders', [DETECTION]: 'detection data' };
 const PACK_LINE = 'Writes a full copy as LMDB databases on the trainer machine, as a separate job.';
 
@@ -1726,8 +1733,10 @@ export function mount(el) {
       if (words.file) places.push({ option: words.file.key, label: words.file.name, paths: set.annotationFile ? [set.annotationFile] : [], mode: 'file', extensions: ['.json'] });
       return places;
     }
-    // A paired training set without low-quality folders makes them on the fly.
-    if (!set.lq.length && set.phase === 'train') lqPlace.onTheFly = true;
+    // Only the on-the-fly dataset makes its low-quality images itself. Every other class that reaches here
+    // reads dataroot_lq (PairedImageDataset, RealESRGANPairedDataset, PairedVideoDataset, ImageMaskDataset):
+    // without one it is "Not set", with Choose… to set it again.
+    if (!set.lq.length && datasetKind(set.type) === OTF_DATASET) lqPlace.onTheFly = true;
     return task === SEGMENTATION ? [lqPlace, gtPlace] : [gtPlace, lqPlace];
   }
 
@@ -1860,6 +1869,8 @@ export function mount(el) {
     else {
       const all = [];
       content = sets.map((set) => {
+        // Video clips are not image folders: no image rows, no image check; the recipe prepares them.
+        if (String(set.type).toLowerCase() === VIDEO_DATASET) return videoEntry(set);
         const places = placesFor(set, task, words);
         for (const place of places) if (place.paths.length) all.push(missing.has(`${set.key}|${place.option}|0`));
         const here = outcome?.key === set.key;
@@ -1913,6 +1924,44 @@ export function mount(el) {
     fill(recipeBox, content);
     leadLine.hidden = !lead;
     if (focused) [...recipeBox.querySelectorAll('button')].find((button) => button.dataset.focus === focused)?.focus();
+  }
+
+  // ── a video clip dataset: its videos, one line from the recipe's video check, and the way to it ──
+  // The line is one node kept across rebuilds of the entries, so it follows the check by itself.
+  const videoLine = h('p', { class: 'data__entryhint data__videoline', role: 'status' });
+  // Also one node: its words follow the same state ("Show progress", "Prepare in the recipe", "Show in the recipe").
+  const videoButton = h('button', { class: 'btn btn--sm btn--primary', type: 'button', onclick: () => revealVideoPanel() }, 'Show in the recipe');
+  function renderVideoLine() {
+    const v = videoPrep.get();
+    const c = v.check.phase === 'done' && v.check.answer ? videoCounts(v.check.answer) : null;
+    const label = jobActive(v.job) ? 'Show progress' : c && c.fixable > 0 && !c.invalid ? 'Prepare in the recipe' : 'Show in the recipe';
+    if (videoButton.textContent !== label) videoButton.textContent = label;
+    const text = jobActive(v.job)
+      ? 'Preparing the videos…'
+      : exampleUnchosen(v)
+        ? "This is the template's example path. Choose the video folder in the recipe."
+      : v.check.phase === 'checking'
+        ? 'Checking the videos…'
+        : v.check.phase === 'error'
+          ? v.check.error || 'The videos could not be checked.'
+          : !c
+            ? 'Videos not checked.'
+            : c.invalid
+              ? `${fmt.int(c.invalid)} of ${fmt.plural(c.total, 'video')} cannot be used for clip training.`
+              : c.pending
+                ? `${fmt.int(c.pending)} of ${fmt.plural(c.total, 'video')} need an index.`
+                : `${fmt.plural(c.ready, 'video')} ready.`;
+    if (videoLine.textContent !== text) videoLine.textContent = text;
+  }
+  function videoEntry(set) {
+    return h(
+      'div',
+      { class: 'data__entry' },
+      h('div', { class: 'data__entryhead' }, h('span', { class: 'data__entryrole' }, 'Training videos'), h('span', { class: 'mono data__entrykey' }, set.key)),
+      set.gt.length ? set.gt.map((p) => h('p', { class: 'mono data__videopath' }, p)) : h('p', { class: 'muted' }, 'No folder chosen'),
+      videoLine,
+      h('div', { class: 'data__entryactions' }, videoButton),
+    );
   }
 
   let lastWrite = '';
@@ -2673,8 +2722,11 @@ export function mount(el) {
     sheetEmpty.hidden = Boolean(tiles.length);
     countEl.textContent = tiles.length ? countLine(samples.length, shownCounts, samples.some((s) => s.lq)) : '';
     const table = folderWords(recipe.get().summary?.task ?? null).records === true;
-    sheetEmpty.textContent = result ? 'The check returned no images to show.' : table ? 'This recipe trains on tables of numbers: there are no images to look at.' : 'Checked images appear here.';
-    ensureCompare(result ? EMPTY_NONE : table ? 'This recipe trains on tables of numbers: there are no images to look at.' : EMPTY_BEFORE);
+    // Only video clip datasets: nothing here to check as images.
+    const videoOnly = !table && videoPrep.get().applies && recipe.datasetFolders().every((set) => String(set.type).toLowerCase() === VIDEO_DATASET || (!set.gt.length && !set.lq.length));
+    const VIDEO_ONLY = 'This recipe trains from video files. They are checked and prepared in the recipe.';
+    sheetEmpty.textContent = result ? 'The check returned no images to show.' : table ? 'This recipe trains on tables of numbers: there are no images to look at.' : videoOnly ? VIDEO_ONLY : 'Checked images appear here.';
+    ensureCompare(result ? EMPTY_NONE : table ? 'This recipe trains on tables of numbers: there are no images to look at.' : videoOnly ? VIDEO_ONLY : EMPTY_BEFORE);
     if (tiles.length) {
       observer = new IntersectionObserver(onVisible, { root: strip, rootMargin: '0px 480px' });
       for (const tile of tiles) observer.observe(tile);
@@ -3043,6 +3095,8 @@ export function mount(el) {
     }),
   );
   unsubs.push(conn.subscribe(renderRoot));
+  unsubs.push(videoPrep.subscribe(renderVideoLine));
+  renderVideoLine();
   renderAll();
 
   return () => {

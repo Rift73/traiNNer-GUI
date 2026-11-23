@@ -2,6 +2,7 @@ import inspect
 from collections.abc import Callable
 from copy import deepcopy
 from functools import partial
+from importlib import import_module
 from pathlib import Path
 from typing import Annotated, Any, Union, get_type_hints
 
@@ -17,20 +18,108 @@ from traiNNer.utils.registry import Registry
 from trainner_config.objectives import add_loss_schedule_schema
 from trainner_config.tasks import TRAINING_TASKS
 
-# These factories forward **kwargs to their annotated return class, except for
-# the geometry fixed by the preset. Exposing a fixed argument would generate a
-# schema-valid config that fails with "multiple values for keyword argument".
-PRESET_FIXED_OPTIONS = {
-    "dual_light": {"embed_dim", "depths", "layer_indices", "pixel_unshuffle"},
-    "dual_xs": {"embed_dim", "depths", "layer_indices"},
-    "dual_s": {"embed_dim", "depths"},
-    "dual_m": {"embed_dim", "depths"},
-    "dual_l": {"embed_dim", "depths"},
-    "dual_xl": {"embed_dim", "depths"},
-    **dict.fromkeys(("aether_small", "aether_medium", "aether_large"),
-                    {"embed_dim", "depths", "use_channel_attn", "use_spatial_attn"}),
-    "rdual": set(),
+# The verified **kwargs paths through built-in presets. Each entry records
+# the next callable in the module namespace and the keyword arguments bound
+# by the call instead of exposed by the wrapper.
+_DRFT_CONSTRUCTOR_FIXED_OPTIONS = (
+    "upscale",
+    "depths",
+    "num_heads",
+    "unshifted_num_heads",
+    "unshifted_attention_dim",
+    "full_width_unshifted",
+)
+_DRFT_PRESET_FIXED_OPTIONS = ("embed_dim", "groups", "depth", "full_heads")
+_DRFT_TEACHER_FIXED_OPTIONS = ("embed_dim", "full_heads")
+_DRFT_NANO_FIXED_OPTIONS = ("dense_skip", "reconstruction")
+
+_FACTORY_FORWARDING = {
+    "traiNNer.archs.aether_arch": dict.fromkeys(
+        ("aether_small", "aether_medium", "aether_large"),
+        ("aether", ("embed_dim", "depths", "use_channel_attn", "use_spatial_attn")),
+    ),
+    "traiNNer.archs.drft_arch": {
+        "_build_drft": ("DRFT", _DRFT_CONSTRUCTOR_FIXED_OPTIONS),
+        "_build_drft_teacher": ("_build_drft", ()),
+        "drft_nano": (
+            "_build_drft",
+            _DRFT_PRESET_FIXED_OPTIONS + _DRFT_NANO_FIXED_OPTIONS,
+        ),
+        "drft_light": ("_build_drft", ("depth",)),
+        **dict.fromkeys(
+            (f"drft_{size}" for size in ("micro", "xs", "s", "m", "l", "xl")),
+            ("_build_drft", _DRFT_PRESET_FIXED_OPTIONS),
+        ),
+        "drft_nano_teacher": (
+            "_build_drft_teacher",
+            _DRFT_TEACHER_FIXED_OPTIONS + _DRFT_NANO_FIXED_OPTIONS,
+        ),
+        **dict.fromkeys(
+            (
+                f"drft_{size}_teacher"
+                for size in ("micro", "light", "xs", "s", "m", "l", "xl")
+            ),
+            ("_build_drft_teacher", _DRFT_TEACHER_FIXED_OPTIONS),
+        ),
+    },
+    "traiNNer.archs.drt_arch": {
+        "_build_drt": ("DRT", (*_DRFT_CONSTRUCTOR_FIXED_OPTIONS, "mlp_ratio", "rank")),
+        "DRT": ("DRFT", ()),
+        **dict.fromkeys(
+            (f"drt_{size}" for size in ("light", "xs", "s", "m", "l", "xl")),
+            ("_build_drt", _DRFT_PRESET_FIXED_OPTIONS),
+        ),
+    },
+    "traiNNer.archs.dual_arch": {
+        "dual_light": (
+            "DUAL",
+            ("embed_dim", "depths", "layer_indices", "pixel_unshuffle"),
+        ),
+        "dual_xs": ("DUAL", ("embed_dim", "depths", "layer_indices")),
+        **dict.fromkeys(
+            ("dual_s", "dual_m", "dual_l", "dual_xl"), ("DUAL", ("embed_dim", "depths"))
+        ),
+    },
+    "traiNNer.archs.gaterv3_arch": {
+        "gaterv3_r": ("GateRV3", ("dim",)),
+        "gaterv3_s": ("GateRV3", ("dim", "enc_blocks", "dec_blocks")),
+    },
+    "traiNNer.archs.rdual_arch": {"rdual": ("RDUAL", ())},
 }
+
+
+def _factory_parameters(
+    factory: Callable,
+) -> tuple[dict[str, inspect.Parameter], dict[str, Any]]:
+    constructor = factory.__init__ if inspect.isclass(factory) else factory
+    parameters = dict(inspect.signature(constructor).parameters)
+    hints = get_type_hints(constructor, include_extras=True)
+
+    module = getattr(factory, "__module__", "")
+    name = getattr(factory, "__qualname__", "")
+    forwarding = _FACTORY_FORWARDING.get(module, {}).get(name)
+    if forwarding is None:
+        return parameters, hints
+
+    kwargs = next(
+        (
+            key
+            for key, param in parameters.items()
+            if param.kind == inspect.Parameter.VAR_KEYWORD
+        ),
+        None,
+    )
+    owner = import_module(module)
+    if kwargs is None or getattr(owner, name, None) is not factory:
+        return parameters, hints
+
+    target, fixed = forwarding
+    forwarded_parameters, forwarded_hints = _factory_parameters(getattr(owner, target))
+    for key in fixed:
+        forwarded_parameters.pop(key, None)
+    # Explicit wrapper parameters supply their own defaults and annotations.
+    del parameters[kwargs]
+    return forwarded_parameters | parameters, forwarded_hints | hints
 
 
 def generate_registry_structs(registry: Registry | list, issues: list[dict]) -> dict[str, type[Struct]]:
@@ -40,19 +129,7 @@ def generate_registry_structs(registry: Registry | list, issues: list[dict]) -> 
 
     for name, cls in sorted(registry, key=lambda item: item[0]):
         try:
-            constructor = cls.__init__ if inspect.isclass(cls) else cls
-            sig = inspect.signature(constructor)
-            hints = get_type_hints(constructor, include_extras=True)
-            parameters = dict(sig.parameters)
-            if name in PRESET_FIXED_OPTIONS:
-                forwarded = hints["return"].__init__
-                parameters = {
-                    **inspect.signature(forwarded).parameters,
-                    **parameters,
-                }
-                hints = {**get_type_hints(forwarded, include_extras=True), **hints}
-                for fixed in PRESET_FIXED_OPTIONS[name]:
-                    parameters.pop(fixed, None)
+            parameters, hints = _factory_parameters(cls)
 
             exclude_types = {type, Callable}
 
@@ -98,7 +175,7 @@ def generate_registry_structs(registry: Registry | list, issues: list[dict]) -> 
                 fields=fields,
                 tag=True,
                 kw_only=True,
-                forbid_unknown_fields=closed or name in PRESET_FIXED_OPTIONS,
+                forbid_unknown_fields=closed,
             )
             structs[name] = struct
         except Exception as e:
@@ -122,7 +199,8 @@ def create_dynamic_train_options(
     ]
     new_fields.append(new_val)
     new_fields = tuple(new_fields)
-    return defstruct(name=name, fields=new_fields, kw_only=True)
+    return defstruct(name=name, fields=new_fields, kw_only=True,
+                     forbid_unknown_fields=cls.__struct_config__.forbid_unknown_fields)
 
 
 def dataset_type_names(registry: Registry) -> tuple[str, ...]:
@@ -150,6 +228,7 @@ def build_schema() -> dict[str, Any]:
     """Generate the recipe schema from the runtime and task registries."""
     load_task_providers()
     from .catalog_metadata import catalog_metadata
+    from .recipe_fields import add_recipe_fields
 
     issues = []
     losses = generate_registry_structs(LOSS_REGISTRY, issues)
@@ -200,6 +279,7 @@ def build_schema() -> dict[str, Any]:
     (schema, *task_schemas), definitions = json.schema_components(
         (redux_options, *options_by_task.values())
     )
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$defs"] = definitions
     task_constraints = []
     for (task, options_type), task_schema in zip(
@@ -230,7 +310,9 @@ def build_schema() -> dict[str, Any]:
         definitions["ReduxOptions"]["allOf"] = task_constraints
 
     add_loss_schedule_schema(schema)
-    schema["x-trainner-catalog"] = {**catalog_metadata(), "signatureIssues": issues}
+    catalog = catalog_metadata()
+    add_recipe_fields(definitions, catalog, TRAINING_TASKS)
+    schema["x-trainner-catalog"] = {**catalog, "signatureIssues": issues}
     return schema
 
 

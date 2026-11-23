@@ -2,6 +2,10 @@
 set -eu
 entry=$(realpath -- "$0")
 root=$(dirname -- "$entry")
+if [ "${1:-}" = remote ]; then
+    shift
+    exec bash "$root/scripts/remote-setup.sh" "$@"
+fi
 if [ -n "${TRAINNER_GUI_PYTHON:-}" ]; then
     runtime=$TRAINNER_GUI_PYTHON
 elif [ -x "$root/venv/bin/python" ]; then

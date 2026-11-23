@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from trainner_config.resume import recipe_learning_rate
 from trainner_data.file_version import artifact_version
 
 from . import run_observe as observe
@@ -70,6 +71,59 @@ def _summary(config: dict[str, Any]) -> dict[str, Any]:
     if type(total) is int and total > 0:
         result["total"] = total
     return result
+
+
+def _resume_settings(config: dict[str, Any]) -> dict[str, Any]:
+    datasets = config.get("datasets")
+    dataset = datasets.get("train") if isinstance(datasets, dict) else None
+    batch = dataset.get("batch_size_per_gpu") if isinstance(dataset, dict) else None
+    train = config.get("train")
+    return {
+        "batchSize": batch if type(batch) is int and batch > 0 else None,
+        "learningRates": {
+            role: recipe_learning_rate(options.get("lr"))
+            for role in ("g", "d", "ae")
+            if isinstance(train, dict)
+            and isinstance(options := train.get(f"optim_{role}"), dict)
+        },
+    }
+
+
+def _resume_edits(
+    config: dict[str, Any],
+    batch_size: int | None,
+    learning_rates: dict[str, float] | None,
+    original_rates: dict[str, float | None] | None,
+) -> tuple[list[dict[str, Any]], dict[str, float | None] | None]:
+    settings = _resume_settings(config)
+    edits = []
+    if batch_size is not None:
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("batchSize must be a positive integer.")
+        if batch_size != settings["batchSize"]:
+            edits.append({"path": ["datasets", "train", "batch_size_per_gpu"], "value": batch_size})
+    if learning_rates is not None:
+        if not isinstance(learning_rates, dict):
+            raise ValueError("learningRates must be a map of optimizer roles to rates.")
+        configured = settings["learningRates"]
+        existing = config["train"].get("resume_previous_lrs") or {}
+        previous_rates = existing.copy()
+        for role, value in learning_rates.items():
+            if role not in configured:
+                raise ValueError(f"No optimizer is configured for learningRates role {role!r}.")
+            rate = recipe_learning_rate(value)
+            if rate is None:
+                raise ValueError(f"learningRates.{role} must be a finite nonnegative number.")
+            if rate == configured[role]:
+                continue
+            edits.append({"path": ["train", f"optim_{role}", "lr"], "value": rate})
+            if original_rates is None:
+                original_rates = configured
+            if (previous := original_rates.get(role)) is not None:
+                previous_rates.setdefault(role, previous)
+        if previous_rates != existing:
+            edits.append({"path": ["train", "resume_previous_lrs"], "value": previous_rates})
+    return edits, original_rates
 
 
 @lru_cache(maxsize=96)
@@ -351,6 +405,7 @@ class RunManager:
                 import_record = {"files": handoff["files"], "inputs": weights_only}
             atomic_text(attempt / "options.yml", yaml_text)
             command = process.invocation(self.root, directory, attempt, record["seed"])
+            command["env"]["TRAINNER_STUDIO_CONTROL"] = str(control)
             if self.project is not None:
                 command["env"].update(self.project.environment())
             if record.get("queueEntryId"):
@@ -407,6 +462,39 @@ class RunManager:
         directory, _ = self._managed(run_id)
         return directory
 
+    @staticmethod
+    def _checkpoint_request(control: Path, status: str) -> dict[str, Any] | None:
+        request = process.read_record(control / "checkpoint-request.json")
+        if request is None:
+            return None
+        receipt = process.read_record(control / "checkpoint-result.json")
+        if receipt is not None and receipt["id"] == request["id"]:
+            return receipt
+        if status not in ACTIVE:
+            return {**request, "status": "failed", "error": "The attempt ended before confirming this checkpoint."}
+        return {**request, "status": "pending"}
+
+    def request_checkpoint(
+        self, run_id: str, attempt_id: str, previous_request_id: str | None,
+    ) -> dict[str, Any]:
+        directory = self._writable(run_id)
+        with _control(self._control_path(directory)):
+            _, record = self._managed(run_id)
+            if record["attempt"] != attempt_id:
+                raise ValueError("This run has a newer attempt. Refresh before requesting a checkpoint.")
+            attempt = _attempt(directory, record)
+            control = self._control_path(attempt)
+            status = _state(attempt, control)["status"]
+            latest = self._checkpoint_request(control, status)
+            if latest and (latest["status"] == "pending" or previous_request_id != latest["id"]):
+                # A retry or second browser that saw the previous receipt shares this save.
+                return latest
+            if status != "running" or not (control / "checkpoint-ready").is_file():
+                raise ValueError("Wait for an active trainer that supports on-demand checkpoints.")
+            request = {"id": uuid4().hex}
+            process.write_record(control / "checkpoint-request.json", request)
+            return {**request, "status": "pending"}
+
     def stop(self, run_id: str) -> dict[str, Any]:
         directory = self._writable(run_id)
         with _control(self._control_path(directory)):
@@ -444,7 +532,7 @@ class RunManager:
             return opt.datasets["train"].num_worker_per_gpu
         return None
 
-    def _resume_recipe(self, attempt: Path, experiment: Path) -> str:
+    def _resume_recipe(self, attempt: Path, experiment: Path) -> tuple[str, bool]:
         options = attempt / "options.yml"
         text = observe.recipe_text(options) if observe.regular_file(options) else None
         if text is None:
@@ -468,9 +556,21 @@ class RunManager:
                 if edits:
                     text = render(text, edits)
                     config = read_recipe(text)
-        return latest_recipe(text, experiment, config)
+        pinned = latest_recipe(text, experiment, config)
+        selected = read_recipe(pinned)["path"]["resume_state"]
+        same_checkpoint = selected == config["path"].get("resume_state")
+        if not same_checkpoint and "resume_previous_lrs" in config["train"]:
+            pinned = render(pinned, [{"path": ["train", "resume_previous_lrs"], "remove": True}])
+        return pinned, same_checkpoint
 
-    def resume(self, run_id: str, *, train_workers: int | None = None) -> dict[str, Any]:
+    def resume(
+        self,
+        run_id: str,
+        *,
+        train_workers: int | None = None,
+        batch_size: int | None = None,
+        learning_rates: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         directory = self._writable(run_id)
         with _control(self._control_path(directory)):
             _, record = self._managed(run_id)
@@ -488,13 +588,25 @@ class RunManager:
                 )
             # Reuse private copies of any teacher or other persistent pretrained
             # inputs when resuming a run launched under a reproduction precondition.
-            yaml_text = self._resume_recipe(attempt, self._experiment(directory, record))
-            if train_workers is not None:
-                if type(train_workers) is not int or train_workers < 1:
-                    raise ValueError("trainWorkers must be a positive integer.")
-                if self._worker_replay_count(read_recipe(yaml_text)) is None:
-                    raise ValueError("Changing workers requires a checkpoint with position-seeded worker replay.")
-                yaml_text = render(yaml_text, [{"path": ["datasets", "train", "num_worker_per_gpu"], "value": train_workers}])
+            yaml_text, same_checkpoint = self._resume_recipe(attempt, self._experiment(directory, record))
+            if not same_checkpoint:
+                record.pop("resumeOriginalLearningRates", None)
+            if train_workers is not None or batch_size is not None or learning_rates is not None:
+                config = read_recipe(yaml_text)
+                edits, original_rates = _resume_edits(
+                    config, batch_size, learning_rates, record.get("resumeOriginalLearningRates")
+                )
+                if original_rates is not None:
+                    # Keep missing bases distinct from rates declared by a failed attempt.
+                    record["resumeOriginalLearningRates"] = original_rates
+                if train_workers is not None:
+                    if type(train_workers) is not int or train_workers < 1:
+                        raise ValueError("trainWorkers must be a positive integer.")
+                    if self._worker_replay_count(config) is None:
+                        raise ValueError("Changing workers requires a checkpoint with position-seeded worker replay.")
+                    edits.append({"path": ["datasets", "train", "num_worker_per_gpu"], "value": train_workers})
+                if edits:
+                    yaml_text = render(yaml_text, edits)
             return self._launch(directory, record, yaml_text)
 
     def _managed_view(
@@ -529,6 +641,8 @@ class RunManager:
             # Completion can fall between log entries. Keep telemetry at its logged step.
             result["iteration"] = state["completedIteration"]
         if detail or monitoring:
+            result["canSaveCheckpoint"] = state["status"] == "running" and (control / "checkpoint-ready").is_file()
+            result["checkpointRequest"] = self._checkpoint_request(control, state["status"])
             result.update(
                 observe.log_page(
                     console,
@@ -545,15 +659,20 @@ class RunManager:
                 result["curriculum"] = record["curriculum"]
             result["seed"] = record["seed"]
             result["yaml"] = observe.recipe_text(directory / "recipe.yml")
+            options = attempt / "options.yml"
+            effective = observe.recipe_text(options) if observe.regular_file(options) else None
             if self.project is not None:
-                options = attempt / "options.yml"
-                result["launchedYaml"] = observe.recipe_text(options) if observe.regular_file(options) else None
+                result["launchedYaml"] = effective
             result["resumeWorkerOverride"] = False
-            if state["status"] in {"stopped", "failed"} and "curriculum" not in record:
-                effective = observe.recipe_text(attempt / "options.yml")
+            if effective and "curriculum" not in record:
                 try:
-                    config = read_recipe(effective) if effective else {}
-                    if config.get("checkpoint_rng") and (config.get("datasets", {}).get("train") or {}).get("num_worker_per_gpu"):
+                    config = read_recipe(effective)
+                    result["resumeSettings"] = _resume_settings(config)
+                    if (
+                        state["status"] in {"stopped", "failed"}
+                        and config.get("checkpoint_rng")
+                        and (config.get("datasets", {}).get("train") or {}).get("num_worker_per_gpu")
+                    ):
                         pinned = latest_recipe(effective, experiment, config)
                         count = self._worker_replay_count(read_recipe(pinned))
                         if count is not None:

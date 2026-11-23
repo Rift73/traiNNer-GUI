@@ -19,7 +19,7 @@ from threading import BoundedSemaphore
 from urllib.parse import unquote
 
 from .desktop import _boot_id, _owns_live_lock, _start_ticks
-from .server import MAX_BODY, is_phone_access_route
+from .server import MAX_BODY, PHONE_ACCESS_ROUTE, is_phone_access_route, phone_qr_png
 
 _LOOPBACK = "127.0.0.1"
 _CONNECT_TIMEOUT = 1.0
@@ -209,9 +209,13 @@ class _GatewayHandler(BaseHTTPRequestHandler):
         ):
             raise _RequestError(HTTPStatus.BAD_REQUEST, "Use an origin-form request target.")
         if is_phone_access_route(route):
-            raise _RequestError(
-                HTTPStatus.FORBIDDEN, "Phone access settings are available on the desktop only."
-            )
+            # The remote desktop can display the existing link and QR code.
+            # Only the local CLI or desktop can change the Serve session.
+            read_only = self.command in {"GET", "HEAD"} and route in {
+                PHONE_ACCESS_ROUTE, PHONE_ACCESS_ROUTE + "/qr.png",
+            }
+            if not read_only:
+                raise _RequestError(HTTPStatus.FORBIDDEN, "Change phone access on the trainer host.")
         if self.headers.get_all("Transfer-Encoding") or self.headers.get_all("Trailer"):
             raise _RequestError(HTTPStatus.BAD_REQUEST, "Use a fixed-length request body.")
         if self.headers.get_all("Expect"):
@@ -232,12 +236,29 @@ class _GatewayHandler(BaseHTTPRequestHandler):
             raise _RequestError(HTTPStatus.BAD_REQUEST, "A request body is only supported for POST.")
         if route in {"/", "/index.html"}:
             target = "/mobile.html" + separator + query
+        elif route == "/desktop":
+            target = "/index.html" + separator + query
         return target, length
 
     def _proxy(self) -> None:
         try:
             self._authorize()
             target, length = self._request()
+            route = unquote(target.partition("?")[0])
+            if is_phone_access_route(route):
+                # Share this authenticated origin without contacting Studio's
+                # local gateway-management API or triggering its connection probe.
+                url = self.origin + "/"
+                if route == PHONE_ACCESS_ROUTE:
+                    data = json.dumps({"state": "ready", "url": url}).encode()
+                    mime = "application/json"
+                else:
+                    data = phone_qr_png(url)
+                    mime = "image/png"
+                self._headers(HTTPStatus.OK, len(data), mime)
+                if self.command != "HEAD":
+                    self.wfile.write(data)
+                return
             with self.upstream.connect() as connection:
                 self._send_request(connection, target, length)
                 with connection.getresponse() as response:

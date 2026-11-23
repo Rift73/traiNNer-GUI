@@ -31,6 +31,26 @@ When evaluating a model that predicts only Y or UV, choose where the other plane
 
 The normal trainer CLI, YAML recipes and existing checkpoints remain available. Training assets and output files are local to this machine. With a Windows project selected, editable recipes and run outputs live on that drive. For traditional checkouts, the workbench stores recipes and managed run outputs with its service state under `$XDG_STATE_HOME/traiNNer-GUI` (by default `~/.local/state/traiNNer-GUI`) in a subdirectory for this checkout. To use a different location, supply `--state-dir` before the command. To recover a Windows project after reinstalling the backend, select the same folder in Windows setup and open its run in **Runs**. Resume from a complete numbered checkpoint. Keep referenced datasets and pretrained files available at the paths in the recipe. Stop training before moving a project or opening it through another backend. The training queue and analysis history belong to the Linux service. Closing the browser leaves training under its supervisor. Use Run controls to stop a training job.
 
+### Save or adjust an active experiment
+
+In **Runs**, open a managed training run and choose **Save checkpoint**. Training continues. Wait for the saved iteration before using the numbered checkpoint. Repeated requests while a save is pending share that checkpoint.
+
+To change batch size or learning rate, stop the run and choose **Resume with other settings…**. Enter the new per-device batch size or the base rate for the optimizer you want to change. Plain **Resume** reuses the previous settings. The trainer preserves optimizer history and the schedule phase. For example, halving the base rate after a decay also halves the current rate and the remaining curve. Changing batch size changes which samples contribute to each update. The loader continues at the next sample when it can retain the epoch order. If automatic dataset enlargement changes that order, the trainer logs that it is restarting the saved epoch.
+
+### Train RDUAL on video episodes
+
+Choose the RDUAL starter recipe or open an existing RDUAL YAML. In **Datasets**, select the video folder, or choose specific episodes if the folder also contains extras. Use the MKV files directly, including on a Windows drive. Set the descale size and kernel for the source, check the video indexes, then prepare any missing or outdated indexes. Each episode gets a small JSON file in the adjacent `index` folder. For a fresh model or DUAL Light warm start, select a local NeuFlow v2 file under **Pretrained weights**, or leave the field empty to let the trainer locate and, if needed, download the default weights at startup. An RDUAL checkpoint with trained flow supplies its own weights. See the [RDUAL training guide](../RDUAL.md).
+
+## Train on a remote Linux server
+
+From the server's interactive SSH shell, clone this repository and run `./trainner-gui remote` in the checkout. Sign in to Tailscale with the same personal account you use on your desktop and phone. Setup reuses a compatible training environment and an existing Tailscale login. On a fresh supported Ubuntu host it can prepare the runtime and start a private userspace Tailscale node. Open the printed **Desktop** link on your computer or **Phone** link on your phone. Both browsers control the same trainer and browse the server's files. Closing SSH or turning off the desktop leaves the trainer running while the server stays up. On the remote desktop, **Open on phone** shows a QR code for the same server.
+
+The private link requires MagicDNS and HTTPS certificates in your tailnet, and an access rule allowing the selected Serve port (8732–8739). Use a user-owned Tailscale device on the server. Tagged or shared server identities do not meet the gateway’s owner check. When you finish the rental, run `./trainner-gui remote off` to close the private route and sign out a Tailscale node created by this checkout. An existing system Tailscale login stays available for its other services. End the rental through your provider to stop billing. [Tailscale HTTPS settings](https://tailscale.com/docs/how-to/set-up-https-certificates)
+
+On an hourly rental, stage the dataset and pretrained weights on storage close to the GPU before starting the rental. Keep complete checkpoints, including training state, on persistent storage. Keep the checkout and its virtual environment on a reusable volume or image to save setup time on the next rental.
+
+For managed Google Colab, Google requires a paid plan with a positive compute-unit balance to use SSH and a web UI as the primary interface. A managed runtime can still expire. [Google Colab FAQ](https://research.google.com/colaboratory/faq.html)
+
 ## Open on a phone with Tailscale
 
 Open **traiNNer-GUI.exe** and choose **Open on phone** on the desktop. On your phone, connect Tailscale with the same account. Scan the QR code with your camera to open the workbench in Safari or Chrome, or use **Copy link**. You can bookmark the address. Keep the desktop workbench running while you use the phone.

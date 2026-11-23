@@ -90,6 +90,8 @@ css/weights.css         checkpoint structure dialog    js/components/weights.js
 css/environment.css     trainer environment dialog     js/components/environment.js
 css/phone.css           Open on phone: rail button, dialog  js/components/phone.js (index.html only)
 css/combobox.css        a value with known choices     js/components/combobox.js
+css/video-prep.css      training videos of a clip-training recipe  js/recipe/video-prep.js, js/state/video-prep.js
+                                                       (result of the job: js/runs/videoindex.js)
 js/main.js              rail, next-step line, router (#/recipe, #/data, #/runs[/…])
 js/api.js               one function per endpoint; ApiError; imageUrl(), sizedUrl(), artifactUrl()
 js/store.js             createStore, persist (localStorage), createChannel
@@ -991,6 +993,25 @@ feature and each live action is the one the desktop page has. What differs is th
 - **A run is one page.** Its facts, its tabs, the open tab. The tabs stay at the top edge; tapping one
   brings them there. Telemetry draws the chart first and lists the series to tick under it. A log starts
   with its lines wrapped.
+- **Key/value lists keep room for the value.** The names take at most 44 % of the width
+  (`fit-content(44%)`), so a value is never squeezed to a letter per line; the run's facts too. Lists that
+  are one column on a narrow screen (the file facts) keep that.
+- **Provenance reads down the page.** A nested record and a long value go under their name at the full
+  width, a nested record indented behind a rule; short values stay beside their names; a figure never
+  splits. Paths and class names break only after a separator (`<wbr>`, added on this edition only).
+  The inputs are records (option, path, then size and time, each labelled), not a table.
+- **A tab strip keeps the chosen tab in view.** The strip moves sideways (never the page) until the
+  chosen tab is in its middle, and fades out at a side where more tabs wait (`data-more`).
+- **The next step does not lead to the open page.** A button whose address is the page that is open is
+  left out (`data-here`); the sentence and any other action stay ("The queue is paused" keeps Continue the
+  queue on the entry it points to). On a run's own page "Running: this run" with Open run then says
+  nothing the page's head does not: upright the whole line goes (`data-next-here`), sideways it stays,
+  because there it costs no height. Any other message brings it back.
+- **The bar says which run.** Once a run's name has scrolled away, the top bar shows it after the back
+  link (a copy for the eye; the page's heading stays the heading), and the connection keeps only its dot.
+  The theme is a square button with a half-filled circle; its words stay for a screen reader. A run's
+  name wider than the screen breaks after a separator, not before its last letter (`<wbr>`, added by
+  `js/mobile.js`).
 - **Sizes for a finger.** 16 px text, controls 44 px high (38 px for the small ones), and a row that does
   one thing is hit anywhere on it. Nothing depends on hover.
 - **Clear of the hardware.** The layout reads the notch and home-bar margins only through `--safe-t`,
@@ -1012,15 +1033,19 @@ feature and each live action is the one the desktop page has. What differs is th
   preference, else the phone's setting.
 - `js/mobile.js`: `placeOf(hash)` → `{screen, level, part, back}`; the back link (`.mback`); the run's tabs
   to the top edge; holding a ticked series row in place when a chart appears above it; the options form
-  back to its top when the section changes; the keyboard (`data-keyboard`, `--vvh`, `--kb`); `--view-h`
-  (the height of the screen area, for a part that fills it); the colour of the browser's bars. It ends by
-  importing `js/main.js`, unchanged.
+  back to its top when the section changes; the chosen tab in view and `data-more` on every tab strip in
+  the screen area; `data-here` and `data-next-here`; the run's name in the bar (`.mtitle`, `data-titled`)
+  and its places to break; the keyboard
+  (`data-keyboard`, `--vvh`, `--kb`); `--view-h` (the height of the screen area, for a part that fills
+  it); the colour of the browser's bars. It ends by importing `js/main.js`, unchanged.
 - `css/mobile.css`: sizes and faces, the shell, upright and sideways, controls, tabs, sheets, toasts.
   `css/mobile-screens.css`: Runs (overview, one run, the parts), the comparison stage, Recipe (the chooser,
   the open recipe), the folder picker.
 - Modules that read the mark: `store.js` (prefix), `runs/log.js` (lines start wrapped), `recipe/library.js`
   (`data-pane`, the back button), `ui.js` (`confirmOnPhone`, used by `runs/detail.js`, `runs/queue.js`,
-  `runs/curricula.js`, `main.js`).
+  `runs/curricula.js`, `main.js`), `runs/provenance.js` (`<wbr>` after separators). Its classes
+  `runs__prov-group`, `-long`, `-num`, `-packages`, `-inputs` and the inputs' `data-label` are read by
+  `mobile-screens.css` only.
 
 ## Open on phone (2026-11-22)
 
@@ -1050,6 +1075,138 @@ Parts: `js/components/phone.js` (`openPhoneDialog()`; `phoneView(answer)` and `p
 and exported for checks), `css/phone.css`, three functions in `js/api.js`, the button in `js/main.js`
 (which reads the phone edition's mark and leaves that page's bar as it was). `mobile.html` does not link
 `css/phone.css`: it is the page the dialog leads to.
+
+## Resume with other settings (2026-11-22)
+
+A stopped or failed run whose detail carries `resumeSettings` gets **Resume with other settings…** next to
+**Resume**. Its dialog (a sheet on the phone) holds one field per value the service offers: the batch size
+per GPU, the base learning rate of each optimizer the run configures (one field named "Learning rate" for
+a single optimizer; generator, discriminator and autoencoder when there are several), and the data loader
+workers where `resumeWorkerOverride` allows them.
+
+- **Resume stays one press.** The plain button is as it was. Pressing Resume in the dialog with nothing
+  changed sends the same request.
+- **Only differences are sent.** Each field starts from the run's own value; a value left as it is, emptied
+  or typed the same is not sent. A value the recipe does not set is an empty field marked "Not set".
+- **Said before it is pressed.** A line above the buttons says what Resume will change, in the numbers the
+  service will get (`5e-5` reads back as 0.00005), or that nothing is changed.
+- **It continues, it does not restart.** The text names what is kept: the newest training state, the
+  optimizer history and the place in the learning rate schedule. A new rate is the base the schedule works
+  from.
+- **A refusal costs nothing typed.** The dialog stays open while the service answers and shows a refusal
+  in place. A mistake in a field is named when the field is left or on Resume, not while it is typed.
+- **One dialog for all of it.** Where the service offers these settings the workers are a field of the same
+  dialog, so one resume can change them together. "Resume with other workers…" remains for a run that
+  offers only the workers.
+- **No keyboard before reading.** On the phone no field has the focus when the sheet opens. The learning
+  rate uses the full keyboard: a number pad cannot write `1e-4`.
+
+Parts: `runs/detail.js` (`resumeSettingsOf(run)`, `resumeWithSettings()`), `css/runs.css`
+(`.runs__resume-field`), `api.js` (`resumeRun(id, {batchSize, learningRates, trainWorkers})`).
+
+## Save checkpoint (2026-11-22)
+
+A run in training whose detail or monitor answer says `canSaveCheckpoint: true` gets **Save checkpoint**
+in its head, before **Stop training**, on the desktop page and the phone edition alike. One press asks the
+trainer for a full checkpoint now; nothing is asked first, since it changes nothing about the run.
+
+- **One line, three states.** Under the title: being written (with a spinner), "Checkpoint saved at
+  iteration N" with **Show the files**, or that it was not saved and why. It shows the newest request
+  while the run trains; a request that was not saved is still said after the run has ended.
+- **Saved means confirmed.** Success is said only from the trainer's own receipt, with the iteration it
+  names, never from the request having been accepted.
+- **The button says it too.** While a save is under way it reads "Saving checkpoint…", keeps the focus
+  (`aria-disabled`) and ignores a press. After an outcome it is ready for another save.
+- **The outcome finds the person.** An outcome that arrives while the page watches is also a toast (the
+  head can be scrolled away on the phone), with the way to the files. A request already finished when the
+  page opens is shown in the line only.
+- **One save for many presses.** Each request carries the id of the request shown last, so a second
+  press, a retry after a lost answer and another window share one save.
+- **Read sooner while it is written.** The run is read every 1.5 s while a request is pending, then at
+  the usual pace.
+
+Parts: `runs/detail.js` (`checkpointOf(run)`, `renderCheckpoint()`, `saveCheckpoint()`, `showFiles()`,
+`MONITOR_FIELDS`), `css/runs.css` (`.runs__checkpoint`), `api.js` (`saveCheckpoint(id, attemptId,
+previousRequestId)`).
+
+## Training videos (2026-11-22)
+
+A recipe whose training dataset is a `VideoClipDataset` (clip training on video files, for RDUAL and RSR)
+gets a **Training videos** panel in its Datasets section, on the desktop page and the phone edition alike.
+
+### What a person can now do
+
+- **Point the recipe at the videos.** "Choose folder…" and "Choose videos…" use the folder picker and
+  write `datasets.train.dataroot_gt` at once; the panel lists what the recipe names.
+- **See which videos are ready.** The panel asks the service where each video's index stands as soon as the
+  videos or the descale options change, and on "Check videos": ready, no index, out of date, or cannot be
+  used, with the service's reason. Problems first; ready videos wait in a closed block.
+- **Prepare them in one press.** "Prepare N videos" starts the job `index-video-clips`, which writes the
+  missing indexes next to the videos. Its progress (a bar on real counts, the video being read), Cancel and
+  the way to the job stay in the panel; when it ends, the videos and the recipe are checked again.
+- **Find a running preparation again.** It is followed by shared state, so it survives a rebuild of the
+  form, another screen, a reload and the phone, which adopts a preparation of the same videos started
+  elsewhere.
+- **Start RDUAL from the right weights.** For an RDUAL network the Pretrained weights section opens with
+  the three ways to start (a complete RDUAL checkpoint, a DUAL Light checkpoint, from scratch) and pickers
+  for the generator checkpoint and the NeuFlow v2 weights (`path.neuflow_weights`, now a field with Browse).
+
+### Rules added
+
+- **Nothing waits for the recipe check.** The videos can be checked and prepared while other options are
+  still unset; the panel sends the text in the editor, saved or not.
+- **A question is asked once.** The automatic check does not repeat a question that was refused; "Check
+  videos" and "Check again" always ask. A service without the route says so in one sentence.
+- **What Prepare cannot fix is said first.** While any video cannot be used, there is no Prepare button: the
+  job would refuse to start.
+- **One status region.** The panel's sentences share one `role="status"` region; its notices carry none of
+  their own.
+- **Videos are not image folders.** The Data screen shows a video dataset with its videos, one line from
+  the same check and "Prepare in the recipe"; the next-step line and the Data station speak of videos, and
+  never ask to check them as folders.
+- **No guess at the starting point.** The RDUAL guide lists the cases and does not claim to know which one
+  applies.
+- **A template's example is not an error.** While the videos are still the template's example path and the
+  check refuses it, the panel, the Data station and the next-step line ask for a folder ("Choose the folder
+  that holds the training videos.") instead of showing the refusal.
+- **Only what the job published.** The panel and the job page show the counts and the last video the
+  service reported, and "Starting…" until there is a total; no bar without one. The file list waits while a
+  job runs, since its rows would contradict it, and a finished job's line goes when the videos or the
+  descale options change.
+- **A row says what the badge does not.** A video without an index has no reason line; other reasons lose
+  the path in front and the "Prepare video indexes" at the end.
+- **Revealing means the panel.** "Prepare videos", "Show progress", "Show videos" and the Data screen's
+  button open the Datasets section with the panel at the top and its title focused (`revealVideoPanel`).
+
+### Several videos in one visit (2026-11-22, later)
+
+- **What a person can now do.** "Choose videos…" beside "Choose folder…" opens the folder picker with a box
+  on every video file: tick E01 to E10 of a folder and leave E11 out, in one visit, across folders if need
+  be. The "Videos" value then shows each folder once with its file names ("10 video files: …").
+- **The picker's new option.** `pickPath({mode: 'file', multiple: true, selected, confirmLabel})`, where
+  `confirmLabel` may be a function of the count, resolves to the ticked paths in natural order (E2 before
+  E10), never an empty list, or `null` when cancelled. A click, a tap, Space or Enter ticks a file; Shift
+  ticks a range; Ctrl+A or "Select all shown" ticks what the list shows; "Clear selection" empties the set;
+  a folder still opens. The foot says how many files are ticked and how many of them are in other folders.
+  The desktop page names the range gesture beside the two actions ("Shift+click ticks a range."); the phone
+  edition, which has no Shift key, does not. Without `multiple` the picker is exactly as before.
+- **A visit defines the set.** What was ticked replaces the video files the recipe named, the folder that
+  holds them (so a folder never stands beside its own files and undoes the choice) and the template's
+  example; other folders stay where they were. The toast says how many videos, and which folder they
+  replace.
+
+### Parts
+
+- `state/video-prep.js`: `videoPrep` (`get`, `subscribe`, `check({force})`, `prepare({again})`, `cancel()`,
+  `restore()`, `active()`), `inputs(config)`, `counts(answer)`, `jobActive(job)`, `exampleUnchosen(state)`,
+  `VIDEO_DATASET`, `VIDEO_INDEX_KIND`.
+- `recipe/video-prep.js` (`css/video-prep.css`): `mountVideoPrep(host)`, `askAndPrepare()` (asks first
+  on the phone edition) and `revealVideoPanel()`. The panel stops listening once it has left the page.
+- `runs/videoindex.js`: `renderVideoIndex` and `videoIndexProgressText` for the kind `index-video-clips`,
+  which the "New analysis job" dialog does not list (`noDialog`).
+- `api.js`: `videoIndexStatus(yaml)`. `recipe/schema.js`: `path.neuflow_weights` in `SERVICE_OPTIONS`.
+  `recipe/fields.js`: its Browse. `recipe/sections.js`: the datasets section rebuilds when a dataset's type
+  changes, the pretrained section when the network does. `main.js`: `videoStep()`.
 
 ## How the UI is checked
 

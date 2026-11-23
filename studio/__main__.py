@@ -26,7 +26,10 @@ def state_directory(root: Path = ROOT) -> Path:
 
 
 def parser() -> argparse.ArgumentParser:
-    main = argparse.ArgumentParser(prog="trainner-gui", description="Local traiNNer-GUI training harness")
+    main = argparse.ArgumentParser(
+        prog="trainner-gui", description="Local traiNNer-GUI training harness",
+        epilog="From a Linux source checkout, run ./trainner-gui remote to set up private remote access.",
+    )
     main.add_argument("--state-dir", type=Path, default=state_directory(),
                       help="Studio state directory. Windows projects keep their runtime state under this directory.")
     commands = main.add_subparsers(dest="command",required=True)
@@ -39,6 +42,7 @@ def parser() -> argparse.ArgumentParser:
     url.add_argument("--hold-wsl", action="store_true", help="Keep one Windows client connected while this service runs.")
     phone = commands.add_parser("tailscale", help="Show or control private phone access through Tailscale.")
     phone.add_argument("action", choices=("status", "on", "off"), nargs="?", default="status")
+    phone.add_argument("--links", action="store_true", help="Print desktop and phone links for this private gateway.")
     for name,help_text in (("validate","Check a training recipe without initializing CUDA."),
                            ("start","Launch a training recipe as a managed run.")):
         command = commands.add_parser(name,help=help_text)
@@ -318,12 +322,25 @@ def _command(args: argparse.Namespace, state: Path) -> int:
 
             print(json.dumps({"closed":stop_service(ROOT, workspace.state)}))
             return 0
-        from .tailnet import configure, status
+        from .tailnet import configure, phone_access, status
 
+        if args.links and args.action == "off":
+            raise ValueError("Use tailscale off to close access, or tailscale status --links to display the links.")
         if args.action == "on":
             desktop_url(ROOT, state, workspace=workspace)
-        result = status(workspace.state) if args.action == "status" else configure(ROOT, workspace.state, args.action)
-        print(json.dumps(result))
+        if args.action == "status":
+            result = phone_access(ROOT, workspace.state) if args.links else status(workspace.state)
+        else:
+            result = configure(ROOT, workspace.state, args.action)
+        if args.links:
+            if result["state"] != "ready":
+                print(result.get("detail") or f"Phone access is {result['state']}.", file=sys.stderr)
+                return 1
+            base = result["url"].rstrip("/")
+            print(f"Desktop  {base}/desktop")
+            print(f"Phone    {base}/")
+        else:
+            print(json.dumps(result))
         return int((args.action == "on" and result["state"] != "ready") or result["state"] == "cleanup-failed")
     backend=Services(ROOT,state)
     if args.command == "prepare":

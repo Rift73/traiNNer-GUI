@@ -92,8 +92,11 @@ def _dash(text, node, parent, lower):
 
 def remove_text(text, path, loader):
     parent = _spans(text, loader)
+    owning_key = None
     for key in path[:-1]:
-        parent = parent.entries()[parent.at(key)][1]
+        entry, value = parent.entries()[parent.at(key)]
+        owning_key = entry if parent.mapping else None
+        parent = value
     entries = parent.entries()
     i = parent.at(path[-1])
     first, value = entries[i]
@@ -115,7 +118,13 @@ def remove_text(text, path, loader):
         # An empty mapping/list needs an explicit representation. Preserve the
         # surrounding indentation, anchor spelling and following comment lines.
         start = first.start if parent.mapping else _dash(text,first,parent,_line_start(text,parent.start))
-        return text[:start]+("{}" if parent.mapping else "[]")+_after_value(text,value.end,keep_newline=True)
+        empty = "{}" if parent.mapping else "[]"
+        # YAML allows a block sequence's dashes to align with its mapping key.
+        # Once empty, the flow value [] must be indented under that key.
+        if (not parent.mapping and owning_key is not None
+                and start - _line_start(text, start) == owning_key.event.start_mark.column):
+            empty = "  []"
+        return text[:start]+empty+_after_value(text,value.end,keep_newline=True)
     if parent.mapping:
         start = first.start
     else:

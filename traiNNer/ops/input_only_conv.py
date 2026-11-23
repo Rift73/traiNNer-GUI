@@ -46,12 +46,28 @@ class _InputOnlyConv(torch.autograd.Function):
         # With output_mask=(True, False, False), convolution_backward consumes
         # only input geometry, not input values. This temporary is not a saved
         # activation; it also preserves the original convolution's layout.
-        geometry = torch.empty(
-            ctx.input_shape,
-            device=grad_output.device,
-            dtype=grad_output.dtype,
-            memory_format=memory_format,
-        )
+        if (
+            ctx.channels_last
+            and grad_output.is_cuda
+            and grad_output.dtype == torch.float32
+            and weight.is_contiguous(memory_format=torch.channels_last)
+            and torch.compiler.is_compiling()
+        ):
+            # Expose the physical strides to Inductor's input-gradient layout selection.
+            _, channels, height, width = ctx.input_shape
+            geometry = torch.empty_strided(
+                ctx.input_shape,
+                (height * width * channels, 1, width * channels, channels),
+                device=grad_output.device,
+                dtype=grad_output.dtype,
+            )
+        else:
+            geometry = torch.empty(
+                ctx.input_shape,
+                device=grad_output.device,
+                dtype=grad_output.dtype,
+                memory_format=memory_format,
+            )
         grad_input, _, _ = torch.ops.aten.convolution_backward.default(
             grad_output,
             geometry,

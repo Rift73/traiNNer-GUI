@@ -74,13 +74,13 @@ h2,
 .app {
   /* --vvh: the height left above the on-screen keyboard (js/mobile.js), else the whole screen. */
   height: var(--vvh, 100dvh);
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   grid-template-areas:
-    "brand end"
-    "view view"
-    "next next"
-    "tabs tabs";
+    "brand title end"
+    "view view view"
+    "next next next"
+    "tabs tabs tabs";
 }
 
 /* The rail's three parts are placed one by one: the name and the connection at the top, the stations
@@ -140,6 +140,39 @@ h2,
   color: var(--ink-2);
 }
 
+/* Deep in a run's tab its name has scrolled away: the bar says which run it is (js/mobile.js copies the
+   name and sets data-titled while the page's own heading is out of view). */
+.mtitle {
+  grid-area: title;
+  display: none;
+  align-self: center;
+  min-width: 0;
+  margin-top: var(--safe-t);
+  padding: 0 var(--s2) 0 var(--s3);
+  border-left: 1px solid var(--rule);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  line-height: 26px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:root[data-titled] .mtitle {
+  display: block;
+}
+
+/* The title takes the room of the connection's words; the dot stays, and so does the button. */
+:root[data-titled] .conn__text {
+  display: none;
+}
+
+:root[data-titled] .conn {
+  min-width: var(--control-h);
+  justify-content: center;
+}
+
 .rail__end {
   grid-area: end;
   align-self: stretch;
@@ -167,6 +200,24 @@ h2,
   flex: none;
   width: 10px;
   height: 10px;
+}
+
+/* The theme: a square button with a half-filled circle. Its words stay in the button for a screen
+   reader, at no size. */
+.rail__end > .btn:not(.phone-open) {
+  flex: none;
+  width: var(--control-sm);
+  padding: 0;
+  font-size: 0;
+}
+
+.rail__end > .btn:not(.phone-open)::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: linear-gradient(to right, currentColor 50%, transparent 50%);
 }
 
 .view {
@@ -237,6 +288,19 @@ h2,
   :root:not([data-level="home"]) .next > .btn + .btn {
     display: none;
   }
+
+  /* On a run's own page "Running: this run" with Open run would only repeat the page's head: the line
+     steps aside (js/mobile.js sets data-next-here), and comes back for anything else it has to say.
+     Held sideways it costs no height, so it stays. */
+  :root[data-next-here] .next {
+    display: none;
+  }
+}
+
+/* A button that leads to the page that is already open is left out (js/mobile.js marks it); the sentence
+   and any other action stay. */
+.next > a.btn[data-here] {
+  display: none;
 }
 
 /* The stations: where the person is, and how each of the three stands. */
@@ -380,6 +444,11 @@ h2,
 
   .next > .btn {
     height: 36px;
+  }
+
+  /* The run's name is not repeated in the bar: the bar has no room for it here. */
+  :root[data-titled] .mtitle {
+    display: none;
   }
 
   .station__state {
@@ -557,6 +626,37 @@ summary {
   background: none;
 }
 
+/* A strip wider than the screen fades out at the side where more tabs are (js/mobile.js sets data-more
+   to start, end or both, and keeps the chosen tab in view). The fades are painted over the tabs, not cut
+   out of them: the run's strip is held at the top with the page passing under it. They take no room. */
+.tabs::before,
+.tabs::after {
+  content: "";
+  position: sticky;
+  z-index: 1;
+  flex: none;
+  width: 24px;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.tabs::before {
+  left: 0;
+  margin-right: -24px;
+  background: linear-gradient(to right, var(--panel), transparent);
+}
+
+.tabs::after {
+  right: 0;
+  margin-left: -24px;
+  background: linear-gradient(to left, var(--panel), transparent);
+}
+
+.tabs:is([data-more="start"], [data-more="both"])::before,
+.tabs:is([data-more="end"], [data-more="both"])::after {
+  opacity: 1;
+}
+
 /* ───────── panes, tables, notices ───────── */
 
 .pane + .pane {
@@ -579,6 +679,15 @@ summary {
 
 .badge {
   white-space: nowrap;
+}
+
+/* A key/value list: the names take at most 44 % of the width, so a value always has more than half and
+   is never squeezed to a letter per line by a long name. The run's facts too (their desktop columns,
+   150 px pairs, overflow a phone). Lists that are one column on a narrow screen keep that; this rule
+   weighs one class, so a list given its own columns in mobile-screens.css still has them. */
+.kv:where(:not(.parameters__file-facts, .split__file-facts, .patches__file-facts)) {
+  grid-template-columns: fit-content(44%) minmax(0, 1fr);
+  column-gap: var(--s3);
 }
 
 .notice {

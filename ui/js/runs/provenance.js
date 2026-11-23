@@ -85,6 +85,31 @@ function fromNs(ns) {
   return fmt.dateTime(new Date(n / 1e6).toISOString());
 }
 
+const SEPARATORS = '/\\._-:';
+
+/**
+ * A path or a class name in the monospaced face. On the phone edition a line may break after each
+ * separator, so a narrow column breaks "torch.optim.adamw." before "AdamW" instead of inside a word. The
+ * <wbr> marks change the text flow, so the desktop page, which has room, keeps the plain text.
+ */
+function mono(value) {
+  return h('span', { class: 'mono' }, breakable(String(value)));
+}
+
+/** The text, with a <wbr> after each separator on the phone edition only (see mono). */
+function breakable(text) {
+  if (document.documentElement.dataset.edition !== 'mobile') return text;
+  const parts = [];
+  let from = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (!SEPARATORS.includes(text[i])) continue;
+    parts.push(text.slice(from, i + 1), h('wbr'));
+    from = i + 1;
+  }
+  parts.push(text.slice(from));
+  return parts;
+}
+
 /** Any value as display nodes: primitives as text, arrays as lists, objects as nested key/value lists. */
 function valueNode(value, key = '') {
   if (value === null || value === undefined) return h('span', { class: 'muted' }, 'Not reported');
@@ -95,7 +120,9 @@ function valueNode(value, key = '') {
   }
   if (typeof value === 'string') {
     if (/sha256$/i.test(key) || key === 'gitHead') return hash(value);
-    return /class|path|interpreter|checkout|state|llvm|scope/i.test(key) || value.includes('/') ? h('span', { class: 'mono' }, value) : value;
+    if (/class|path|interpreter|checkout|state|llvm|scope/i.test(key) || value.includes('/')) return mono(value);
+    // One long word in the text face ("torch.optim.adamw.AdamW" in a list of classes) breaks the same way.
+    return /\s/.test(value) ? value : breakable(value);
   }
   if (Array.isArray(value)) {
     if (!value.length) return h('span', { class: 'muted' }, 'None');
@@ -108,10 +135,34 @@ function valueNode(value, key = '') {
   return String(value);
 }
 
+const LONG = 28;
+
+/**
+ * How an entry sits on the phone (css/mobile-screens.css; no desktop stylesheet reads these classes):
+ * a group (a nested list) and a long value go under their label at the full width, a number never breaks.
+ */
+function entryClass(value, key) {
+  const long = (v) => typeof v === 'string' && v.length > LONG && !(/sha256$/i.test(key) || key === 'gitHead');
+  if (isObject(value)) return Object.keys(value).length ? 'runs__prov-group' : null;
+  if (Array.isArray(value)) {
+    if (value.some((v) => isObject(v) || Array.isArray(v))) return 'runs__prov-group';
+    return value.some(long) ? 'runs__prov-long' : null;
+  }
+  if (typeof value === 'number') return 'runs__prov-num';
+  return long(value) ? 'runs__prov-long' : null;
+}
+
 function kvList(obj, skip = []) {
   const keys = Object.keys(obj).filter((k) => !skip.includes(k));
   if (!keys.length) return h('span', { class: 'muted' }, 'None');
-  return h('dl', { class: 'kv runs__prov-kv' }, keys.map((k) => [h('dt', null, labelOf(k)), h('dd', null, valueNode(obj[k], k))]));
+  return h(
+    'dl',
+    { class: 'kv runs__prov-kv' },
+    keys.map((k) => {
+      const kind = entryClass(obj[k], k);
+      return [h('dt', { class: kind }, labelOf(k)), h('dd', { class: kind }, valueNode(obj[k], k))];
+    }),
+  );
 }
 
 function inputsTable(inputs) {
@@ -122,17 +173,19 @@ function inputsTable(inputs) {
     { class: 'runs__table-wrap' },
     h(
       'table',
-      { class: 'table runs__table' },
+      // runs__prov-inputs and data-label: on the phone each row is a record with its figures labelled
+      // (css/mobile-screens.css). No desktop stylesheet reads them.
+      { class: 'table runs__table runs__prov-inputs' },
       h('thead', null, h('tr', null, ['Option', 'Path', 'Size', 'Modified'].map((t, i) => h('th', { scope: 'col', class: i >= 2 ? 'num' : null }, t)))),
       h(
         'tbody',
         null,
         entries.map(([option, rec]) => {
           const r = isObject(rec) ? rec : { error: String(rec) };
-          const path = typeof r.path === 'string' ? h('span', { class: 'mono' }, r.path) : h('span', { class: 'muted' }, 'Not reported');
+          const path = typeof r.path === 'string' ? mono(r.path) : h('span', { class: 'muted' }, 'Not reported');
           const cells = typeof r.error === 'string' && r.error
             ? [h('td', { colspan: '2', class: 'runs__prov-err' }, r.error)]
-            : [h('td', { class: 'num' }, bytes(r.size) || 'Not reported'), h('td', { class: 'num' }, fromNs(r.mtimeNs) || 'Not reported')];
+            : [h('td', { class: 'num', 'data-label': 'Size' }, bytes(r.size) || 'Not reported'), h('td', { class: 'num', 'data-label': 'Modified' }, fromNs(r.mtimeNs) || 'Not reported')];
           return h('tr', null, h('th', { scope: 'row', class: 'mono runs__metric-name' }, option), h('td', { class: 'runs__prov-path' }, path), cells);
         }),
       ),
@@ -155,7 +208,7 @@ function environmentBlock(env) {
           'details',
           { class: 'runs__prov-details' },
           h('summary', null, `Installed packages (${fmt.int(packages.length)})`),
-          h('dl', { class: 'kv runs__prov-kv' }, packages.map(([name, version]) => [h('dt', { class: 'mono' }, name), h('dd', { class: 'mono' }, String(version))])),
+          h('dl', { class: 'kv runs__prov-kv runs__prov-packages' }, packages.map(([name, version]) => [h('dt', { class: 'mono' }, name), h('dd', { class: 'mono' }, String(version))])),
         )
       : null,
     rest.length

@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Iterator, Sized
-from typing import TypedDict
+from typing import NamedTuple, NotRequired, TypedDict, cast
 
 import torch
 from torch import Tensor
@@ -10,7 +10,8 @@ from torch.utils.data import BatchSampler, DataLoader, Dataset, IterableDataset
 from torch.utils.data.sampler import Sampler
 
 _INDEX_CHUNK = 65_536
-_CURSOR_VERSION = 1
+_BATCH_CURSOR_VERSION = 1
+_SAMPLE_CURSOR_VERSION = 2
 
 
 def _python_indices(indices: Tensor, dataset_size: int) -> Iterator[int]:
@@ -85,7 +86,7 @@ class SamplerGeometry(TypedDict):
 
 
 class SamplerCursor(TypedDict):
-    """Next rank-local batch of the epoch-seeded enlarged permutation.
+    """Next rank-local position of the epoch-seeded enlarged permutation.
 
     All ranks share the same cursor because their loader geometry gives them
     equal numbers of batches. The rank itself determines the stride at load
@@ -96,7 +97,20 @@ class SamplerCursor(TypedDict):
     version: int
     epoch: int
     next_batch: int
+    # Version 2 adds the offset when it is not a multiple of batch size.
+    next_sample: NotRequired[int]
     geometry: SamplerGeometry
+
+
+class SamplerResume(NamedTuple):
+    epoch: int
+    next_sample: int
+    saved_batch_size: int
+    restarted_epoch: bool
+
+
+def auto_enlarge_ratio(dataset_size: int, batch_size_per_gpu: int) -> int:
+    return max(2000 * batch_size_per_gpu // dataset_size, 1)
 
 
 def sampler_geometry(
@@ -127,35 +141,40 @@ def sampler_geometry(
     }
 
 
-def _batches_per_epoch(geometry: SamplerGeometry) -> int:
-    full, remainder = divmod(geometry["samples_per_rank"], geometry["batch_size"])
-    return full + int(not geometry["drop_last"] and remainder > 0)
+def _has_batch_at(geometry: SamplerGeometry, sample: int) -> bool:
+    required = geometry["batch_size"] if geometry["drop_last"] else 1
+    return geometry["samples_per_rank"] - sample >= required
 
 
 def make_sampler_cursor(
-    geometry: SamplerGeometry | None, epoch: int, next_batch: int
+    geometry: SamplerGeometry | None, epoch: int, next_sample: int
 ) -> SamplerCursor | None:
     if geometry is None:
         return None
-    num_batches = _batches_per_epoch(geometry)
-    if next_batch == num_batches:
-        epoch, next_batch = epoch + 1, 0
-    elif not 0 <= next_batch < num_batches:
+    if not 0 <= next_sample <= geometry["samples_per_rank"]:
         raise ValueError("The saved sampler position is outside the loader epoch.")
-    return {
-        "version": _CURSOR_VERSION,
+    if not _has_batch_at(geometry, next_sample):
+        epoch, next_sample = epoch + 1, 0
+
+    next_batch, offset = divmod(next_sample, geometry["batch_size"])
+    cursor: SamplerCursor = {
+        "version": _BATCH_CURSOR_VERSION,
         "epoch": epoch,
         "next_batch": next_batch,
         "geometry": geometry,
     }
+    if offset:
+        cursor["version"] = _SAMPLE_CURSOR_VERSION
+        cursor["next_sample"] = next_sample
+    return cursor
 
 
 def sampler_cursor_epoch(cursor: object) -> int | None:
-    """Read the recorded next-batch epoch even when the old geometry is reset."""
+    """Read the recorded epoch even when the old geometry is reset."""
     if (
         isinstance(cursor, dict)
         and type(cursor.get("version")) is int
-        and cursor["version"] == _CURSOR_VERSION
+        and cursor["version"] in (_BATCH_CURSOR_VERSION, _SAMPLE_CURSOR_VERSION)
         and type(epoch := cursor.get("epoch")) is int
         and epoch >= 0
     ):
@@ -163,10 +182,25 @@ def sampler_cursor_epoch(cursor: object) -> int | None:
     return None
 
 
+def _matches_auto_enlargement(geometry: SamplerGeometry, multiplier: int) -> bool:
+    batch_per_gpu, remainder = divmod(geometry["batch_size"], multiplier)
+    dataset_size = geometry["dataset_size"]
+    ratio = geometry["enlarge_ratio"]
+    samples = math.ceil(dataset_size * ratio / geometry["world_size"])
+    return (
+        remainder == 0
+        and ratio == auto_enlarge_ratio(dataset_size, batch_per_gpu)
+        and geometry["samples_per_rank"] == samples
+    )
+
+
 def restore_sampler_cursor(
-    cursor: object, geometry: SamplerGeometry | None
-) -> tuple[int, int]:
-    """Validate the stored position before creating a loader iterator."""
+    cursor: object,
+    geometry: SamplerGeometry | None,
+    *,
+    auto_batch_size_per_gpu: int | None = None,
+) -> SamplerResume:
+    """Validate the saved position and rebase it after a batch-size edit."""
     restart = "Use --restart-epoch to start the recorded epoch at its first batch."
     if geometry is None:
         raise ValueError(
@@ -176,23 +210,54 @@ def restore_sampler_cursor(
     if (
         epoch is None
         or not isinstance(cursor, dict)
-        or not isinstance(saved := cursor.get("geometry"), dict)
+        or not isinstance(saved_geometry := cursor.get("geometry"), dict)
     ):
         raise ValueError(f"Missing or unsupported sampler cursor. {restart}")
 
-    changed = [
-        f"{key} (saved {saved.get(key)!r}, current {value!r})"
+    if any(
+        type(saved_geometry.get(key)) is not type(value)
         for key, value in geometry.items()
-        if type(saved.get(key)) is not type(value) or saved[key] != value
-    ]
-    if changed:
-        raise ValueError(
-            f"Sampler cursor geometry changed: {', '.join(changed)}. {restart}"
-        )
-
+    ):
+        raise ValueError(f"Invalid sampler cursor geometry. {restart}")
+    saved = cast(SamplerGeometry, saved_geometry)
+    saved_batch_size = saved["batch_size"]
     next_batch = cursor.get("next_batch")
-    if type(next_batch) is not int or not 0 <= next_batch < _batches_per_epoch(
-        geometry
+    if saved_batch_size < 1 or type(next_batch) is not int:
+        raise ValueError(f"Invalid sampler cursor position. {restart}")
+    next_sample = (
+        cursor.get("next_sample")
+        if cursor["version"] == _SAMPLE_CURSOR_VERSION
+        else next_batch * saved_batch_size
+    )
+    if (
+        type(next_sample) is not int
+        or next_sample < 0
+        or not _has_batch_at(saved, next_sample)
+        or next_batch != next_sample // saved_batch_size
     ):
         raise ValueError(f"Invalid sampler cursor position. {restart}")
-    return epoch, next_batch
+
+    changed = {key for key in geometry if saved[key] != geometry[key]}
+    if changed - {"batch_size"}:
+        if (
+            auto_batch_size_per_gpu is not None
+            and {"batch_size", "enlarge_ratio"} <= changed
+            and changed <= {"batch_size", "enlarge_ratio", "samples_per_rank"}
+            and _matches_auto_enlargement(
+                saved, geometry["batch_size"] // auto_batch_size_per_gpu
+            )
+        ):
+            # An offset into the saved permutation cannot locate a suffix
+            # when automatic enlargement changes the permutation length.
+            return SamplerResume(epoch, 0, saved_batch_size, True)
+        detail = ", ".join(
+            f"{key} (saved {saved[key]!r}, current {geometry[key]!r})"
+            for key in geometry
+            if key in changed
+        )
+        raise ValueError(f"Sampler cursor geometry changed: {detail}. {restart}")
+
+    if not _has_batch_at(geometry, next_sample):
+        # With drop_last, a larger batch can exhaust the remaining suffix.
+        epoch, next_sample = epoch + 1, 0
+    return SamplerResume(epoch, next_sample, saved_batch_size, False)

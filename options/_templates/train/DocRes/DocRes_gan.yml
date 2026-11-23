@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Rift73/traiNNer-GUI/refs/heads/main/schemas/redux-config.schema.json
 #########################################################################################
 # General Settings
 #########################################################################################
@@ -71,8 +71,7 @@ network_d:
   inp_channels: 3
   out_channels: 1
   dim: 64
-  num_blocks: 4
-  norm_type: spectral
+  num_blocks: [1, 2, 2, 3]
 
 #########################################################################################
 # Pretrain and Resume Paths

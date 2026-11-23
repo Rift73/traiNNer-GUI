@@ -112,6 +112,15 @@ const KINDS = {
     noWeights: true,
     text: "Lists every named parameter and buffer of the recipe's network, with shape and size, before any data is chosen.",
   },
+  'index-video-clips': {
+    label: 'Video indexes',
+    noun: 'a video index preparation',
+    title: 'Prepare video indexes',
+    noWeights: true,
+    // Started from the training videos of a clip-training recipe (recipe/video-prep.js), not from the dialog.
+    noDialog: true,
+    text: 'Reads each training video of a clip-training recipe once and writes its index into a folder named index next to it. Indexed videos are reused.',
+  },
 };
 
 /** The job the dialog started last; its page takes the focus once when it is first drawn. */
@@ -131,6 +140,7 @@ const PARTS = {
   'average-checkpoints': { load: () => import('./average.js'), file: 'average.js', render: 'renderAverageCheckpoints', progress: 'averageCheckpointsProgressText' },
   'network-parameters': { load: () => import('./parameters.js'), file: 'parameters.js', render: 'renderNetworkParameters', progress: 'networkParametersProgressText' },
   'loss-report': { load: () => import('./lossreport.js'), file: 'lossreport.js', render: 'renderLossReport', progress: 'lossReportProgressText' },
+  'index-video-clips': { load: () => import('./videoindex.js'), file: 'videoindex.js', render: 'renderVideoIndex', progress: 'videoIndexProgressText' },
 };
 /**
  * Checkpoint average (studio/analysis_jobs.py `_average_inputs`): numbered .safetensors files of one role of
@@ -387,6 +397,7 @@ const KIND_PARAM_LABELS = {
   'image-difference': { left: DIFF_SIDES.left, right: DIFF_SIDES.right, reference: DIFF_SIDES.reference, region: 'Part of the image' },
   'average-checkpoints': { run: 'Run', role: 'Network', inputs: 'Checkpoints', batchNorm: 'Batch-norm statistics' },
   'network-parameters': { weights: 'Starting weights' },
+  'index-video-clips': { roots: 'Videos', settings: 'Descale settings' },
   evaluate: { device: 'Measured on' },
 };
 /** "CPU" or "GPU" for where a job ran; any other word as the service wrote it. */
@@ -983,6 +994,18 @@ function folderPairsTable(roots) {
   );
 }
 
+/** A bar for a part kind that counts {current, total} (video indexes); null for any other kind or without both numbers. */
+function countBar(job) {
+  const p = job?.progress;
+  if (job?.kind !== 'index-video-clips' || !isPlainObject(p) || !Number.isFinite(p.current) || !Number.isFinite(p.total) || p.total <= 0) return null;
+  const done = Math.min(p.current, p.total);
+  return h(
+    'div',
+    { class: 'progress progress--run', role: 'progressbar', 'aria-label': 'Videos indexed', 'aria-valuemin': '0', 'aria-valuemax': String(p.total), 'aria-valuenow': String(done) },
+    h('div', { class: 'progress__bar', style: { width: `${Math.min(100, (done / p.total) * 100)}%` } }),
+  );
+}
+
 /** Progress a running job carries: {stage, completedPairs, totalPairs, encodedBytes} for packing. */
 function progressBlock(progress) {
   const done = progress.completedPairs;
@@ -1051,7 +1074,7 @@ function mountJobDetail(host, id, { onChange }) {
   let progressSig = '';
   const renderProgress = () => {
     const open = statusOf(job.status).open && isPlainObject(job.progress);
-    mount(progressSlot, open ? (PARTS[job.kind] ? partProgress(job.progress) : progressBlock(job.progress)) : null);
+    mount(progressSlot, open ? (PARTS[job.kind] ? [countBar(job), partProgress(job.progress)] : progressBlock(job.progress)) : null);
   };
   const logPre = h('pre', { class: 'analysis__log', tabindex: '0', 'aria-label': 'Job log' });
   const logNote = h('p', { class: 'analysis__note', hidden: true }, 'Only the last 16 KB of the log are shown.');
@@ -1180,6 +1203,16 @@ function mountJobDetail(host, id, { onChange }) {
           return [[KIND_PARAM_LABELS[job.kind].validationFraction, h('span', { title: String(value) }, shareText(value))]];
         }
         if (job.kind === 'split-dataset' && key === 'seed' && Number.isInteger(value)) return [[KIND_PARAM_LABELS[job.kind].seed, String(value)]];
+        // Video indexes: the descale settings one per row; a null linear-light choice means the stored values are used.
+        if (job.kind === 'index-video-clips' && key === 'settings' && isPlainObject(value)) {
+          const rows = [];
+          if (Number.isFinite(value.width) && Number.isFinite(value.height)) rows.push(['Descale size', `${fmt.int(value.width)} × ${fmt.int(value.height)}`]);
+          if ('kernel' in value) rows.push(['Descale kernel', renderValue(value.kernel)]);
+          if ('border' in value) rows.push(['Descale border', renderValue(value.border)]);
+          if ('descale_linear_light' in value) rows.push(['Linear light', value.descale_linear_light === null ? 'Stored values' : value.descale_linear_light === true ? 'On' : value.descale_linear_light === false ? 'Off' : renderValue(value.descale_linear_light)]);
+          for (const k of Object.keys(value).filter((k) => !['width', 'height', 'kernel', 'border', 'descale_linear_light'].includes(k))) rows.push([keyWords(k), renderValue(value[k])]);
+          return rows;
+        }
         // Where an evaluation was measured is one row: the job's own word when it has one, else the request's.
         if (job.kind === 'evaluate' && key === 'device' && typeof value === 'string' && value) return job.device ? [] : [[KIND_PARAM_LABELS[job.kind].device, deviceWords(value)]];
         let shown;
@@ -3041,7 +3074,7 @@ export async function openAnalysisDialog({ kind = null, yaml = '', weights = '',
     );
   };
   const grouped = new Set(KIND_GROUPS.flatMap(([, keys]) => keys));
-  const ungrouped = Object.keys(KINDS).filter((key) => !grouped.has(key));
+  const ungrouped = Object.keys(KINDS).filter((key) => !grouped.has(key) && !KINDS[key].noDialog);
   const kindPicker = presetKind
     ? h('div', null, kindSummary())
     : h(

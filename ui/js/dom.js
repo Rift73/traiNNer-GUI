@@ -113,6 +113,16 @@ export const fmt = {
     if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
     return `${Math.floor(s / 86400)} d ago`;
   },
+  /**
+   * A trainer's estimate: when it ends, in the viewer's own time as dateTime writes it, then the time left
+   * as the trainer wrote it ("3:22:06"). Without a finish time (an older service, an estimate from an
+   * undated log line) the time left alone; '' without an estimate.
+   */
+  eta(left, finishIso) {
+    if (typeof left !== 'string' || !left) return '';
+    const finish = typeof finishIso === 'string' ? fmt.dateTime(finishIso) : '';
+    return finish ? `${finish} (${left} remaining)` : `${left} remaining`;
+  },
   dims(w, h) {
     return Number.isFinite(w) && Number.isFinite(h) ? `${w} × ${h}` : '';
   },

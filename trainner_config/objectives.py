@@ -458,8 +458,5 @@ def add_loss_schedule_schema(schema: dict[str, Any]) -> None:
                 "description": "Image restoration only. Use the bicubic antialiased float32 LQ image at output size, clamped to [1/255, 1].",
             }
     for field in _LEGACY_LOSS_FIELDS:
-        for branch in train_properties[field]["anyOf"]:
-            if branch.get("type") == "object":
-                branch.setdefault("properties", {}).update(schedule)
-                if field not in {"gan_opt", "ldl_opt"}:
-                    branch["properties"]["name"] = name
+        # Legacy slots construct the same registered losses and accept their options.
+        train_properties[field]["anyOf"][0] = {"$ref": "#/$defs/TrainOptions/properties/losses/items"}

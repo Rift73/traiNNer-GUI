@@ -728,3 +728,92 @@
     position: static;
   }
 }
+
+/* ── several files (pickPath multiple): a drawn box per row, two actions above the list ── */
+
+.picker__row--multi {
+  grid-template-columns: 18px 52px minmax(0, 1fr);
+}
+
+.picker__check {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  background: transparent;
+}
+
+.picker__check--none {
+  border-color: transparent;
+  background: none;
+}
+
+.picker__row--picked > .picker__check {
+  border-color: var(--ink);
+  background: var(--ink);
+}
+
+/* the tick: two borders of a rotated box, in the colour that reads on the filled box */
+.picker__row--picked > .picker__check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--ink-inverse);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.picker__multitools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.picker__multibtn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.picker__multihint {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+}
+
+.picker__picked {
+  color: var(--ink);
+}
+
+:root[data-edition="mobile"] .picker__multitools {
+  order: 3;
+  padding: var(--s2) var(--picker-r) var(--s2) var(--picker-l);
+}
+
+:root[data-edition="mobile"] .picker__multibtn {
+  min-height: var(--control-h);
+}
+
+/* A thumb's box at the start of the row; the row itself is the target, so the whole width answers. */
+:root[data-edition="mobile"] .picker__row--multi {
+  grid-template-columns: 28px 44px minmax(0, 1fr) 24px;
+}
+
+:root[data-edition="mobile"] .picker__check {
+  width: 22px;
+  height: 22px;
+  border-width: 2px;
+  border-radius: 4px;
+}
+
+:root[data-edition="mobile"] .picker__row--picked > .picker__check::after {
+  left: 6px;
+  top: 2px;
+  width: 6px;
+  height: 11px;
+  border-width: 0 3px 3px 0;
+}

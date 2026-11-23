@@ -4,6 +4,8 @@ import os
 import stat
 from pathlib import Path
 
+from trainner_config.official_weights import RN50_SHA256, rn50_cache_path
+
 DINO_REVISION = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINO_REPOSITORY = f"facebookresearch/dinov2:{DINO_REVISION}"
 _DINO_MODEL = "dinov2_vitb14_pretrain.pth"
@@ -15,7 +17,7 @@ _FDL_WEIGHTS = {
 _AA_VGG = "vgg19_lpf4_finetune-7ab2cf45.pth"
 
 
-def feature_assets(objectives, metrics, root: Path, *, hub: Path | None = None) -> list[dict]:
+def feature_assets(objectives, metrics, root: Path, *, hub: Path | None = None, network_d: dict | None = None) -> list[dict]:
     """Report known file locations without importing torch, contacting a host or loading weights."""
     if hub is None:
         cache_home = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser()
@@ -41,6 +43,13 @@ def feature_assets(objectives, metrics, root: Path, *, hub: Path | None = None) 
             else:
                 item["status"] = "invalid"
         assets[path] = item
+
+    if network_d and str(network_d.get("type", "")).lower() == "sed" and "l_g_gan" in objectives:
+        weights = network_d.get("encoder_weights")
+        if weights is None or isinstance(weights, str):
+            path = rn50_cache_path() if weights is None else root / Path(weights).expanduser()
+            add(path, "network_d.encoder_weights", "OpenAI CLIP RN50")
+            assets[path].update(expectedSha256=RN50_SHA256, autoDownload=weights is None)
 
     def dists(used_by, trained_coefficients):
         add(cached / "vgg16-397923af.pth", used_by, "torchvision")

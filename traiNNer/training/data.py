@@ -14,7 +14,7 @@ from trainner_config.devices import replay_worker_mode
 from trainner_config.tasks import TRAINING_TASKS, resolve_task
 
 from traiNNer.data import build_dataloader, build_dataset
-from traiNNer.data.data_sampler import EnlargedSampler
+from traiNNer.data.data_sampler import EnlargedSampler, auto_enlarge_ratio
 from traiNNer.tasks import load_task_provider
 from traiNNer.utils.redux_options import DatasetOptions, ReduxOptions
 
@@ -83,8 +83,8 @@ def create_train_val_dataloader(
                 raise ValueError("Gradient accumulation requires at least one microbatch.")
             dataset_enlarge_ratio = dataset_opt.dataset_enlarge_ratio
             if dataset_enlarge_ratio == "auto":
-                dataset_enlarge_ratio = max(
-                    2000 * dataset_opt.batch_size_per_gpu // len(train_set), 1
+                dataset_enlarge_ratio = auto_enlarge_ratio(
+                    len(train_set), dataset_opt.batch_size_per_gpu
                 )
             seed = None
             if replay_worker_mode(opt):
