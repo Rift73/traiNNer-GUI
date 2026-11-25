@@ -37,6 +37,8 @@ _DIRECTIONS = ("higher", "lower")
 _BUILTIN_METRICS = {
     "calculate_psnr",
     "calculate_ssim",
+    "calculate_butteraugli",
+    "calculate_ssimulacra2",
     "calculate_lpips",
     "calculate_dists",
     "calculate_topiq",

@@ -32,7 +32,7 @@ def supervised_metric_direction(task: str, metric: str, names: list[str] | tuple
 
 def metric_direction(options: dict) -> str:
     metric_type = options["type"]
-    default = "lower" if metric_type.lower() in ("calculate_lpips", "calculate_dists") else "higher"
+    default = "lower" if metric_type.lower() in ("calculate_lpips", "calculate_dists", "calculate_butteraugli") else "higher"
     value = options.get("better", default)
     if value not in ("lower", "higher"):
         raise ValueError(f"Metric {metric_type!r} needs better set to 'lower' or 'higher'.")

@@ -1,7 +1,10 @@
 import random
+from collections import OrderedDict
 from os import path as osp
+from typing import Any
 
 import numpy as np
+import pyvips
 from torchvision.transforms.functional import normalize
 
 from traiNNer.data.base_dataset import BaseDataset
@@ -12,7 +15,11 @@ from traiNNer.data.data_util import (
 )
 from traiNNer.data.image_luma import check_luma_normalization, luma_tensor
 from traiNNer.data.paired_lmdb import PairedLmdbReader
-from traiNNer.data.transforms import augment_vips_pair, paired_random_crop_vips
+from traiNNer.data.transforms import (
+    augment_vips_pair,
+    get_vips_dtype,
+    paired_random_crop_vips,
+)
 from traiNNer.utils import img2tensor
 from traiNNer.utils.img_util import img2rgb, vipsimfrombuffer, vipsimfrompath
 from traiNNer.utils.redux_options import DatasetOptions
@@ -55,6 +62,8 @@ class PairedImageDataset(BaseDataset):
         self.io_backend_opt = opt.io_backend
         if self.io_backend_opt["type"] not in ("disk", "lmdb"):
             raise ValueError(f"Unsupported paired image storage {self.io_backend_opt['type']!r}.")
+        self._decoded: OrderedDict[str, tuple[pyvips.Image, int]] = OrderedDict()
+        self._decoded_bytes = 0
         self._native_crop = opt.phase == "train" and opt.native_paired_crop
         if self._native_crop:
             from traiNNer.data.paired_crop import kernel
@@ -94,6 +103,40 @@ class PairedImageDataset(BaseDataset):
                 (self.lq_folder, self.gt_folder), ("lq", "gt"), self.filename_tmpl
             )
 
+    def __getstate__(self) -> dict[str, Any]:
+        # libvips images belong to the worker that decoded them.
+        return {**vars(self), "_decoded": OrderedDict(), "_decoded_bytes": 0}
+
+    def _read_image(self, path: str) -> pyvips.Image:
+        if not self.opt.decoded_cache_mib or self.opt.phase != "train":
+            return vipsimfrompath(path)
+        cached = self._decoded.get(path)
+        if cached is not None:
+            self._decoded.move_to_end(path)
+            return cached[0]
+
+        image = vipsimfrompath(path)
+        limit = self.opt.decoded_cache_mib * 2**20
+        size = (
+            int(image.width)
+            * int(image.height)
+            * int(image.bands)
+            * np.dtype(get_vips_dtype(image)).itemsize
+        )
+        if size <= limit:
+            while self._decoded_bytes + size > limit:
+                _, (_, evicted) = self._decoded.popitem(last=False)
+                self._decoded_bytes -= evicted
+            try:
+                image = image.copy_memory()
+            except pyvips.Error as exc:
+                raise OSError(
+                    f"Could not decode {path} into the image cache: {exc}"
+                ) from exc
+            self._decoded[path] = (image, size)
+            self._decoded_bytes += size
+        return image
+
     def _batch_samples(self, indices):
         from traiNNer.data.paired_crop import CropSamples
         high, scale = self.opt.gt_size, self.opt.scale
@@ -119,8 +162,8 @@ class PairedImageDataset(BaseDataset):
         gt_path, lq_path = pair["gt_path"], pair["lq_path"]
         encoded_lq = None
         if self.lmdb is None:
-            vips_img_gt = vipsimfrompath(gt_path)
-            vips_img_lq = vipsimfrompath(lq_path)
+            vips_img_gt = self._read_image(gt_path)
+            vips_img_lq = self._read_image(lq_path)
         else:
             encoded_lq = self.lmdb.read(pair["lq_db"], lq_path)
             vips_img_lq = vipsimfrombuffer(encoded_lq)

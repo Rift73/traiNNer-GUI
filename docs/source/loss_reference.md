@@ -365,6 +365,7 @@ num_proj_fd: 256
 phase_weight_fd: 1.0
 stride_fd: 1
 clip_min: 0
+tensorrt_fp16_backward: false
 loss_weight: 1.0
 ```
 ## perceptualloss
@@ -380,8 +381,12 @@ num_proj_fd: 256
 phase_weight_fd: 1.0
 stride_fd: 1
 clip_min: 0
+tensorrt_fp16_backward: false
 loss_weight: 1.0
 ```
+
+Enable `tensorrt_fp16_backward` to accelerate image gradients on compatible CUDA training crops. It requires the TensorRT Python runtime and the standard five VGG19 convolution taps. The first eligible FP32 input builds an engine for its batch, height and width. Other shapes use native VGG. The loss values retain the native forward precision, and image gradients use FP16 convolutions with a common scale.
+
 ## sparkloss
 
 Frozen perceptual features from [umzi2/SparK](https://github.com/umzi2/SparK),

@@ -800,7 +800,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         // An original Preview 1 shortcut has no updater. Opening the replacement
         // once migrates its managed backend and preserves the recorded workspace.
-        if (selected->managed && selected->root == managed_root && *payload_hash
+        // A previous manual install may already occupy a versioned Linux slot
+        // without a Windows updater receipt. Recognize its exact source digest.
+        const bool original_preview3 = selected->payload ==
+            "9815bac5468c5fb8ba32d321b72c8a2537be1eaa9534514c558d0217e10bba4c";
+        if (selected->managed && (selected->root == managed_root || original_preview3) && *payload_hash
             && selected->payload != payload_hash && !options.phone_status) {
             try {
                 apply_update(profile, folder, false, true);

@@ -54,6 +54,16 @@ FULL_LINES = [
 FULL_LINES += [FULL_LINES[i] for i in (7, 6, 5, 4)]
 
 
+MALTA_BANDS = (
+    (9, 1, 1.10039032555, 71.7800275169, False),
+    (8, 0, 173.5, 5, False),
+    (7, 1, 18.7237414387, 4498534.45232, True),
+    (6, 0, 6923.99476109, 8051.15833247, True),
+    (4, 1, 37.0819870399, 130262059.556, True),
+    (3, 0, 8246.75321353, 1009002.70582, True),
+)
+
+
 def stencil_bank(lines):
     weights = torch.zeros(len(lines), 1, 9, 9)
     for c, line in enumerate(lines):
@@ -237,14 +247,7 @@ class Metric(nn.Module):
 
     def difference(self, a, b):
         ac = [a[:, 0 : 1] * 0 for _ in range(3)]
-        for plane, channel, weight, norm, low in (
-            (9, 1, 1.10039032555, 71.7800275169, False),
-            (8, 0, 173.5, 5, False),
-            (7, 1, 18.7237414387, 4498534.45232, True),
-            (6, 0, 6923.99476109, 8051.15833247, True),
-            (4, 1, 37.0819870399, 130262059.556, True),
-            (3, 0, 8246.75321353, 1009002.70582, True),
-        ):
+        for plane, channel, weight, norm, low in MALTA_BANDS:
             ac[channel] = ac[channel] + self.malta(
                 a[:, plane : plane + 1], b[:, plane : plane + 1], weight, norm, low
             )

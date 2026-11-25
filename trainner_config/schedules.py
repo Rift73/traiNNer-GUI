@@ -211,6 +211,7 @@ def _validate_monitor(opt: ReduxOptions, path: str, dataset: str, metric: str, m
             and task_name(opt) in ("image_restoration", "recurrent_restoration")
             and isinstance(definition, dict) and str(definition.get("type", "")).casefold() in {
                 "calculate_psnr", "calculate_ssim", "calculate_lpips", "calculate_dists",
+                "calculate_butteraugli", "calculate_ssimulacra2",
                 "calculate_topiq", "calculate_neosr_psnr", "calculate_neosr_ssim", "calculate_neosr_topiq",
             }):
         raise SchedulerConfigError(path+".monitor.metric",

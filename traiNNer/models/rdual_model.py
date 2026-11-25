@@ -107,6 +107,14 @@ class RDUALModel(RealESRGANModel):
             if self.use_compile
             else None
         )
+        self._training_flow = None
+        if self.is_train and opt.train is not None and opt.train.rdual_flow_tensorrt:
+            from traiNNer.ops.neuflow_trt import FrozenFlowRunner
+
+            bare = self.get_bare_model(self.net_g)
+            if not isinstance(bare, RDUAL) or self.device.type != "cuda":
+                raise ValueError("train.rdual_flow_tensorrt requires RDUAL training on CUDA.")
+            self._training_flow = FrozenFlowRunner(bare.flow)
         self.step_functions = self.prepare_generator(compile)
         # The per-frame adjoint already initializes every trainable G gradient
         # outside graph capture. Keep its ordinary storage across updates.
@@ -240,7 +248,7 @@ class RDUALModel(RealESRGANModel):
         )
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self) -> None:
+    def _dequeue_and_enqueue(self, *, normalized_byte_gt: bool = False) -> None:
         """Clips do not use the training pair pool."""
 
     def feed_data(self, data: DataFeed) -> None:
@@ -521,10 +529,14 @@ class RDUALModel(RealESRGANModel):
         assert self.lq is not None
         bare = self.get_bare_model(self.net_g)
         assert isinstance(bare, RDUAL)
-        # guidance None: RDUAL's frozen NeuFlow v2 computes it from the clip
+        guidance = (
+            bare.guidance(self.lq, estimator=self._training_flow)
+            if self._training_flow is not None
+            else None
+        )
         return bare.backward_clip(
             self.lq,
-            None,
+            guidance,
             loss,
             shot_ids=self.shot_ids,
             keep=self.opt.clip_keep,

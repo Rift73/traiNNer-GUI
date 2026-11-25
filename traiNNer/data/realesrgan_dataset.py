@@ -598,11 +598,15 @@ class RealESRGANDataset(BaseDataset):
         kernel, kernel2, sinc_kernel = sample_degradation_kernels(self.opt)
 
         # BGR to RGB, HWC to CHW, numpy to tensor
+        normalized_byte_gt = (
+            not still_source and vips_img_target is None and img_gt.dtype == np.uint8
+        )
         if not still_source:
             img_gt = img2tensor(img_gt, from_bgr=False, float32=True)
 
         output: DataFeed = {
             "gt": img_gt,
+            "normalized_byte_gt": normalized_byte_gt,
             "kernel1": kernel,
             "kernel2": kernel2,
             "sinc_kernel": sinc_kernel,

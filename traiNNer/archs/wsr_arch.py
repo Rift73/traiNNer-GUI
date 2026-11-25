@@ -51,7 +51,10 @@ def _composed_conv(
     so cuDNN does not convert it on every call.
     """
     with torch.autocast(device_type=x.device.type, enabled=False):
-        weight, bias = module.composed(torch.promote_types(dtype, torch.float32))
+        if module._training_kernel is None:
+            weight, bias = module.composed(torch.promote_types(dtype, torch.float32))
+        else:
+            weight, bias = module._training_kernel
     layout = (
         torch.channels_last
         if x.is_contiguous(memory_format=torch.channels_last)
@@ -71,6 +74,8 @@ class Conv3XC(nn.Module):
     parameters. WSR's export preparation instead folds a separate eval copy
     permanently; the training branches remain the checkpoint source of truth.
     """
+
+    _training_kernel: tuple[Tensor, Tensor] | None = None
 
     def __init__(
         self,
@@ -260,6 +265,8 @@ class FoldableRGB5(nn.Module):
     activation, their kernels and biases can be composed into one 5x5 operator.
     Training runs that composition with autograd on every forward.
     """
+
+    _training_kernel: tuple[Tensor, Tensor] | None = None
 
     def __init__(self, cout: int, middle: int = 64) -> None:
         super().__init__()

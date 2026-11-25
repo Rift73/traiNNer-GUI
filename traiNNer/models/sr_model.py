@@ -1,3 +1,4 @@
+import math
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
@@ -17,6 +18,7 @@ from torch.utils.data import DataLoader
 if TYPE_CHECKING:
     from torch.utils.tensorboard.writer import SummaryWriter
 
+    from traiNNer.models.sr_weight_window import ComposedWeightWindow
     from traiNNer.models.sr_buffer_window import BufferWindow
     from traiNNer.models.sr_qat import QATWindow
 from tqdm import TqdmExperimentalWarning
@@ -136,6 +138,88 @@ def _zero_optimizer_gradients(optimizer: Optimizer, keep_storage: bool) -> None:
         optimizer.zero_grad(set_to_none=False)
 
 
+class _AccumulatedGradients:
+    """Add each microbatch's FP32 gradients into the optimizer's stable buffers."""
+
+    def __init__(self, parameters: Iterable[Tensor], *, native_backward: bool = False) -> None:
+        self.native_backward = native_backward
+        all_parameters = tuple(parameters)
+        self.parameters: tuple[Tensor, ...] = tuple(p for p in all_parameters if p.requires_grad)
+        self.frozen = tuple(p for p in all_parameters if not p.requires_grad)
+        self.groups: tuple[list[int], list[int]] | None = None
+
+    def backward(self, loss: Tensor) -> None:
+        params = self.parameters
+        # Native AccumulateGrad owns post-accumulation hooks, including hooks
+        # added after setup. It also allocates missing or newly unfrozen grads.
+        if (
+            not params
+            or torch.is_anomaly_enabled()
+            or any(p.requires_grad for p in self.frozen)
+            or any(
+                not p.requires_grad
+                or p.grad is None
+                or p.grad.requires_grad
+                or p._backward_hooks
+                or p._post_accumulate_grad_hooks
+                for p in params
+            )
+        ):
+            loss.backward()
+            return
+        if self.native_backward:
+            # Reentrant activation checkpointing requires backward() on the full
+            # graph. Collect its new gradients, then add them in groups below.
+            buffers = [p.grad for p in params]
+            for p in params:
+                p.grad = None
+            try:
+                loss.backward()
+                gradients = tuple(p.grad for p in params)
+            finally:
+                for p, buffer in zip(params, buffers, strict=True):
+                    p.grad = buffer
+        else:
+            gradients = torch.autograd.grad(loss, params, allow_unused=True)
+        if self.groups is None:
+            # One incompatible layout makes foreach fall back for the entire list.
+            grouped, separate = [], []
+            for index, (p, grad) in enumerate(zip(params, gradients, strict=True)):
+                dest = p.grad
+                if (
+                    grad is None
+                    or grad.is_sparse
+                    or dest is None
+                    or any(
+                        size != 1 and left != right
+                        for size, left, right in zip(
+                            p.shape, dest.stride(), grad.stride(), strict=True
+                        )
+                    )
+                ):
+                    separate.append(index)
+                else:
+                    grouped.append(index)
+            self.groups = grouped, separate
+        grouped, separate = self.groups
+        destinations, additions = [], []
+        for index in grouped:
+            grad = gradients[index]
+            if grad is not None:
+                destination = params[index].grad
+                assert destination is not None
+                destinations.append(destination)
+                additions.append(grad)
+        if additions:
+            torch._foreach_add_(destinations, additions)
+        for index in separate:
+            grad = gradients[index]
+            if grad is not None:
+                destination = params[index].grad
+                assert destination is not None
+                destination.add_(grad)
+
+
 class SRModel(BaseModel):
     """Base SR model for single image super-resolution."""
 
@@ -150,6 +234,9 @@ class SRModel(BaseModel):
     _ddp_excluded_g_params: tuple[nn.Parameter, ...] = ()
     _window_log_sums: dict[str, Tensor | float] | None = None
     _window_log_samples = 0
+    _g_accumulation: _AccumulatedGradients | None = None
+    _d_accumulation: _AccumulatedGradients | None = None
+    _weight_window: "ComposedWeightWindow[Any] | None" = None
     _gan_health_freq = 0
     _gan_health_sample: GanHealthSample | None = None
     _loss_output_clamp = "none"
@@ -519,9 +606,27 @@ class SRModel(BaseModel):
             return self.net_d(image, condition)
         if isinstance(self.d_conditioner, LQCondition):
             return self.net_d(lq_discriminator_input(image, condition))
-        return self.net_d(medium_discriminator_input(image, condition))
+        image = medium_discriminator_input(image, condition)
+        if (
+            self.compile_discriminator
+            and self.memory_format == torch.channels_last
+            and image.ndim == 4
+            and image.shape[0] == 1
+        ):
+            # With a singleton batch, NHWC can have an arbitrary batch stride.
+            # cuDNN uses this stride to select the weight-gradient layout, even
+            # though it addresses the same pixels. Give Inductor and cuDNN the
+            # same canonical layout for the discriminator's first convolution.
+            image = image.to(memory_format=torch.channels_last)
+            _, channels, height, width = image.shape
+            image = image.as_strided(
+                image.shape, (channels * height * width, 1, width * channels, channels)
+            )
+        return self.net_d(image)
 
     def _discard_accumulated_gradients(self) -> None:
+        if self._weight_window is not None:
+            self._weight_window.clear()
         self._window_log_sums = None
         self._window_log_samples = 0
         if self._qat is not None:
@@ -540,6 +645,10 @@ class SRModel(BaseModel):
 
     def _finite_on_all_ranks(self, value: Tensor) -> bool:
         """Agree before any rank can leave its peers waiting in backward or step."""
+        if not self.opt.dist and not value.is_complex():
+            # The host needs a scalar decision here. Read the scalar directly
+            # so a single-rank run needs no separate device finiteness kernel.
+            return math.isfinite(value.item())
         finite = torch.isfinite(value)
         if self.opt.dist:
             dist.all_reduce(finite, op=dist.ReduceOp.MIN)
@@ -782,6 +891,7 @@ class SRModel(BaseModel):
             }
             logger.info("Using NeoSR spike gradient clipping for %s.", ", ".join(self._spike_clippers))
         self._prepare_cudagraph_gradient_accumulation()
+        self._prepare_single_image_accumulation()
         self.setup_schedulers()
 
         # logging features
@@ -1155,6 +1265,54 @@ class SRModel(BaseModel):
                 self.accum_iters,
             )
 
+    def _prepare_single_image_accumulation(self) -> None:
+        """Group B1 parameter additions and defer static kernel composition gradients to the update."""
+        if not (self.cudagraph_stable_gradients or self.cudagraph_stable_discriminator_gradients):
+            return
+        if (
+            self.device.type != "cuda"
+            or self.opt.datasets["train"].batch_size_per_gpu != 1
+            or self.opt.network_g is None
+            or self.opt.dist
+            or self.opt.num_gpu != 1
+            or self._qat is not None
+            or self._gan_health_freq
+            or self.distillation
+            or self._filtered_g_params
+            or type(self).optimize_parameters is not SRModel.optimize_parameters
+            or type(self)._generator_auxiliary_losses is not SRModel._generator_auxiliary_losses
+            or type(self)._forward_generator_for_training
+            is not SRModel._forward_generator_for_training
+        ):
+            return
+        # Retain native backward for objectives that own additional trainable leaves.
+        if any(p.requires_grad for loss in self.losses.values() for p in loss.parameters()):
+            return
+        if self.cudagraph_stable_gradients and self.optimizer_g is not None:
+            from traiNNer.archs.dual_arch import DUAL
+            from traiNNer.archs.wsr_arch import WESR, WideContextSR
+            from traiNNer.models.sr_weight_window import EDBBWeightWindow, WSRWeightWindow
+
+            generator = self.get_bare_model(self.net_g)
+            folded = None
+            if isinstance(generator, DUAL):
+                folded = EDBBWeightWindow(generator)
+            elif isinstance(generator, (WESR, WideContextSR)):
+                folded = WSRWeightWindow(generator)
+            self._g_accumulation = _AccumulatedGradients(
+                generator.parameters(), native_backward=folded is None
+            )
+            if folded is not None and folded.layers and folded.can_fold():
+                self._weight_window = folded
+        if self.cudagraph_stable_discriminator_gradients:
+            from traiNNer.archs.dunet_arch import DUnet
+
+            assert self.net_d is not None
+            discriminator = self.get_bare_model(self.net_d)
+            self._d_accumulation = _AccumulatedGradients(
+                discriminator.parameters(), native_backward=not isinstance(discriminator, DUnet)
+            )
+
     def _zero_generator_optimizer(self, optimizer: Optimizer) -> None:
         """Clear generator grads without releasing CUDA Graph-owned storage."""
         _zero_optimizer_gradients(optimizer, self.cudagraph_stable_gradients)
@@ -1298,6 +1456,33 @@ class SRModel(BaseModel):
         return total / len(self.distillation_feature_pairs)
 
     def optimize_parameters(
+        self,
+        current_iter: int,
+        current_accum_iter: int,
+        apply_gradient: bool,
+        *,
+        observe_objective: Callable[[Tensor, Tensor, dict[str, Tensor | float]], None]
+        | None = None,
+    ) -> None:
+        # The diagnostic differentiates the original parameters. A paused window
+        # may already have gradients from previous microbatches.
+        if observe_objective is not None and self._weight_window is not None:
+            with self._weight_window.unfolded():
+                self._optimize_sr_parameters(
+                    current_iter,
+                    current_accum_iter,
+                    apply_gradient,
+                    observe_objective=observe_objective,
+                )
+        else:
+            self._optimize_sr_parameters(
+                current_iter,
+                current_accum_iter,
+                apply_gradient,
+                observe_objective=observe_objective,
+            )
+
+    def _optimize_sr_parameters(
         self, current_iter: int, current_accum_iter: int, apply_gradient: bool, *,
         observe_objective: Callable[[Tensor, Tensor, dict[str, Tensor | float]], None] | None = None,
     ) -> None:
@@ -1469,6 +1654,22 @@ class SRModel(BaseModel):
                     self.net_g, lq
                 )
             else:
+                window = self._weight_window
+                if window is not None and observe_objective is None:
+                    if not window.pending and not window.can_fold():
+                        self._weight_window = None
+                        self._g_accumulation = _AccumulatedGradients(
+                            self.get_bare_model(self.net_g).parameters()
+                        )
+                    else:
+                        leaves = window.begin()
+                        if leaves:
+                            # Only the effective kernels participate in image backward.
+                            factors = {id(p) for p in window.factors}
+                            original = self.get_bare_model(self.net_g).parameters()
+                            self._g_accumulation = _AccumulatedGradients(
+                                (*[p for p in original if id(p) not in factors], *leaves)
+                            )
                 output = self._forward_generator_for_training(lq, self.gt, current_iter)
             assert isinstance(output, Tensor)
             self.output = pixelformat2rgb_pt(output, self.gt, self.opt.output_pixel_format)
@@ -1704,7 +1905,15 @@ class SRModel(BaseModel):
 
                 scaled_g_loss = self.scaler_g.scale(backward_g_loss)
                 if health is None:
-                    scaled_g_loss.backward()
+                    if (
+                        self._g_accumulation is None
+                        or lq.requires_grad
+                        or self.gt.requires_grad
+                        or (d_condition is not None and d_condition.requires_grad)
+                    ):
+                        scaled_g_loss.backward()
+                    else:
+                        self._g_accumulation.backward(scaled_g_loss)
                 else:
                     # These terms use the raw output and can bypass the common clamp.
                     compare_other = self._loss_output_clamp == "none" or not any(
@@ -1715,6 +1924,8 @@ class SRModel(BaseModel):
                     )
 
                 if apply_gradient:
+                    if self._weight_window is not None:
+                        self._weight_window.backward()
                     if self.scaler_g.is_enabled():
                         unscaled_scaler_states.append(
                             (self.scaler_g, self.scaler_g.state_dict())
@@ -1801,7 +2012,15 @@ class SRModel(BaseModel):
                         loss_dict,
                     )
                     return
-                self.scaler_d.scale(backward_d_loss).backward()
+                scaled_d_loss = self.scaler_d.scale(backward_d_loss)
+                if (
+                    self._d_accumulation is None
+                    or self.gt.requires_grad
+                    or (d_condition is not None and d_condition.requires_grad)
+                ):
+                    scaled_d_loss.backward()
+                else:
+                    self._d_accumulation.backward(scaled_d_loss)
 
                 if apply_gradient:
                     if self.scaler_d.is_enabled():

@@ -13,7 +13,7 @@ from traiNNer.utils.registry import METRIC_REGISTRY
 
 LEARNED_TENSOR_METRICS = frozenset({
     "calculate_dists", "calculate_lpips", "calculate_topiq",
-    "calculate_neosr_topiq", "calculate_topiq_nr",
+    "calculate_neosr_topiq", "calculate_topiq_nr", "calculate_butteraugli", "calculate_ssimulacra2",
 })
 
 

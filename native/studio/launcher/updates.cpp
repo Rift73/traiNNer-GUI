@@ -107,6 +107,13 @@ struct Release {
     }
 };
 
+// GitHub keeps the tag when a ZIP is replaced. Only the original Preview 3
+// asset is superseded; an arbitrary equal-version receipt is still current.
+constexpr std::uint64_t original_preview3_asset = 790855138;
+bool replaced_preview3(const Release& release) {
+    return release.tag == "v0.1.0-preview.3" && release.id == original_preview3_asset;
+}
+
 struct Asset {
     Release release;
     std::uint64_t size;
@@ -136,6 +143,7 @@ UpdateBaseline update_baseline(const Version& own, const std::optional<Release>&
     // A manually opened newer package can adopt its own tag through the verified cache.
     if (!current) return {own, false};
     if (current->version < own) return {own, true};
+    if (replaced_preview3(*current) && !(own < current->version)) return {own, true};
     return {current->version, false};
 }
 
@@ -189,6 +197,7 @@ std::optional<Release> selection(const path& root, const wchar_t* name) {
     std::uint64_t id{};
     if (!version || !take_number(record, id) || !id || !record.empty()) return {};
     Release release{std::string(tag), *version, id};
+    if (replaced_preview3(release) && std::wstring_view(name) != L"current") return {};
     if (!complete_bundle(release.folder(root))) return {};
     return release;
 }
@@ -208,7 +217,10 @@ bool recent(const path& marker, std::chrono::seconds duration) {
 
 path discovery_stamp(const path& root, const char* name, const UpdateBaseline& baseline) {
     // An older install's check must not delay discovery of the manually opened tag.
-    if (baseline.include_version) return root / (std::string(name) + "-" + TRAINNER_GUI_RELEASE_TAG);
+    if (baseline.include_version) {
+        const auto revision = std::string_view(TRAINNER_GUI_RELEASE_TAG) == "v0.1.0-preview.3" ? "-r2" : "";
+        return root / (std::string(name) + "-" + TRAINNER_GUI_RELEASE_TAG + revision);
+    }
     return root / name;
 }
 
@@ -382,6 +394,7 @@ void consider_releases(const json::JsonArray& releases, const UpdateBaseline& ba
         for (const auto& item : release.GetNamedArray(L"assets")) {
             const auto asset = item.GetObject();
             if (asset.GetNamedString(L"name") == zip_name && asset.GetNamedString(L"state") == L"uploaded") {
+                if (tag == "v0.1.0-preview.3" && asset.GetNamedNumber(L"id") == original_preview3_asset) continue;
                 best = ListedAsset{std::move(tag), *version, asset};
                 break;
             }
@@ -689,7 +702,8 @@ void check_managed_source(const path& profile_folder, const std::string& payload
     if (!current) return;
     const auto own_version = parse_version(TRAINNER_GUI_RELEASE_TAG);
     const auto source = open_file(current->folder(root) / source_name, FILE_SHARE_READ);
-    if (!own_version || !(current->version < *own_version) || !source || host::sha256(source.get()) != payload)
+    if (!own_version || !update_baseline(*own_version, current).accepts(*own_version)
+        || !source || host::sha256(source.get()) != payload)
         throw host::Exit(busy, "The installed Windows release does not match the selected managed backend "
                                "or is already as new as this update.");
 }
@@ -740,7 +754,8 @@ std::optional<int> dispatch(const path& exe_folder, const path& profile_folder,
     const auto* active = current && !(current->version < *own_version) ? &*current : nullptr;
     if (ordinary) {
         try {
-            schedule(root, update_baseline(*own_version, current), active);
+            schedule(root, update_baseline(*own_version, current),
+                     active && !replaced_preview3(*active) ? active : nullptr);
         } catch (const std::exception& error) {
             log(root, error.what());
         }

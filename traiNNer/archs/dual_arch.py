@@ -60,9 +60,11 @@ Execution:
     Everything else (evaluation, export, CPU, FP32) uses PyTorch SDPA (local,
     context and retrieval NA as masked SDPA over gathered key unions). A missing
     Triton is reported once per layer. Inductor keeps its own options in every
-    compile mode. compile_cache_key_tag ('dual-family-attention-v11...')
-    versions this compiler-facing contract. On SM120, B8 BF16 Light training
+    compile mode. compile_cache_key_tag ('dual-family-attention-v13...')
+    versions this compiler-facing contract. On SM120, BF16 Light training at B1 and B8
     with 192px LQ inputs specializes the 48-channel Fourier context kernel.
+    B1 also splits local attention tiles and specializes the depthwise and
+    Fourier frequency derivatives at measured Light training shapes.
     The same execution policy applies to every preset and output scale; runtime
     device, dtype and attention geometry determine which backend can execute.
     use_checkpoint=True enables selective whole-layer checkpointing in training:
@@ -295,6 +297,35 @@ class TokenNorm(nn.Module):
         return result.permute(0, 3, 1, 2).to(x.dtype)
 
 
+class _TrainingDepthwise3(nn.Conv2d):
+    """Use a fused input/weight derivative for measured DUAL Light microbatches."""
+
+    def forward(self, x: Tensor) -> Tensor:
+        if (
+            self.training
+            and _HAS_DIRECT_ATTENTION
+            and x.device.type == "cuda"
+            and torch.is_grad_enabled()
+            and x.shape[0] == 1
+            and x.shape[1] in (128, 256, 384)
+            and x.shape[2] == x.shape[3]
+            and x.shape[2] in (48, 96)
+            and x.dtype in (torch.bfloat16, torch.float32)
+            and self.weight.dtype in (torch.bfloat16, torch.float32)
+            and x.is_contiguous(memory_format=torch.channels_last)
+            and self.weight.is_contiguous()
+            and torch.is_autocast_enabled("cuda")
+            and torch.get_autocast_dtype("cuda") == torch.bfloat16
+            and not torch.are_deterministic_algorithms_enabled()
+            and not torch.onnx.is_in_onnx_export()
+            and not torch.compiler.is_exporting()
+            and torch.cuda.get_device_capability(x.device) == (12, 0)
+        ):
+            bias = self.bias.to(torch.bfloat16) if self.bias is not None else None
+            return _Depthwise3.apply(x.to(torch.bfloat16), self.weight.to(torch.bfloat16), bias)
+        return super().forward(x)
+
+
 class ConvFFN(nn.Module):
     """Expansion-two FFN with GELU, a depthwise residual and a 1x1 readout."""
 
@@ -302,7 +333,7 @@ class ConvFFN(nn.Module):
         super().__init__()
         hidden = 2 * channels
         self.expand = nn.Conv2d(channels, hidden, 1)
-        self.depthwise = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden)
+        self.depthwise = _TrainingDepthwise3(hidden, hidden, 3, padding=1, groups=hidden)
         self.project = nn.Conv2d(hidden, channels, 1)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -333,10 +364,30 @@ class RelativeFourierBias(nn.Module):
         self.amplitude_cos = nn.Parameter(torch.full((heads, count), 1 / count))
         self.amplitude_sin = nn.Parameter(torch.zeros(heads, count))
 
-    def factors(self, coordinates: Tensor, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+    def factors(
+        self, coordinates: Tensor, dtype: torch.dtype, *, single_image: bool = False
+    ) -> tuple[Tensor, Tensor]:
         precision = calculation_dtype(dtype)
         with torch.autocast(device_type=self.frequency.device.type, enabled=False):
-            phase = coordinates.to(precision) @ self.frequency.to(precision).T
+            positions = coordinates.to(precision)
+            frequencies = self.frequency.to(precision)
+            if (
+                single_image
+                and self.training
+                and torch.is_grad_enabled()
+                and _HAS_DIRECT_ATTENTION
+                and frequencies.device.type == "cuda"
+                and dtype == torch.bfloat16
+                and frequencies.dtype == torch.float32
+                and frequencies.shape == (8, 2)
+                and positions.shape[0] in (576, 2304, 9216)
+                and not positions.requires_grad
+                and not torch.are_deterministic_algorithms_enabled()
+                and torch.cuda.get_device_capability(frequencies.device) == (12, 0)
+            ):
+                phase = _FourierPhase.apply(positions, frequencies)
+            else:
+                phase = positions @ frequencies.T
             cosine, sine = phase.cos()[None], phase.sin()[None]
             a = self.amplitude_cos.to(precision)[:, None]
             b = self.amplitude_sin.to(precision)[:, None]
@@ -465,7 +516,7 @@ class _WindowAttention(nn.Module):
             nn.init.trunc_normal_(self.relative_bias, std=0.02)
         elif pos_bias == "rib":
             self.factored_bias = SignedFactoredBias(window, heads, rank)
-        self.gate_depthwise = nn.Conv2d(
+        self.gate_depthwise = _TrainingDepthwise3(
             channels, channels, 3, padding=1, groups=channels
         )
         self.gate_pointwise = nn.Conv2d(channels, channels, 1)
@@ -1223,7 +1274,7 @@ class _SpatialAttention(_WindowAttention):
         coordinates = _na_coordinates(height, width, x.device) - torch.tensor(
             (height // 2, width // 2), device=x.device
         )
-        bias_query, bias_key = self.factored_bias.factors(coordinates, query.dtype)
+        bias_query, bias_key = self.factored_bias.factors(coordinates, query.dtype, single_image=batch == 1)
         expand = (batch, -1, -1, -1)
         output = context_na_attention(
             torch.cat(
@@ -1650,7 +1701,7 @@ class RegionalChannelAttention(nn.Module):
         self.channels, self.heads = channels, heads
         self.norm = TokenNorm(channels, eps=1e-5)
         self.qkv = nn.Conv2d(channels, channels * 3, 1, bias=False)
-        self.depthwise = nn.Conv2d(
+        self.depthwise = _TrainingDepthwise3(
             channels * 3, channels * 3, 3, padding=1, groups=channels * 3, bias=False
         )
         self.project = nn.Conv2d(channels, channels, 1, bias=False)
@@ -1848,6 +1899,19 @@ class DualContextLayer(nn.Module):
 # Reparameterized convolutions and per-image expert routing.
 
 
+def _weight_product(left: Tensor, right: Tensor, precision: str | None) -> Tensor:
+    if precision is None:
+        return left @ right
+    return _BoundedWeightProduct.apply(left, right, precision)
+
+
+def _project_spatial_weights(reduce: Tensor, spatial: Tensor, precision: str | None) -> Tensor:
+    if precision is None:
+        return torch.einsum("om,mixy->oixy", reduce, spatial)
+    projected = _weight_product(reduce, spatial.flatten(1), precision)
+    return projected.reshape(reduce.shape[0], *spatial.shape[1:])
+
+
 class _EDBBDenseBranch(nn.Module):
     """Independent gain-2 1x1 -> 3x3 -> 1x1 factors, never applied to images."""
 
@@ -1857,18 +1921,27 @@ class _EDBBDenseBranch(nn.Module):
         self.spatial = nn.Conv2d(2 * ci, 2 * co, 3, bias=bias, **factory)
         self.reduce = nn.Conv2d(2 * co, co, 1, bias=bias, **factory)
 
-    def equivalent_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+    def equivalent_kernel(
+        self, dtype: torch.dtype, precision: str | None = None
+    ) -> tuple[Tensor, Tensor | None]:
         expand = self.expand.weight[:, :, 0, 0].to(dtype)
         spatial = self.spatial.weight.to(dtype)
         reduce = self.reduce.weight[:, :, 0, 0].to(dtype)
-        projected_spatial = torch.einsum("om,mnxy->onxy", reduce, spatial)
-        kernel = torch.einsum("omxy,mi->oixy", projected_spatial, expand)
+        projected_spatial = _project_spatial_weights(reduce, spatial, precision)
+        if precision is None:
+            kernel = torch.einsum("omxy,mi->oixy", projected_spatial, expand)
+        else:
+            out, inner, height, width = projected_spatial.shape
+            rows = projected_spatial.permute(0, 2, 3, 1).reshape(-1, inner)
+            kernel = _weight_product(rows, expand, precision).reshape(
+                out, height, width, expand.shape[1]
+            ).permute(0, 3, 1, 2)
         bias = None
         if self.expand.bias is not None:
-            bias = reduce @ (
-                spatial.sum((-2, -1)) @ self.expand.bias.to(dtype)
-                + self.spatial.bias.to(dtype)
-            ) + self.reduce.bias.to(dtype)
+            spatial_bias = _weight_product(
+                spatial.sum((-2, -1)), self.expand.bias.to(dtype), precision
+            ) + self.spatial.bias.to(dtype)
+            bias = _weight_product(reduce, spatial_bias, precision) + self.reduce.bias.to(dtype)
         return kernel, bias
 
 
@@ -1880,12 +1953,16 @@ class _EDBBPointwiseBranch(nn.Module):
         self.expand = nn.Conv2d(ci, 2 * ci, 1, bias=bias, **factory)
         self.reduce = nn.Conv2d(2 * ci, co, 1, bias=bias, **factory)
 
-    def equivalent_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+    def equivalent_kernel(
+        self, dtype: torch.dtype, precision: str | None = None
+    ) -> tuple[Tensor, Tensor | None]:
         reduce = self.reduce.weight[:, :, 0, 0].to(dtype)
-        kernel = (reduce @ self.expand.weight[:, :, 0, 0].to(dtype))[:, :, None, None]
+        kernel = _weight_product(
+            reduce, self.expand.weight[:, :, 0, 0].to(dtype), precision
+        )[:, :, None, None]
         bias = None
         if self.expand.bias is not None:
-            bias = reduce @ self.expand.bias.to(dtype) + self.reduce.bias.to(dtype)
+            bias = _weight_product(reduce, self.expand.bias.to(dtype), precision) + self.reduce.bias.to(dtype)
         return kernel, bias
 
 
@@ -1903,15 +1980,17 @@ class _EDBBEdgeBranch(nn.Module):
         self.reduce = nn.Conv2d(2 * co, co, 1, bias=bias, **factory)
         self.register_buffer("mask", mask.reshape(1, 1, 3, 3), persistent=False)
 
-    def equivalent_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+    def equivalent_kernel(
+        self, dtype: torch.dtype, precision: str | None = None
+    ) -> tuple[Tensor, Tensor | None]:
         reduce = self.reduce.weight[:, :, 0, 0].to(dtype)
         expanded = (
             self.project.weight.to(dtype) * self.scale.to(dtype) * self.mask.to(dtype)
         )
-        kernel = torch.einsum("om,mixy->oixy", reduce, expanded)
+        kernel = _project_spatial_weights(reduce, expanded, precision)
         bias = None
         if self.bias is not None:
-            bias = reduce @ self.bias.to(dtype) + self.reduce.bias.to(dtype)
+            bias = _weight_product(reduce, self.bias.to(dtype), precision) + self.reduce.bias.to(dtype)
         return kernel, bias
 
 
@@ -1926,6 +2005,7 @@ class EDBBReparamConv3x3(nn.Module):
     """
 
     _validation_kernel: tuple[Tensor, Tensor | None] | None = None
+    _training_kernel: tuple[Tensor, Tensor | None] | None = None
 
     def __init__(self, original: nn.Conv2d) -> None:
         super().__init__()
@@ -1984,22 +2064,29 @@ class EDBBReparamConv3x3(nn.Module):
                         module.bias.zero_()
                 self.direct.reduce.bias.copy_(original.bias)
 
-    def equivalent_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+    def equivalent_kernel(
+        self, dtype: torch.dtype, precision: str | None = None
+    ) -> tuple[Tensor, Tensor | None]:
         """Compose EVERY branch using ordinary autograd, never feature maps."""
         if not self.training and self._validation_kernel is not None and self._validation_kernel[0].dtype == dtype:
             return self._validation_kernel
-        kernel, bias = self.direct.equivalent_kernel(dtype)
-        point, point_bias = self.pointwise.equivalent_kernel(dtype)
+        kernel, bias = self.direct.equivalent_kernel(dtype, precision)
+        point, point_bias = self.pointwise.equivalent_kernel(dtype, precision)
         point = point + self.identity_weight.to(dtype).unsqueeze(-1)
         kernel = kernel + F.pad(point, (1, 1, 1, 1))
         if bias is not None:
             bias = bias + point_bias
         for branch in (self.sequential, *self.edges):
-            branch_kernel, branch_bias = branch.equivalent_kernel(dtype)
+            branch_kernel, branch_bias = branch.equivalent_kernel(dtype, precision)
             kernel = kernel + branch_kernel
             if bias is not None:
                 bias = bias + branch_bias
         return kernel, bias
+
+    def _forward_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
+        if self.training and self._training_kernel is not None:
+            return self._training_kernel
+        return self.equivalent_kernel(dtype)
 
     def forward(self, x: Tensor) -> Tensor:
         parameter_dtype = self.direct.expand.weight.dtype
@@ -2007,7 +2094,7 @@ class EDBBReparamConv3x3(nn.Module):
             torch.float64 if parameter_dtype == torch.float64 else torch.float32
         )
         with torch.autocast(device_type=x.device.type, enabled=False):
-            weight, bias = self.equivalent_kernel(fold_dtype)
+            weight, bias = self._forward_kernel(fold_dtype)
         return F.conv2d(
             x,
             weight.to(parameter_dtype),
@@ -2187,7 +2274,7 @@ class PremixedDynamicGroupConv3x3(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         dtype = torch.float64 if self.experts.dtype == torch.float64 else torch.float32
         with torch.autocast(device_type=x.device.type, enabled=False):
-            weight, bias = self.base.equivalent_kernel(dtype)
+            weight, bias = self.base._forward_kernel(dtype)
         return _premixed_conv3x3(x, weight, bias, self.experts, self.coefficients(x), inference=not self.training)
 
     @torch.no_grad()
@@ -2411,7 +2498,7 @@ class DUAL(nn.Module):
         self.routing_na = routing_na
         self.regional_na = regional_na
         self.compile_cache_key_tag = (
-            f"dual-family-attention-v11:selective-checkpoint={use_checkpoint}"
+            f"dual-family-attention-v13:selective-checkpoint={use_checkpoint}"
             + (":routing-na" if routing_na else "")
             + (":regional-na" if regional_na else "")
         )
@@ -2667,6 +2754,272 @@ else:
 _HAS_DIRECT_ATTENTION = _DIRECT_ATTENTION_ERROR is None
 
 if _HAS_DIRECT_ATTENTION:
+    @triton.jit
+    def _edbb_matrix_kernel(
+        left, right, result, rows, columns, inner,
+        left_row, left_inner, right_inner, right_col,
+        ROWS: tl.constexpr, COLS: tl.constexpr, INNER: tl.constexpr, PRECISION: tl.constexpr,
+    ):
+        row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+        col = tl.program_id(1) * COLS + tl.arange(0, COLS)
+        offsets = tl.arange(0, INNER)
+        total = tl.full((ROWS, COLS), 0, tl.float32)
+        for block in range(tl.cdiv(inner, INNER)):
+            k = block * INNER + offsets
+            a = tl.load(left + row[:, None] * left_row + k[None, :] * left_inner,
+                        (row[:, None] < rows) & (k[None, :] < inner), 0.)
+            b = tl.load(right + k[:, None] * right_inner + col[None, :] * right_col,
+                        (k[:, None] < inner) & (col[None, :] < columns), 0.)
+            if PRECISION == "tf32":
+                a = tl.inline_asm_elementwise("cvt.rna.tf32.f32 $0, $1;", constraints="=f,f",
+                    args=[a], dtype=tl.float32, is_pure=True, pack=1)
+                b = tl.inline_asm_elementwise("cvt.rna.tf32.f32 $0, $1;", constraints="=f,f",
+                    args=[b], dtype=tl.float32, is_pure=True, pack=1)
+            total = tl.dot(a, b, total, input_precision=PRECISION)
+        tl.store(result + row[:, None] * columns + col[None, :], total,
+                 (row[:, None] < rows) & (col[None, :] < columns))
+
+    def _edbb_product(left: Tensor, right: Tensor, precision: str) -> Tensor:
+        # Eager BLAS requests a 32 MiB workspace even for the tiny factor biases.
+        if right.ndim == 1:
+            return (left * right).sum(dim=1)
+        rows, inner = left.shape
+        columns = right.shape[1]
+        result = left.new_empty((rows, columns))
+        row_tile = 32 if rows >= 32 else 16
+        col_tile = 64 if columns >= 64 else 16
+        grid = (triton.cdiv(rows, row_tile), triton.cdiv(columns, col_tile))
+        _edbb_matrix_kernel[grid](
+            left, right, result, rows, columns, inner, *left.stride(), *right.stride(),
+            row_tile, col_tile, 32, precision, num_warps=4,
+        )
+        return result
+
+    class _BoundedWeightProduct(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, left, right, precision):
+            ctx.save_for_backward(left, right)
+            ctx.precision = precision
+            return _edbb_product(left, right, precision)
+
+        @staticmethod
+        def backward(ctx, grad):
+            left, right = ctx.saved_tensors
+            if right.ndim == 1:
+                return grad[:, None] * right, (left * grad[:, None]).sum(dim=0), None
+            if torch.is_grad_enabled():
+                return grad @ right.T, left.T @ grad, None
+            return (
+                _edbb_product(grad, right.T, ctx.precision),
+                _edbb_product(left.T, grad, ctx.precision),
+                None,
+            )
+
+    # Backward operators for the single-image Fourier phase and depthwise 3x3.
+    @triton.jit
+    def _depthwise_input_and_partials(
+        inputs,
+        weights,
+        grad_output,
+        grad_input,
+        partials,
+        HEIGHT: tl.constexpr,
+        WIDTH: tl.constexpr,
+        CHANNELS: tl.constexpr,
+        IN_C: tl.constexpr,
+        IN_Y: tl.constexpr,
+        IN_X: tl.constexpr,
+        GRAD_C: tl.constexpr,
+        GRAD_Y: tl.constexpr,
+        GRAD_X: tl.constexpr,
+        OUT_C: tl.constexpr,
+        OUT_Y: tl.constexpr,
+        OUT_X: tl.constexpr,
+        PIXELS: tl.constexpr,
+        FEATURES: tl.constexpr,
+    ):
+        block = tl.program_id(0)
+        pixels = block * PIXELS + tl.arange(0, PIXELS)
+        channels = tl.program_id(1) * FEATURES + tl.arange(0, FEATURES)
+        y, x = pixels // WIDTH, pixels % WIDTH
+        valid = (pixels < HEIGHT * WIDTH)[:, None] & (channels < CHANNELS)[None, :]
+        offsets = y[:, None] * IN_Y + x[:, None] * IN_X + channels[None, :] * IN_C
+        image = tl.load(inputs + offsets, mask=valid, other=0).to(tl.float32)
+        input_gradient = tl.full((PIXELS, FEATURES), 0, tl.float32)
+        for tap in tl.static_range(9):
+            output_y = y + 1 - tap // 3
+            output_x = x + 1 - tap % 3
+            inside = (output_y >= 0) & (output_y < HEIGHT) & (output_x >= 0) & (output_x < WIDTH)
+            offsets = (
+                output_y[:, None] * GRAD_Y + output_x[:, None] * GRAD_X + channels[None, :] * GRAD_C
+            )
+            dy = tl.load(grad_output + offsets, mask=valid & inside[:, None], other=0).to(
+                tl.float32
+            )
+            tl.store(
+                partials + (block * 9 + tap) * CHANNELS + channels,
+                tl.sum(image * dy, 0),
+                mask=channels < CHANNELS,
+            )
+            coeff = tl.load(weights + channels * 9 + tap, mask=channels < CHANNELS, other=0).to(
+                tl.float32
+            )
+            input_gradient = tl.fma(dy, coeff[None, :], input_gradient)
+        offsets = y[:, None] * OUT_Y + x[:, None] * OUT_X + channels[None, :] * OUT_C
+        tl.store(grad_input + offsets, input_gradient, mask=valid)
+
+    @triton.jit
+    def _sum_depthwise_weight_partials(
+        partials,
+        result,
+        CHANNELS: tl.constexpr,
+        BLOCKS: tl.constexpr,
+        REDUCE: tl.constexpr,
+        FEATURES: tl.constexpr,
+    ):
+        tap = tl.program_id(0)
+        channels = tl.program_id(1) * FEATURES + tl.arange(0, FEATURES)
+        blocks = tl.arange(0, REDUCE)
+        offset = (blocks[:, None] * 9 + tap) * CHANNELS + channels[None, :]
+        values = tl.load(
+            partials + offset,
+            mask=(blocks < BLOCKS)[:, None] & (channels < CHANNELS)[None, :],
+            other=0,
+        )
+        tl.store(result + channels * 9 + tap, tl.sum(values, 0), mask=channels < CHANNELS)
+
+    @triton_op("dual_standalone::depthwise3_backward", mutates_args={})
+    def _depthwise3_backward(
+        gradient: Tensor, inputs: Tensor, weights: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        _, channels, height, width = inputs.shape
+        blocks = triton.cdiv(height * width, 128)
+        grad_input = torch.empty_like(inputs)
+        grad_weight = torch.empty_like(weights)
+        partials = torch.empty((blocks, 9, channels), device=inputs.device, dtype=torch.float32)
+        wrap_triton(_depthwise_input_and_partials)[(blocks, triton.cdiv(channels, 32))](
+            inputs,
+            weights,
+            gradient,
+            grad_input,
+            partials,
+            height,
+            width,
+            channels,
+            *inputs.stride()[1:],
+            *gradient.stride()[1:],
+            *grad_input.stride()[1:],
+            128,
+            32,
+            num_warps=2,
+        )
+        wrap_triton(_sum_depthwise_weight_partials)[(9, triton.cdiv(channels, 16))](
+            partials,
+            grad_weight,
+            channels,
+            blocks,
+            triton.next_power_of_2(blocks),
+            16,
+            num_warps=4,
+        )
+        return grad_input, grad_weight
+
+    class _Depthwise3(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inputs: Tensor, weights: Tensor, bias: Tensor | None) -> Tensor:
+            ctx.save_for_backward(inputs, weights)
+            ctx.has_bias = bias is not None
+            return F.conv2d(inputs, weights, bias, padding=1, groups=inputs.shape[1])
+
+        @staticmethod
+        def backward(ctx, gradient: Tensor):
+            inputs, weights = ctx.saved_tensors
+            if torch.is_grad_enabled():
+                groups = inputs.shape[1]
+                dx = torch.nn.grad.conv2d_input(
+                    inputs.shape, weights, gradient, padding=1, groups=groups
+                )
+                dw = torch.nn.grad.conv2d_weight(
+                    inputs, weights.shape, gradient, padding=1, groups=groups
+                )
+            else:
+                dx, dw = _depthwise3_backward(gradient, inputs, weights)
+            return dx, dw, gradient.sum((0, 2, 3)) if ctx.has_bias else None
+
+    @triton.jit
+    def _frequency_partials(
+        grad_phase,
+        coords,
+        partials,
+        POINTS: tl.constexpr,
+        RANK: tl.constexpr,
+        GRAD_P: tl.constexpr,
+        GRAD_R: tl.constexpr,
+        COORD_P: tl.constexpr,
+        COORD_AXIS: tl.constexpr,
+        TILE: tl.constexpr,
+    ):
+        block = tl.program_id(0)
+        points = block * TILE + tl.arange(0, TILE)
+        ranks = tl.arange(0, RANK)
+        offsets = points[:, None] * GRAD_P + ranks[None, :] * GRAD_R
+        grad = tl.load(grad_phase + offsets, mask=(points < POINTS)[:, None], other=0).to(
+            tl.float32
+        )
+        for axis in tl.static_range(2):
+            coordinate = tl.load(
+                coords + points * COORD_P + axis * COORD_AXIS, mask=points < POINTS, other=0
+            )
+            tl.store(
+                partials + (block * 2 + axis) * RANK + ranks, tl.sum(coordinate[:, None] * grad, 0)
+            )
+
+    @triton.jit
+    def _sum_frequency_partials(
+        partials, result, BLOCKS: tl.constexpr, RANK: tl.constexpr, REDUCE: tl.constexpr
+    ):
+        axis = tl.program_id(0)
+        blocks = tl.arange(0, REDUCE)
+        ranks = tl.arange(0, RANK)
+        offsets = (blocks[:, None] * 2 + axis) * RANK + ranks[None, :]
+        values = tl.load(partials + offsets, mask=(blocks < BLOCKS)[:, None], other=0)
+        tl.store(result + 2 * ranks + axis, tl.sum(values, 0))
+
+    @triton_op("dual_standalone::frequency_backward", mutates_args={})
+    def _frequency_backward(gradient: Tensor, coordinates: Tensor) -> Tensor:
+        points, rank = gradient.shape
+        blocks = triton.cdiv(points, 128)
+        partials = gradient.new_empty((blocks, 2, rank))
+        output = gradient.new_empty((rank, 2))
+        wrap_triton(_frequency_partials)[(blocks,)](
+            gradient,
+            coordinates,
+            partials,
+            points,
+            rank,
+            *gradient.stride(),
+            *coordinates.stride(),
+            128,
+            num_warps=4,
+        )
+        wrap_triton(_sum_frequency_partials)[(2,)](
+            partials, output, blocks, rank, triton.next_power_of_2(blocks), num_warps=4
+        )
+        return output
+
+    class _FourierPhase(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, coordinates: Tensor, frequencies: Tensor) -> Tensor:
+            ctx.save_for_backward(coordinates)
+            return coordinates @ frequencies.T
+
+        @staticmethod
+        def backward(ctx, gradient: Tensor):
+            (coordinates,) = ctx.saved_tensors
+            if torch.is_grad_enabled():
+                return None, gradient.T @ coordinates
+            return None, _frequency_backward(gradient, coordinates)
+
     _BF16 = 1
     _FP16 = 2
 
@@ -3916,8 +4269,11 @@ if _HAS_DIRECT_ATTENTION:
         BLOCK_QK: tl.constexpr,
         BLOCK_V: tl.constexpr,
         CONTEXT48: tl.constexpr = False,
+        PIPE_STAGES: tl.constexpr = 2,
+        QUERY_PARTS: tl.constexpr = 1,
+        LOCAL16: tl.constexpr = False,
     ):
-        tile = tl.program_id(0)
+        tile = tl.program_id(0) // QUERY_PARTS
         # int64: batch-head x tokens x slots can exceed 2**31.
         batch_head = tl.program_id(1).to(tl.int64)
         batch = batch_head // num_heads
@@ -3935,8 +4291,11 @@ if _HAS_DIRECT_ATTENTION:
         v_base = batch * v_stride_batch + head * v_stride_head
         o_base = batch * o_stride_batch + head * o_stride_head
 
-        query_y = tile_y * TILE + local // TILE
-        query_x = tile_x * TILE + local % TILE
+        query_local = tl.arange(0, TILE * TILE // QUERY_PARTS) + (
+            tl.program_id(0) % QUERY_PARTS
+        ) * (TILE * TILE // QUERY_PARTS)
+        query_y = tile_y * TILE + query_local // TILE
+        query_x = tile_x * TILE + query_local % TILE
         query_valid = (query_y < height) & (query_x < width)
         query_token = query_y * width + query_x
         if CONTEXT48:
@@ -3956,17 +4315,17 @@ if _HAS_DIRECT_ATTENTION:
         origin_y = _na_window_start(tile_y * TILE // STRIDE, key_height, WINDOW_Y)
         origin_x = _na_window_start(tile_x * TILE // STRIDE, key_width, WINDOW_X)
 
-        row_max = tl.full((TILE * TILE,), -float("inf"), tl.float32)
-        row_sum = tl.zeros((TILE * TILE,), tl.float32)
-        accumulator = tl.zeros((TILE * TILE, BLOCK_V), tl.float32)
+        row_max = tl.full((TILE * TILE // QUERY_PARTS,), -float("inf"), tl.float32)
+        row_sum = tl.zeros((TILE * TILE // QUERY_PARTS,), tl.float32)
+        accumulator = tl.zeros((TILE * TILE // QUERY_PARTS, BLOCK_V), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
-        if CONTEXT48:
+        if CONTEXT48 or LOCAL16:
             rows = _na_clamped_tile_count(tile_y, origin_y, height, key_height, WINDOW_Y, TILE)
             cols = _na_clamped_tile_count(tile_x, origin_x, width, key_width, WINDOW_X, TILE)
         else:
             rows, cols = BLOCKS_Y, BLOCKS_X
-        for block in tl.range(0, rows * cols, num_stages=2):
-            if CONTEXT48:
+        for block in tl.range(0, rows * cols, num_stages=PIPE_STAGES):
+            if CONTEXT48 or LOCAL16:
                 # The clamped edge can remove one tile from this row.
                 block_y = tl.where(cols == BLOCKS_X, block // BLOCKS_X, block // (BLOCKS_X - 1))
             else:
@@ -4095,9 +4454,11 @@ if _HAS_DIRECT_ATTENTION:
         BLOCK_V: tl.constexpr,
         CONTEXT48: tl.constexpr = False,
         PIPE_STAGES: tl.constexpr = 2,
+        QUERY_PARTS: tl.constexpr = 1,
+        LOCAL16: tl.constexpr = False,
     ):
         # dQ per query tile; with a table also dS per query and window slot.
-        tile = tl.program_id(0)
+        tile = tl.program_id(0) // QUERY_PARTS
         # int64: batch-head x tokens x slots can exceed 2**31.
         batch_head = tl.program_id(1).to(tl.int64)
         batch = batch_head // num_heads
@@ -4115,8 +4476,11 @@ if _HAS_DIRECT_ATTENTION:
         v_base = batch * v_stride_batch + head * v_stride_head
         o_base = batch * o_stride_batch + head * o_stride_head
 
-        query_y = tile_y * TILE + local // TILE
-        query_x = tile_x * TILE + local % TILE
+        query_local = tl.arange(0, TILE * TILE // QUERY_PARTS) + (
+            tl.program_id(0) % QUERY_PARTS
+        ) * (TILE * TILE // QUERY_PARTS)
+        query_y = tile_y * TILE + query_local // TILE
+        query_x = tile_x * TILE + query_local % TILE
         query_valid = (query_y < height) & (query_x < width)
         query_token = query_y * width + query_x
         if CONTEXT48:
@@ -4148,15 +4512,15 @@ if _HAS_DIRECT_ATTENTION:
             dqc = tl.zeros((TILE*TILE, 32), tl.float32)
             dqf = tl.zeros((TILE*TILE, 16), tl.float32)
         else:
-            grad_query = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
+            grad_query = tl.zeros((TILE * TILE // QUERY_PARTS, BLOCK_QK), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
-        if CONTEXT48:
+        if CONTEXT48 or LOCAL16:
             rows = _na_clamped_tile_count(tile_y, origin_y, height, key_height, WINDOW_Y, TILE)
             cols = _na_clamped_tile_count(tile_x, origin_x, width, key_width, WINDOW_X, TILE)
         else:
             rows, cols = BLOCKS_Y, BLOCKS_X
         for block in tl.range(0, rows * cols, num_stages=PIPE_STAGES):
-            if CONTEXT48:
+            if CONTEXT48 or LOCAL16:
                 # The clamped edge can remove one tile from this row.
                 block_y = tl.where(cols == BLOCKS_X, block // BLOCKS_X, block // (BLOCKS_X - 1))
             else:
@@ -4282,9 +4646,12 @@ if _HAS_DIRECT_ATTENTION:
         BLOCK_QK: tl.constexpr,
         BLOCK_V: tl.constexpr,
         CONTEXT48: tl.constexpr = False,
+        KEY_PARTS: tl.constexpr = 1,
+        PIPE_STAGES: tl.constexpr = 2,
+        TILE_ORDER: tl.constexpr = (),
     ):
         # dK/dV per key tile, iterating the query blocks that can see it.
-        tile = tl.program_id(0)
+        tile = tl.program_id(0) // KEY_PARTS
         # int64: batch-head x tokens x slots can exceed 2**31.
         batch_head = tl.program_id(1).to(tl.int64)
         batch = batch_head // num_heads
@@ -4292,6 +4659,22 @@ if _HAS_DIRECT_ATTENTION:
         tiles_x = (key_width + TILE - 1) // TILE
         tile_y = tile // tiles_x
         tile_x = tile - tile_y * tiles_x
+        if CONTEXT48 and KEY_PARTS > 1:
+            # The four heads share a spatial workload. Issue the longest work
+            # first to avoid leaving one expensive key tile on the last SM wave.
+            linear = tile + tl.program_id(1) * 144
+            tile = linear // num_heads
+            head = (linear % num_heads).to(tl.int64)
+            batch_head = head
+            batch = 0
+            rank = tile // 4
+            word = TILE_ORDER[0]
+            for i in tl.static_range(1, 9):
+                word = tl.where(rank // 4 == i, TILE_ORDER[i], word)
+            code = (word >> ((rank % 4) * 8)) & 63
+            y, x = code // 8, code % 8
+            tile_y = tl.where(tile % 4 >= 2, 11 - y, y)
+            tile_x = tl.where(tile % 2 == 1, 11 - x, x)
         local = tl.arange(0, TILE * TILE)
         qk_channel = tl.arange(0, BLOCK_QK)
         qk_valid = qk_channel < QK_DIM
@@ -4302,8 +4685,10 @@ if _HAS_DIRECT_ATTENTION:
         v_base = batch * v_stride_batch + head * v_stride_head
         o_base = batch * o_stride_batch + head * o_stride_head
 
-        key_y = tile_y * TILE + local // TILE
-        key_x = tile_x * TILE + local % TILE
+        key_local = tl.arange(0, TILE * TILE // KEY_PARTS)
+        key_local += (tl.program_id(0) % KEY_PARTS) * (TILE * TILE // KEY_PARTS)
+        key_y = tile_y * TILE + key_local // TILE
+        key_x = tile_x * TILE + key_local % TILE
         key_in = (key_y < key_height) & (key_x < key_width)
         key_token = key_y * key_width + key_x
         key_offset = k_base + key_token[:, None] * k_stride_token + qk_channel[None, :]
@@ -4336,13 +4721,13 @@ if _HAS_DIRECT_ATTENTION:
         blocks_x = (high_x - low_x + TILE) // TILE
 
         if CONTEXT48:
-            dkc = tl.zeros((TILE * TILE, 32), tl.float32)
-            dkf = tl.zeros((TILE * TILE, 16), tl.float32)
+            dkc = tl.zeros((TILE * TILE // KEY_PARTS, 32), tl.float32)
+            dkf = tl.zeros((TILE * TILE // KEY_PARTS, 16), tl.float32)
         else:
-            grad_key = tl.zeros((TILE * TILE, BLOCK_QK), tl.float32)
-        grad_value = tl.zeros((TILE * TILE, BLOCK_V), tl.float32)
+            grad_key = tl.zeros((TILE * TILE // KEY_PARTS, BLOCK_QK), tl.float32)
+        grad_value = tl.zeros((TILE * TILE // KEY_PARTS, BLOCK_V), tl.float32)
         # One flattened, software-pipelined loop over the candidate blocks.
-        for block in tl.range(0, blocks_y * blocks_x, num_stages=2):
+        for block in tl.range(0, blocks_y * blocks_x, num_stages=PIPE_STAGES):
             block_y = block // blocks_x
             block_x = block - block_y * blocks_x
             query_y = low_y + block_y * TILE + local // TILE
@@ -4482,6 +4867,21 @@ if _HAS_DIRECT_ATTENTION:
             "BLOCK_V": triton.next_power_of_2(value.shape[-1]),
         }
 
+    def _context_key_tile_order(window: int) -> tuple[int, ...]:
+        """Rank one quadrant of the 12x12 key tiles by overlapping query tiles."""
+
+        def query_blocks(tile: int) -> int:
+            first, last = 8 * tile, 8 * tile + 7
+            low = 0 if first < window else first - window + 1 + window // 2
+            high = 95 if last >= 96 - window else min(95, last + window // 2)
+            return (high - low + 8) // 8
+
+        tiles = sorted(range(36), key=lambda i: -query_blocks(i // 6) * query_blocks(i % 6))
+        codes = [(i // 6) * 8 + i % 6 for i in tiles]
+        return tuple(sum(codes[base + j] << (8 * j) for j in range(4)) for base in range(0, 36, 4))
+
+    _CONTEXT_TILE_ORDER = {window: _context_key_tile_order(window) for window in (32, 64)}
+
     def _use_context48_kernel(
         query: Tensor,
         key: Tensor,
@@ -4502,8 +4902,34 @@ if _HAS_DIRECT_ATTENTION:
             and height == width == key_height == key_width == 96
             and window_y == window_x
             and window_x in (32, 64)
-            and query.shape == (8, 4, 96 * 96, 48)
+            and query.shape[0] in (1, 8)
+            and query.shape[1:] == (4, 96 * 96, 48)
             and value.shape[-1] == 32
+            and query.dtype == key.dtype == value.dtype == torch.bfloat16
+            and query.device.type == "cuda"
+            and torch.cuda.get_device_capability(query.device) == (12, 0)
+        )
+
+    def _use_local16_kernel(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        height: int,
+        width: int,
+        key_height: int,
+        key_width: int,
+        window_y: int,
+        window_x: int,
+        stride: int,
+        has_table: bool,
+    ) -> bool:
+        return (
+            has_table
+            and stride == 1
+            and height == width == key_height == key_width
+            and height in (48, 96)
+            and window_y == window_x == 16
+            and query.shape == key.shape == value.shape == (1, 4, height * width, 32)
             and query.dtype == key.dtype == value.dtype == torch.bfloat16
             and query.device.type == "cuda"
             and torch.cuda.get_device_capability(query.device) == (12, 0)
@@ -4553,7 +4979,21 @@ if _HAS_DIRECT_ATTENTION:
             query, key, value, height, width, key_height, key_width,
             window_y, window_x, stride, has_table,
         )
-        wrap_triton(_na_forward_kernel)[(tiles, batch * num_heads)](
+        local16 = _use_local16_kernel(
+            query,
+            key,
+            value,
+            height,
+            width,
+            key_height,
+            key_width,
+            window_y,
+            window_x,
+            stride,
+            has_table,
+        )
+        query_parts = 2 if local16 and height == 48 else 1
+        wrap_triton(_na_forward_kernel)[(tiles * query_parts, batch * num_heads)](
             query,
             key,
             value,
@@ -4575,6 +5015,9 @@ if _HAS_DIRECT_ATTENTION:
             BLOCKS_Y=_na_blocks(window_y, stride),
             BLOCKS_X=_na_blocks(window_x, stride),
             CONTEXT48=context48,
+            PIPE_STAGES=3 if (context48 and batch == 1) or query_parts > 1 else 2,
+            QUERY_PARTS=query_parts,
+            LOCAL16=local16,
             num_warps=_NA_FWD_WARPS,
             **_na_meta(query, value, window_y, window_x, has_table, dtype_code),
         )
@@ -4614,7 +5057,6 @@ if _HAS_DIRECT_ATTENTION:
             dtype=query.dtype,
         )
         tiles = triton.cdiv(height, _NA_TILE) * triton.cdiv(width, _NA_TILE)
-        grid = (tiles, batch * num_heads)
         strides = (
             *query.stride()[:3],
             *key.stride()[:3],
@@ -4629,7 +5071,21 @@ if _HAS_DIRECT_ATTENTION:
         )
         # The measured B8 C64 dQ wins at two stages, B8 C32 at three.
         dq_stages = 3 if context48 and window_x == 32 else 2
-        wrap_triton(_na_backward_query_kernel)[grid](
+        local16 = _use_local16_kernel(
+            query,
+            key,
+            value,
+            height,
+            width,
+            key_height,
+            key_width,
+            window_y,
+            window_x,
+            stride,
+            has_table,
+        )
+        query_parts = 4 if local16 else 1
+        wrap_triton(_na_backward_query_kernel)[(tiles * query_parts, batch * num_heads)](
             query,
             key,
             value,
@@ -4651,11 +5107,13 @@ if _HAS_DIRECT_ATTENTION:
             BLOCKS_X=_na_blocks(window_x, stride),
             CONTEXT48=context48,
             PIPE_STAGES=dq_stages,
+            QUERY_PARTS=query_parts, LOCAL16=local16,
             num_warps=_NA_BWD_WARPS,
             **meta,
         )
         key_tiles = triton.cdiv(key_height, _NA_TILE) * triton.cdiv(key_width, _NA_TILE)
-        wrap_triton(_na_backward_key_value_kernel)[(key_tiles, batch * num_heads)](
+        key_parts = 4 if (context48 and batch == 1) or local16 else 1
+        wrap_triton(_na_backward_key_value_kernel)[(key_tiles * key_parts, batch * num_heads)](
             query,
             key,
             value,
@@ -4674,7 +5132,10 @@ if _HAS_DIRECT_ATTENTION:
             STRIDE=stride,
             scale=scale,
             CONTEXT48=context48,
-            num_warps=_NA_BWD_WARPS,
+            KEY_PARTS=key_parts,
+            TILE_ORDER=_CONTEXT_TILE_ORDER[window_x] if context48 and key_parts > 1 else (),
+            PIPE_STAGES=1 if local16 else 2,
+            num_warps=2 if local16 else _NA_BWD_WARPS,
             **meta,
         )
         return grad_query, grad_key, grad_value, grad_score
@@ -4695,6 +5156,81 @@ if _HAS_DIRECT_ATTENTION:
         ).float()
         return group, place
 
+    @triton.jit
+    def _na_table_partials(
+        grad_score,
+        partials,
+        HEIGHT: tl.constexpr,
+        WIDTH: tl.constexpr,
+        WINDOW: tl.constexpr,
+        HEADS: tl.constexpr,
+        QUERIES: tl.constexpr,
+        OFFSETS: tl.constexpr,
+    ):
+        # A query and a relative offset identify at most one window slot.
+        query = tl.program_id(0) * QUERIES + tl.arange(0, QUERIES)
+        relative = tl.program_id(1) * OFFSETS + tl.arange(0, OFFSETS)
+        head = tl.program_id(2)
+        axis = 2 * WINDOW - 1
+        y, x = query // WIDTH, query % WIDTH
+        center_y = y - tl.minimum(tl.maximum(y - WINDOW // 2, 0), HEIGHT - WINDOW)
+        center_x = x - tl.minimum(tl.maximum(x - WINDOW // 2, 0), WIDTH - WINDOW)
+        slot_y = center_y[:, None] + WINDOW - 1 - (relative // axis)[None, :]
+        slot_x = center_x[:, None] + WINDOW - 1 - (relative % axis)[None, :]
+        valid = (
+            (query < HEIGHT * WIDTH)[:, None]
+            & (relative < axis * axis)[None, :]
+            & (slot_x >= 0)
+            & (slot_x < WINDOW)
+            & (slot_y >= 0)
+            & (slot_y < WINDOW)
+        )
+        row = ((head * HEIGHT * WIDTH + query) * WINDOW * WINDOW)[:, None]
+        values = tl.load(grad_score + row + slot_y * WINDOW + slot_x, valid, 0.0).to(tl.float32)
+        dst = (tl.program_id(0) * HEADS + head) * axis * axis + relative
+        tl.store(partials + dst, tl.sum(values, axis=0), relative < axis * axis)
+
+    @triton.jit
+    def _na_finish_table(
+        partials,
+        table,
+        TILES: tl.constexpr,
+        LENGTH: tl.constexpr,
+        HEADS: tl.constexpr,
+        ROWS: tl.constexpr,
+        COLUMNS: tl.constexpr,
+    ):
+        row = tl.arange(0, ROWS)
+        col = tl.program_id(0) * COLUMNS + tl.arange(0, COLUMNS)
+        head = tl.program_id(1)
+        index = ((row * HEADS + head) * LENGTH)[:, None] + col[None, :]
+        values = tl.load(partials + index, (row < TILES)[:, None] & (col < LENGTH)[None, :], 0.0)
+        tl.store(table + col * HEADS + head, tl.sum(values, axis=0), col < LENGTH)
+
+    @triton_op("dual_standalone::local_table_gradient", mutates_args={})
+    def _direct_local_table_gradient(
+        grad_score: torch.Tensor, height: int, width: int, window: int
+    ) -> torch.Tensor:
+        _, heads, tokens, _ = grad_score.shape
+        length = (2 * window - 1) ** 2
+        tiles = triton.cdiv(tokens, 128)
+        partial = grad_score.new_empty((tiles, heads, length), dtype=torch.float32)
+        table = grad_score.new_empty((length, heads), dtype=torch.float32)
+        wrap_triton(_na_table_partials)[(tiles, triton.cdiv(length, 32), heads)](
+            grad_score, partial, height, width, window, heads, 128, 32, num_warps=4
+        )
+        wrap_triton(_na_finish_table)[(triton.cdiv(length, 16), heads)](
+            partial,
+            table,
+            tiles,
+            length,
+            heads,
+            triton.next_power_of_2(tiles),
+            16,
+            num_warps=4,
+        )
+        return table
+
     def _na_table_gradient(
         grad_score: torch.Tensor, height: int, width: int, window_y: int, window_x: int
     ) -> torch.Tensor:
@@ -4703,6 +5239,17 @@ if _HAS_DIRECT_ATTENTION:
         A query's offset to window slot s is c - s with c = p - origin(p) per
         axis, so queries are first summed by (c_y, c_x) with one-hot matmuls.
         """
+        if (
+            grad_score.is_contiguous()
+            and grad_score.shape == (1, 4, height * width, window_y * window_x)
+            and height == width
+            and height in (48, 96)
+            and window_y == window_x == 16
+            and grad_score.is_cuda
+            and grad_score.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(grad_score.device) == (12, 0)
+        ):
+            return _direct_local_table_gradient(grad_score, height, width, window_y)
         num_heads = grad_score.shape[1]
         device = grad_score.device
         group_y, place_y = _na_offset_matrices(height, window_y, device)

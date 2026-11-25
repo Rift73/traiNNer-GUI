@@ -1,4 +1,5 @@
-from typing import Literal
+from collections.abc import Callable
+from typing import Literal, Self
 
 import antialiased_cnns
 import torch
@@ -134,9 +135,14 @@ class PerceptualFP16Loss(nn.Module):
         stride_fd: int = 1,
         clip_min: int = 0,
         antialiased: bool = False,
+        tensorrt_fp16_backward: bool = False,
     ) -> None:
         super().__init__()
 
+        self.tensorrt_fp16_backward = tensorrt_fp16_backward
+        self._gradient_engine = None
+        if tensorrt_fp16_backward:
+            self.register_load_state_dict_post_hook(self._clear_gradient_engine)
         self.clip_min = clip_min
         use_conv_layers = False
         use_relu_layers = False
@@ -260,7 +266,25 @@ class PerceptualFP16Loss(nn.Module):
 
         return cdf_loss
 
+    def _clear_gradient_engine(
+        self, module: nn.Module, incompatible_keys: object
+    ) -> None:
+        self._gradient_engine = None
+
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
+        self._gradient_engine = None
+        return super()._apply(fn, recurse)
+
     def forward_once(self, x: Tensor) -> dict[str, Tensor]:
+        if self.tensorrt_fp16_backward and torch.is_grad_enabled() and x.requires_grad:
+            from traiNNer.ops import vgg_trt_gradient
+
+            if vgg_trt_gradient.supported(self.vgg, x):
+                if self._gradient_engine is None:
+                    self._gradient_engine = vgg_trt_gradient.build(self.vgg, x)
+                # Bound engine memory to the training crop. Other shapes use native VGG.
+                if self._gradient_engine.shape == (x.device, tuple(x.shape)):
+                    return vgg_trt_gradient.extract(self.vgg, x, self._gradient_engine)
         return self.vgg(x)
 
     def forward(self, x: Tensor, gt: Tensor) -> dict[str, Tensor]:

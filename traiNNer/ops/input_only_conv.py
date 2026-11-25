@@ -40,6 +40,28 @@ class _InputOnlyConv(torch.autograd.Function):
     def backward(ctx: Any, grad_output: Tensor) -> tuple[Any, ...]:
         (weight,) = ctx.saved_tensors
         stride, padding, dilation, groups = ctx.geometry
+        if (
+            ctx.channels_last
+            and grad_output.is_cuda
+            and ctx.input_shape[0] == 1
+            and grad_output.dtype == weight.dtype
+            and weight.dtype in (torch.float32, torch.bfloat16)
+            and weight.is_contiguous(memory_format=torch.channels_last)
+            and torch.cuda.get_device_capability(grad_output.device) == (12, 0)
+        ):
+            # The input adjoint needs the original size. With stride > 1 the
+            # saved size determines which trailing rows and columns to restore.
+            output_padding = tuple(
+                original - ((n - 1) * step - 2 * pad + dil * (kernel - 1) + 1)
+                for original, n, step, pad, dil, kernel in zip(
+                    ctx.input_shape[2:], grad_output.shape[2:], stride, padding,
+                    dilation, weight.shape[2:], strict=True,
+                )
+            )
+            grad_input = F.conv_transpose2d(
+                grad_output, weight, None, stride, padding, output_padding, groups, dilation
+            )
+            return grad_input.to(ctx.input_dtype), None, None, None, None, None, None
         memory_format = (
             torch.channels_last if ctx.channels_last else torch.contiguous_format
         )

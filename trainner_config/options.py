@@ -68,6 +68,14 @@ class DatasetOptions(StrictStruct):
         ),
     ] = None
 
+    decoded_cache_mib: Annotated[
+        int,
+        Meta(
+            ge=0,
+            description="MiB per data-loader worker for decoded PairedImageDataset images. Random crops and augmentation run on every visit. Zero disables the cache.",
+        ),
+    ] = 0
+
     num_worker_per_gpu: Annotated[
         Annotated[int, Meta(ge=0)] | Literal["auto"] | None,
         Meta(
@@ -547,6 +555,12 @@ class TrainOptions(StrictStruct):
             description="Frozen-teacher output and sparse block-feature distillation settings."
         ),
     ] = None
+    rdual_flow_tensorrt: Annotated[
+        bool,
+        Meta(
+            description="Use TensorRT FP32 for frozen NeuFlow guidance during RDUAL training. Builds an engine for the training crop on first use. Requires CUDA, TensorRT and ONNX."
+        ),
+    ] = False
     vosr_target: Annotated[
         VosrTargetOptions | None,
         Meta(
@@ -1788,7 +1802,7 @@ class ReduxOptions(StrictStruct):
             "Store eligible FP32 still RealESRGAN replay LQ as byte codes. "
             "Exact reconstruction is checked on the producer device. DVD, post-crop dither "
             "or an unrepresentable batch uses full precision for the rest of the pool. "
-            "Saves 3 bytes per LQ element less a 1024-byte decode table while compact. GT keeps its dtype."
+            "Saves 3 bytes per LQ element less a 1024-byte decode table while compact. GT crops from normalized 8-bit images can also use lossless byte storage."
         )),
     ] = False
     datasets: dict[str, DatasetOptions] = {}

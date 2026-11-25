@@ -155,8 +155,10 @@ class CUDAPrefetcher:
         # put tensors to gpu
         with torch.cuda.stream(self.stream):  # type: ignore
             for k, v in self.batch.items():
-                # Crop decisions are read on the host; keep these flags on CPU.
+                # Crop and replay-pool decisions read these flags on the host.
                 if torch.is_tensor(v) and k not in (
+                    "normalized_byte_gt",
+                    "otf_normalized_byte_gt",
                     "otf_padded_height",
                     "otf_padded_width",
                     "gt_geometry",

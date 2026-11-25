@@ -150,6 +150,17 @@ settings, with independent noise samples for each frame. Video codecs operate
 temporally with optional lead-in frames. Eligible training paths prepare
 degradations ahead of consumption, so random draws can interleave across batches.
 
+## Frozen flow during training
+
+Set `train.rdual_flow_tensorrt: true` to run the frozen NeuFlow v2 guide in
+TensorRT. This requires CUDA and the ONNX and TensorRT Python packages. The
+first training clip builds a level-5 FP32 engine from the flow weights loaded
+into the generator. Within each group of adjacent pairs, the flow encoder
+processes each distinct frame position once. It still estimates both flow
+directions for each pair. The separate `clip_keep` option controls which
+generator graphs stay in memory for backpropagation. A change to the padded crop dimensions or a reload of the
+weights triggers a rebuild. The default is the native PyTorch guide.
+
 ## WSR and RSR
 
 The image WSR presets are in `options/train/WSR/`. The recurrent

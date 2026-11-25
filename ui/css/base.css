@@ -375,10 +375,9 @@ textarea {
   min-height: 0;
 }
 
-/* The screen takes focus by script (the skip link, a button that led to another screen). Its ring is drawn
-   inside the edge, where the clipping above does not cut it. */
-.view:focus-visible {
-  outline-offset: -2px;
+/* Navigation and the skip link focus the screen so Tab continues inside it. */
+.view:focus {
+  outline: none;
 }
 
 /* ───────── buttons ───────── */

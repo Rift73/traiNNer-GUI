@@ -12,6 +12,7 @@ from traiNNer.metrics.learned import (
 )
 from traiNNer.metrics.lpips import calculate_lpips
 from traiNNer.metrics.neosr_pixels import calculate_neosr_psnr, calculate_neosr_ssim
+from traiNNer.metrics.perceptual import calculate_butteraugli, calculate_ssimulacra2
 from traiNNer.metrics.psnr_ssim import calculate_psnr, calculate_ssim
 from traiNNer.metrics.topiq import calculate_topiq
 from traiNNer.utils.registry import METRIC_REGISTRY
@@ -20,6 +21,8 @@ __all__ = [
     "LEARNED_TENSOR_METRICS",
     "calculate_learned_metric_pt",
     "quantize_metric_tensor",
+    "calculate_butteraugli",
+    "calculate_ssimulacra2",
     "calculate_dists",
     "calculate_lpips",
     "calculate_neosr_psnr",

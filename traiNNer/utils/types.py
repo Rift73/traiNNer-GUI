@@ -52,6 +52,8 @@ class DataFeed(TypedDict):
     otf_padded_width: NotRequired[bool | Tensor]
     # The flips and rotation of a sample sent as source bytes (still_source).
     gt_orientation: NotRequired[int | Tensor]
+    # GT was normalized from decoded uint8 on CPU before the final spatial crop.
+    normalized_byte_gt: NotRequired[bool | Tensor]
     # A sample's DVD geometry and window; a list of them once collated.
     dvd: NotRequired["DvdSample | list[DvdSample]"]
 

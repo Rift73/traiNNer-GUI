@@ -61,6 +61,7 @@ from traiNNer.utils import RNG, DiffJPEG, get_root_logger
 from traiNNer.utils.color_util import dataset_luma_pt, dataset_luma_weights
 from traiNNer.utils.fused_jpeg import fused_jpeg, fused_jpeg_fits
 from traiNNer.utils.img_process_util import USMSharp, filter2d
+from traiNNer.utils.img_util import tensor2float32
 from traiNNer.utils.redux_options import ReduxOptions
 from traiNNer.utils.registry import MODEL_REGISTRY
 from traiNNer.utils.types import DataFeed
@@ -151,6 +152,7 @@ class RealESRGANModel(SRModel):
     # setting of the chain is drawn once per call and video codecs predict
     # between frames.
     clip_mode = False
+    _queue_gt_lut: Tensor | None = None
 
     def __init__(self, opt: ReduxOptions) -> None:
         if opt.dvd_prob > 0 and opt.scale != 2:
@@ -210,7 +212,7 @@ class RealESRGANModel(SRModel):
             )
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self) -> None:
+    def _dequeue_and_enqueue(self, *, normalized_byte_gt: bool = False) -> None:
         """It is the training pair pool for increasing the diversity in a batch.
 
         Batch processing limits the diversity of synthetic degradations in a batch. For example, samples in a
@@ -231,8 +233,11 @@ class RealESRGANModel(SRModel):
         byte pool. The optional equality check synchronizes on CUDA. An
         unmarked input or failed check promotes existing slots once, keeping
         the full LQ allocation for the remaining pool lifetime. During promotion
-        the byte pool and the new FP32 allocation briefly coexist. GT and the
-        logical permutation are independent of LQ storage.
+        the byte pool and the new FP32 allocation briefly coexist.
+
+        A GT crop from a normalized 8-bit source also needs only its original
+        byte codes. Decode it with the CPU producer's exact 256 FP32 values.
+        Modified targets and sources of other depths use full precision.
         """
 
         if self.queue_size == 0:
@@ -273,6 +278,24 @@ class RealESRGANModel(SRModel):
             self.queue_lr = full
             self._queue_lq_lut = lut = None
 
+        target = self.gt
+        if self.queue_lr is None:
+            self._queue_gt_lut = None
+            if normalized_byte_gt and target.dtype == torch.float32:
+                codes = torch.arange(256, dtype=torch.uint8, device="cpu")
+                self._queue_gt_lut = tensor2float32(codes).to(target.device)
+        gt_lut = self._queue_gt_lut
+        if gt_lut is not None:
+            if normalized_byte_gt and target.dtype == gt_lut.dtype:
+                target = (target * 255).round_().to(torch.uint8)
+            else:
+                assert self.queue_gt is not None
+                expanded = torch.empty_like(self.queue_gt, dtype=gt_lut.dtype)
+                for index in range(self.queue_ptr):
+                    expanded[index] = gt_lut[self.queue_gt[index].int()]
+                self.queue_gt = expanded
+                self._queue_gt_lut = gt_lut = None
+
         if self.queue_lr is None:
             if self.queue_size < 0:
                 raise ValueError("RealESRGAN queue_size must be nonnegative.")
@@ -291,7 +314,7 @@ class RealESRGANModel(SRModel):
             self._queue_lq_lut = lut
             _, c, h, w = self.gt.size()
             self.queue_gt = torch.zeros(
-                capacity, c, h, w, device=self.gt.device, dtype=self.gt.dtype
+                capacity, c, h, w, device=self.gt.device, dtype=target.dtype
             )
             self.queue_ptr = 0
             # Filling writes the slots in order, so the logical order starts as
@@ -320,9 +343,9 @@ class RealESRGANModel(SRModel):
             gt_dequeue = self.queue_gt.index_select(0, device_picked)
             # update the queue: the batch takes the slots it was dealt from
             self.queue_lr.index_copy_(0, device_picked, incoming)
-            self.queue_gt.index_copy_(0, device_picked, self.gt)
+            self.queue_gt.index_copy_(0, device_picked, target)
             self.lq = lq_dequeue if lut is None else lut[lq_dequeue.int()]
-            self.gt = gt_dequeue
+            self.gt = gt_dequeue if gt_lut is None else gt_lut[gt_dequeue.int()]
         else:
             assert self.queue_lr is not None
             assert self.queue_gt is not None
@@ -331,9 +354,7 @@ class RealESRGANModel(SRModel):
             self.queue_lr[self.queue_ptr : self.queue_ptr + b, :, :, :] = (
                 incoming.clone()
             )
-            self.queue_gt[self.queue_ptr : self.queue_ptr + b, :, :, :] = (
-                self.gt.clone()
-            )
+            self.queue_gt[self.queue_ptr : self.queue_ptr + b] = target
             self.queue_ptr = self.queue_ptr + b
 
     def _sample_beta_noise(
@@ -1271,7 +1292,16 @@ class RealESRGANModel(SRModel):
             # the crop. DVD replaces that source; dithering runs after the crop.
             if self.opt.queue_lq_uint8 and not self.clip_mode:
                 self._queue_lq_quantized = not use_dvd and not dithered
-            self._dequeue_and_enqueue()
+            byte_gt = data.get("normalized_byte_gt", False)
+            self._dequeue_and_enqueue(
+                normalized_byte_gt=(
+                    not self.clip_mode
+                    and self.queue_size > 0
+                    and not use_dvd
+                    and ("hf_noise" not in active or self.opt.otf_hf_noise_prob == 0)
+                    and (bool(byte_gt.all()) if isinstance(byte_gt, Tensor) else byte_gt)
+                )
+            )
             self.lq = self.lq.contiguous()  # for the warning: grad and param do not obey the gradient layout contract
 
             if self.vosr_target is not None:

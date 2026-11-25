@@ -1,9 +1,9 @@
 from typing import Any
 
-from spandrel.architectures.__arch_helpers.dysample import DySample
 from torch import Tensor, nn
 from torch.nn.utils.parametrizations import spectral_norm
 
+from traiNNer.archs.arch_util import DySampleV1 as DySample
 from traiNNer.ops.input_only_conv import InputOnlyConv2d
 from traiNNer.utils.registry import ARCH_REGISTRY
 
@@ -18,6 +18,7 @@ class Down(nn.Sequential):
 class Up(nn.Sequential):
     def __init__(self, dim: int) -> None:
         upsampler = DySample(dim, dim, 2, 4, False)
+        upsampler.followed_by_conv = True
         # Keep DySample's initialization, parameters and sampling mathematics.
         # Its offset/scope convolutions also need only input gradients in G's
         # frozen-discriminator phase; D's trainable phase stays ordinary Conv2d.

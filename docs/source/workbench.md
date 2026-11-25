@@ -43,6 +43,21 @@ To change batch size or learning rate, stop the run and choose **Resume with oth
 
 Choose the RDUAL starter recipe or open an existing RDUAL YAML. In **Datasets**, select the video folder, or choose specific episodes if the folder also contains extras. Use the MKV files directly, including on a Windows drive. Set the descale size and kernel for the source, check the video indexes, then prepare any missing or outdated indexes. Each episode gets a small JSON file in the adjacent `index` folder. For a fresh model or DUAL Light warm start, select a local NeuFlow v2 file under **Pretrained weights**, or leave the field empty to let the trainer locate and, if needed, download the default weights at startup. An RDUAL checkpoint with trained flow supplies its own weights. See the [RDUAL training guide](../RDUAL.md).
 
+### Perceptual validation scores
+
+For paired SDR RGB validation, add these entries alongside PSNR and SSIM in the recipe. Both score the full image by default and accept an optional pixel `crop_border`.
+
+```yaml
+val:
+  metrics:
+    butteraugli:
+      type: calculate_butteraugli
+    ssimulacra2:
+      type: calculate_ssimulacra2
+```
+
+Butteraugli reports the largest perceptual difference at 80 nits. A perfect match scores 0. SSIMULACRA2 measures quality across six scales on sufficiently large images. A perfect match scores 100 and heavily distorted images can score below zero. Both use the same quantized RGB pixels as validation image export.
+
 ## Pausing training in the queue
 
 Choose **Pause the queue** to save the active queued run at the next safe training update and keep its place. Once the checkpoint is saved and the trainer exits, the GPU is free. Choose **Resume the queue** to continue that run from the saved iteration, with the remaining entries in their original order.

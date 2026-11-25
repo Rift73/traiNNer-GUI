@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Literal
+from collections.abc import Iterable
+from typing import Any, Literal, cast
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -95,6 +96,8 @@ def pixelshuffle_block(
 
 
 class Conv3XC(nn.Module):
+    fused_training: bool = False
+
     def __init__(
         self,
         c_in: int,
@@ -104,6 +107,8 @@ class Conv3XC(nn.Module):
         s: int = 1,
         bias: Literal[True] = True,
         relu: bool = False,
+        *,
+        fused_training: bool = False,
     ) -> None:
         super().__init__()
         self.weight_concat = None
@@ -111,6 +116,7 @@ class Conv3XC(nn.Module):
         self.update_params_flag = False
         self.stride = s
         self.has_relu = relu
+        self.fused_training = fused_training
         gain = gain1
 
         self.sk = nn.Conv2d(
@@ -159,6 +165,31 @@ class Conv3XC(nn.Module):
         self.eval_conv.bias.requires_grad = False  # pyright: ignore[reportOptionalMemberAccess]
         self.update_params()
 
+    def equivalent_parameters(self) -> tuple[Tensor, Tensor]:
+        first, spatial, last = cast(Iterable[nn.Conv2d], self.conv)
+        # Keep the weight contractions in parameter precision under AMP. Autocast
+        # still chooses the activation dtype for the much larger image convolution.
+        with torch.autocast(device_type=self.sk.weight.device.type, enabled=False):
+            first_w = first.weight.flatten(1)
+            last_w = last.weight.flatten(1)
+            projected = (last_w @ spatial.weight.flatten(1)).reshape(
+                last_w.shape[0], first_w.shape[0], 9
+            )
+            kernel = (projected.transpose(1, 2) @ first_w).transpose(1, 2)
+            kernel = kernel.reshape(last_w.shape[0], first_w.shape[1], 3, 3)
+            kernel = kernel + F.pad(self.sk.weight, (1, 1, 1, 1))
+            # In the branch version the image is padded BEFORE the first affine
+            # map. Its bias therefore contributes at all nine taps, even at edges.
+            assert self.sk.bias is not None
+            assert (
+                first.bias is not None
+                and spatial.bias is not None
+                and last.bias is not None
+            )
+            bias = projected.sum(2) @ first.bias + last_w @ spatial.bias
+            bias = bias + last.bias + self.sk.bias
+        return kernel, bias
+
     def update_params(self) -> None:
         w1 = self.conv[0].weight.data.clone().detach()  # pyright: ignore[reportCallIssue]
         b1 = self.conv[0].bias.data.clone().detach()  # pyright: ignore[reportCallIssue]
@@ -198,7 +229,10 @@ class Conv3XC(nn.Module):
         self.eval_conv.bias.data = self.bias_concat.contiguous()  # pyright: ignore[reportOptionalMemberAccess]
 
     def forward(self, x: Tensor) -> Tensor:
-        if self.training:
+        if self.training and self.fused_training:
+            kernel, bias = self.equivalent_parameters()
+            out = F.conv2d(x, kernel, bias, stride=self.stride, padding=1)
+        elif self.training:
             pad = 1
             x_pad = F.pad(x, (pad, pad, pad, pad), "constant", 0)
             out = self.conv(x_pad) + self.sk(x)
@@ -218,6 +252,7 @@ class SPAB(nn.Module):
         mid_channels: int | None = None,
         out_channels: int | None = None,
         bias: bool = False,
+        fused_training: bool = False,
     ) -> None:
         super().__init__()
         if mid_channels is None:
@@ -226,9 +261,9 @@ class SPAB(nn.Module):
             out_channels = in_channels
 
         self.in_channels = in_channels
-        self.c1_r = Conv3XC(in_channels, mid_channels, gain1=2, s=1)
-        self.c2_r = Conv3XC(mid_channels, mid_channels, gain1=2, s=1)
-        self.c3_r = Conv3XC(mid_channels, out_channels, gain1=2, s=1)
+        self.c1_r = Conv3XC(in_channels, mid_channels, gain1=2, s=1, fused_training=fused_training)
+        self.c2_r = Conv3XC(mid_channels, mid_channels, gain1=2, s=1, fused_training=fused_training)
+        self.c3_r = Conv3XC(mid_channels, out_channels, gain1=2, s=1, fused_training=fused_training)
         self.act1 = torch.nn.SiLU(inplace=True)
         self.act2 = activation("lrelu", neg_slope=0.1, inplace=True)
 
@@ -266,9 +301,11 @@ class SPAN(nn.Module):
         norm: bool = True,
         img_range: float = 255.0,
         rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+        fused_training: bool = False,
     ) -> None:
         super().__init__()
 
+        self.hyperparameters.pop("fused_training", None)
         self.in_channels = num_in_ch
         self.out_channels = num_out_ch
         self.img_range = img_range
@@ -283,18 +320,18 @@ class SPAN(nn.Module):
         else:
             self.no_norm = None
 
-        self.conv_1 = Conv3XC(self.in_channels, feature_channels, gain1=2, s=1)
-        self.block_1 = SPAB(feature_channels, bias=bias)
-        self.block_2 = SPAB(feature_channels, bias=bias)
-        self.block_3 = SPAB(feature_channels, bias=bias)
-        self.block_4 = SPAB(feature_channels, bias=bias)
-        self.block_5 = SPAB(feature_channels, bias=bias)
-        self.block_6 = SPAB(feature_channels, bias=bias)
+        self.conv_1 = Conv3XC(self.in_channels, feature_channels, gain1=2, s=1, fused_training=fused_training)
+        self.block_1 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
+        self.block_2 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
+        self.block_3 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
+        self.block_4 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
+        self.block_5 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
+        self.block_6 = SPAB(feature_channels, bias=bias, fused_training=fused_training)
 
         self.conv_cat = conv_layer(
             feature_channels * 4, feature_channels, kernel_size=1, bias=True
         )
-        self.conv_2 = Conv3XC(feature_channels, feature_channels, gain1=2, s=1)
+        self.conv_2 = Conv3XC(feature_channels, feature_channels, gain1=2, s=1, fused_training=fused_training)
 
         self.upsampler = pixelshuffle_block(
             feature_channels, self.out_channels, upscale_factor=upscale
@@ -336,6 +373,7 @@ def span(
     norm: bool = False,
     img_range: float = 255.0,
     rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+    fused_training: bool = False,
 ) -> SPAN:
     return SPAN(
         upscale=scale,
@@ -346,6 +384,7 @@ def span(
         norm=norm,
         img_range=img_range,
         rgb_mean=rgb_mean,
+        fused_training=fused_training,
     )
 
 
@@ -359,6 +398,7 @@ def span_s(
     norm: bool = False,
     img_range: float = 255.0,
     rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+    fused_training: bool = False,
 ) -> SPAN:
     return SPAN(
         upscale=scale,
@@ -369,6 +409,7 @@ def span_s(
         norm=norm,
         img_range=img_range,
         rgb_mean=rgb_mean,
+        fused_training=fused_training,
     )
 
 
@@ -382,6 +423,7 @@ def span_f32(
     norm: bool = False,
     img_range: float = 255.0,
     rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+    fused_training: bool = False,
 ) -> SPAN:
     return SPAN(
         upscale=scale,
@@ -392,6 +434,7 @@ def span_f32(
         norm=norm,
         img_range=img_range,
         rgb_mean=rgb_mean,
+        fused_training=fused_training,
     )
 
 
@@ -405,6 +448,7 @@ def span_f64(
     norm: bool = False,
     img_range: float = 255.0,
     rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+    fused_training: bool = False,
 ) -> SPAN:
     return SPAN(
         upscale=scale,
@@ -415,6 +459,7 @@ def span_f64(
         norm=norm,
         img_range=img_range,
         rgb_mean=rgb_mean,
+        fused_training=fused_training,
     )
 
 
@@ -428,6 +473,7 @@ def span_f96(
     norm: bool = False,
     img_range: float = 255.0,
     rgb_mean: tuple[float, float, float] = (0.4488, 0.4371, 0.4040),
+    fused_training: bool = False,
 ) -> SPAN:
     return SPAN(
         upscale=scale,
@@ -438,4 +484,5 @@ def span_f96(
         norm=norm,
         img_range=img_range,
         rgb_mean=rgb_mean,
+        fused_training=fused_training,
     )

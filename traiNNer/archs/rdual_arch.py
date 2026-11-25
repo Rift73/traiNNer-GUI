@@ -5429,6 +5429,13 @@ def _flow_pairs_per_call(padded_h: int, padded_w: int) -> int:
     return max(1, min(_FLOW_PAIRS, 2**31 // (2 * 4 * cells * cells)))
 
 
+def _indexed_flow_pairs_per_call(height: int, width: int) -> int:
+    # The TensorRT optimization profile must accommodate its maximum shape.
+    # Leave room for the other live feature maps beside the correlation volume.
+    cells = (height // 8) * (width // 8)
+    return max(1, min(_FLOW_PAIRS, (128 << 20) // (8 * cells * cells)))
+
+
 _NF_FEATURE_DIM_S16 = 128
 _NF_CONTEXT_DIM_S16 = 64
 _NF_ITER_CONTEXT_DIM_S16 = 64
@@ -5537,6 +5544,19 @@ class _NeuFlowTransformerLayer(nn.Module):
         return source + message
 
 
+def _neuflow_partners(value: Tensor, interleaved: bool) -> Tensor:
+    if interleaved:
+        return value.reshape(-1, 2, *value.shape[1:]).flip([1]).reshape_as(value)
+    return torch.cat(value.chunk(chunks=2, dim=0)[::-1], dim=0)
+
+
+def _neuflow_directions(features: Tensor, interleaved: bool) -> tuple[Tensor, Tensor]:
+    if interleaved:
+        return features, _neuflow_partners(features, True)
+    first, second = features.chunk(chunks=2, dim=0)
+    return first, second
+
+
 class _NeuFlowFeatureAttention(nn.Module):
     """Each image of the pair batch [first images, second images] attends to its partner."""
 
@@ -5547,13 +5567,13 @@ class _NeuFlowFeatureAttention(nn.Module):
         )
         self.norm = nn.BatchNorm2d(dim)
 
-    def forward(self, features: Tensor) -> Tensor:
+    def forward(self, features: Tensor, interleaved: bool = False) -> Tensor:
         b, c, h, w = features.shape
         tokens = features.flatten(-2).permute(0, 2, 1)
-        partners = torch.cat(tokens.chunk(chunks=2, dim=0)[::-1], dim=0)
+        partners = _neuflow_partners(tokens, interleaved)
         for layer in self.layers:
             tokens = layer(tokens, partners)
-            partners = torch.cat(tokens.chunk(chunks=2, dim=0)[::-1], dim=0)
+            partners = _neuflow_partners(tokens, interleaved)
         tokens = tokens.view(b, h, w, c).permute(0, 3, 1, 2).contiguous()
         return self.norm(tokens)
 
@@ -5649,7 +5669,10 @@ def _neuflow_lookup(corr: Tensor, grid: Tensor, flow: Tensor) -> Tensor:
     )
     # bilinear, zero padding, align_corners: the sampler the original selects
     # with cuDNN disabled
-    sampled = torch.grid_sampler_2d(corr, sample, 0, 0, True)
+    if torch.jit.is_tracing() and torch.onnx.is_in_onnx_export():
+        sampled = F.grid_sample(corr, sample, align_corners=True)
+    else:
+        sampled = torch.grid_sampler_2d(corr, sample, 0, 0, True)
     return sampled.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
 
 
@@ -5740,17 +5763,46 @@ class NeuFlowV2(nn.Module):
         features_s16, features_s8 = self.backbone(
             torch.cat([img0, img1], dim=0), grids["pos_s16"]
         )
-        features_s16 = self.cross_attn_s16(features_s16)
+        return self._estimate(img0, features_s16, features_s8, grids, False)
+
+    def forward_indexed(self, frames: Tensor, sources: Tensor) -> Tensor:
+        """Estimate both directions for adjacent pairs, encoding each frame once."""
+        _, _, height, width = frames.shape
+        grids = self._prepare_grids(sources.shape[0], height, width, frames.device)
+        frames = frames / 255.0
+        s16, s8 = self.backbone(frames, grids["pos_s16"][: frames.shape[0]])
+        return self._estimate(
+            frames.index_select(0, sources),
+            s16.index_select(0, sources),
+            s8.index_select(0, sources),
+            grids,
+            True,
+        )
+
+    def _estimate(
+        self,
+        img0: Tensor,
+        features_s16: Tensor,
+        features_s8: Tensor,
+        grids: dict[str, Tensor],
+        interleaved: bool,
+    ) -> Tensor:
+        b = img0.shape[0]
+        features_s16 = self.cross_attn_s16(features_s16, interleaved)
         context_s16, features_s16 = torch.split(
             features_s16, [_NF_CONTEXT_DIM_S16, _NF_FEATURE_DIM_S16], dim=1
         )
-        context_s16 = torch.relu(context_s16.chunk(chunks=2, dim=0)[0])
+        context_s16 = torch.relu(
+            context_s16 if interleaved else context_s16.chunk(chunks=2, dim=0)[0]
+        )
         context_s8, features_s8 = torch.split(
             features_s8, [_NF_CONTEXT_DIM_S8, _NF_FEATURE_DIM_S8], dim=1
         )
-        context_s8 = torch.relu(context_s8.chunk(chunks=2, dim=0)[0])
+        context_s8 = torch.relu(
+            context_s8 if interleaved else context_s8.chunk(chunks=2, dim=0)[0]
+        )
 
-        feature0_s16, feature1_s16 = features_s16.chunk(chunks=2, dim=0)
+        feature0_s16, feature1_s16 = _neuflow_directions(features_s16, interleaved)
         correspondence = F.scaled_dot_product_attention(
             feature0_s16.flatten(-2).permute(0, 2, 1),
             feature1_s16.flatten(-2).permute(0, 2, 1),
@@ -5775,7 +5827,7 @@ class NeuFlowV2(nn.Module):
         flow = F.interpolate(flow, scale_factor=2, mode="nearest") * 2
         features_s16 = F.interpolate(features_s16, scale_factor=2, mode="nearest")
         features_s8 = self.merge_s8(torch.cat([features_s8, features_s16], dim=1))
-        feature0_s8, feature1_s8 = features_s8.chunk(chunks=2, dim=0)
+        feature0_s8, feature1_s8 = _neuflow_directions(features_s8, interleaved)
         corr_s8 = _neuflow_correlation(feature0_s8, feature1_s8)
         context_s16 = F.interpolate(context_s16, scale_factor=2, mode="nearest")
         context_s8 = self.context_merge_s8(torch.cat([context_s8, context_s16], dim=1))
@@ -5935,7 +5987,12 @@ class RDUAL(nn.Module):
         self.flow_loaded.fill_(True)
 
     @torch.no_grad()
-    def guidance(self, frames: Tensor) -> Tensor:
+    def guidance(
+        self,
+        frames: Tensor,
+        *,
+        estimator: Callable[[Tensor, Tensor], Tensor] | None = None,
+    ) -> Tensor:
         """The flow guidance of a B,T,3,H,W clip in 0..1: B,T-1,2,2,Htrunk,Wtrunk.
 
         Frozen NeuFlow v2 (one s16 and eight s8 iterations) on every adjacent
@@ -5947,7 +6004,8 @@ class RDUAL(nn.Module):
         padded to a multiple of 16 and at least 32 pixels a side, and run on
         the model's device in calls of at most _FLOW_PAIRS pairs, fewer for
         large frames (_flow_pairs_per_call); the result is on the frames'
-        device.
+        device. An indexed estimator receives unique frames in 0..255 and
+        interleaved source indices for each forward and reverse pair.
         """
         if frames.ndim != 5 or frames.shape[2] != 3:
             raise ValueError("RDUAL input must be B,T,3,H,W")
@@ -5963,9 +6021,17 @@ class RDUAL(nn.Module):
         device = self.flow_loaded.device
         padded_h = max(32, (height + 15) // 16 * 16)
         padded_w = max(32, (width + 15) // 16 * 16)
-        later = frames[:, 1:].flatten(0, 1)
-        earlier = frames[:, :-1].flatten(0, 1)
-        pairs = _flow_pairs_per_call(padded_h, padded_w)
+        if estimator is None:
+            later = frames[:, 1:].flatten(0, 1)
+            earlier = frames[:, :-1].flatten(0, 1)
+        else:
+            sequence = frames.flatten(0, 1)
+        pair_count = batch * (count - 1)
+        pairs = (
+            _flow_pairs_per_call(padded_h, padded_w)
+            if estimator is None
+            else _indexed_flow_pairs_per_call(padded_h, padded_w)
+        )
         # The per-backend switches only: the global getters raise once a
         # process has set one backend on its own.
         matmul, conv = torch.backends.cuda.matmul, torch.backends.cudnn.conv
@@ -5975,18 +6041,34 @@ class RDUAL(nn.Module):
             matmul.fp32_precision = "ieee"
             conv.fp32_precision = "ieee"
             try:
-                for first in range(0, later.shape[0], pairs):
-                    span = slice(first, first + pairs)
-                    pair_later = later[span].to(device, torch.float32) * 255.0
-                    pair_earlier = earlier[span].to(device, torch.float32) * 255.0
-                    # direction 0 maps frame i+1 onto frame i, direction 1 the reverse
-                    source = torch.stack((pair_later, pair_earlier), 1).flatten(0, 1)
-                    target = torch.stack((pair_earlier, pair_later), 1).flatten(0, 1)
-                    if padded_h != height or padded_w != width:
-                        padding = (0, padded_w - width, 0, padded_h - height)
-                        source = F.pad(source, padding, mode="replicate")
-                        target = F.pad(target, padding, mode="replicate")
-                    flow = self.flow(source, target)[:, :, :height, :width]
+                for first in range(0, pair_count, pairs):
+                    end = min(first + pairs, pair_count)
+                    padding = (0, padded_w - width, 0, padded_h - height)
+                    if estimator is None:
+                        span = slice(first, end)
+                        pair_later = later[span].to(device, torch.float32) * 255.0
+                        pair_earlier = earlier[span].to(device, torch.float32) * 255.0
+                        source = torch.stack((pair_later, pair_earlier), 1).flatten(0, 1)
+                        target = torch.stack((pair_earlier, pair_later), 1).flatten(0, 1)
+                        if padded_h != height or padded_w != width:
+                            source = F.pad(source, padding, mode="replicate")
+                            target = F.pad(target, padding, mode="replicate")
+                        flow = self.flow(source, target)
+                    else:
+                        # Flattening pairs drops one position per clip boundary.
+                        # Restore that offset to gather from the unique frames.
+                        start_frame = first + first // (count - 1)
+                        end_frame = end + 1 + (end - 1) // (count - 1)
+                        unique = (
+                            sequence[start_frame:end_frame].to(device, torch.float32) * 255.0
+                        )
+                        if padded_h != height or padded_w != width:
+                            unique = F.pad(unique, padding, mode="replicate")
+                        edge = torch.arange(first, end, dtype=torch.int32, device=device)
+                        left = edge + edge // (count - 1) - start_frame
+                        sources = torch.stack((left + 1, left), dim=1).flatten()
+                        flow = estimator(unique, sources)
+                    flow = flow[:, :, :height, :width]
                     if h4 != height or w4 != width:
                         flow = F.pad(
                             flow, (0, w4 - width, 0, h4 - height), mode="replicate"
