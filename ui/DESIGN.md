@@ -128,11 +128,14 @@ Read the source for exact signatures; this is the map.
 - **`state/runs.js`**: `runs.get()` gives `{list, phase, error, selectedId}`; `watch()` (fast polling,
   returns release), `refresh()`, `select(id)`, `upsert(run)`, `start(yaml)`, `stop(id)`, `resume(id)`,
   `active()`. `runStatus(status)` gives `{kind: 'run'|'ok'|'err'|'', active, label}`.
+- **`state/progress.js`**: the trainer's own iteration count of runs on screen. `follow(id, listener)`
+  (one loop per run, returns release), `get(id)`, `iterationOf(run)` (the count to show for a summary).
 - **`ui.js`**: `toast(msg, {kind, action})`, `openDialog({title, body, foot, wide, flush})`,
   `confirmDialog`, `promptDialog`, `tabs({items, active, onChange, label})` returning
   `{el, setActive, setBadge}`, `issueList(issues, {onSelect})`, `badge(text, kind)`,
   `roleChip('gt'|'lq'|'out', text)`, `emptyState`, `notice(kind, body, action)`, `loading(text)`,
-  `cropmarks()`, `copyText`, `countIssues`.
+  `cropmarks()`, `copyText`, `copyTextWhenReady(promise)`, `openCopyDialog({title, text, lead, onCopied})`,
+  `countIssues`.
 - **Classes** (`base.css`): `.btn` (`--primary --danger --quiet --sm --icon`, `[aria-pressed]`), `.seg`,
   `.input` (`--num --path`), `.select`, `.textarea`, `.field` (`__label __help __error`), `.switch`,
   `.tabs/.tab`, `.pane` (`__head __title __body __body--pad __foot`), `.badge`, `.role`, `.issues/.issue`,
@@ -155,12 +158,28 @@ text selection in answer to a background update.
 ### Words
 
 - **Queue entry**: a saved copy of a recipe. States, always shown with these words: `held` "On hold"
-  (never starts by itself), `pending` "Released" (starts when the trainer is free, in release order),
+  (never starts by itself), `pending` "Released" (waits in the line and starts from its front when the trainer
+  is free; a release joins the end, and the person can move a waiting entry),
   `running` "Training", `stopping` "Stopping", `completed`, `stopped`, `failed`, `cancelled`.
   Verbs: "Release", "Put on hold", "Cancel entry", "Stop training", "Pause the queue" /
   "Continue the queue" (pausing stops further entries from starting; one that is training goes on).
 - **Start training** starts now. **Add to queue** keeps a copy for later. Never blur the two.
 - **Replay**: a new held entry that repeats a run's recipe with its recorded seed.
+- **Continuation**: an entry that continues a stopped run started here (not a curriculum phase) from its
+  newest saved checkpoint as a new run. "Add to queue" on the run's head and on its stopped queue entry
+  (row and detail); it arrives released (the phone edition asks first), one open continuation per run
+  (a second press says so and adds nothing). Tagged "Continuation", never "Replay"; told apart from a
+  replay only by `resumeStep`. The toast says where it stands in line, never "starting now".
+  **Extend training** is the continuation of a completed run: "Extend training…" on the run's head and
+  on its completed queue entry opens a dialog that asks for the additional iterations (a whole number,
+  1 or more; "50,000" is read as 50000), shows the iterations trained so far and the new total, and adds
+  a released continuation from the run's final training state (`additionalIterations` on the entry).
+  The dialog is the confirmation on both editions. An open continuation is named instead of the field;
+  a refusal stays in the dialog with what was typed, and names what still works (fine-tune from saved
+  weights, replay); nothing there starts a fresh run by itself. The new total counts from the iteration
+  the run completed at (`completedIteration`, else the recipe's total). The dialog explains when a run
+  exhausted early-stopping patience. The service checks the final checkpoint when the user submits.
+  If a continuation is already open with a different amount, the dialog shows that entry.
 - **Imported run**: an experiment found in the trainer's `experiments/` folder that this service did not
   launch (`source: "cli"`, status `imported`). It can be read and compared, not stopped or resumed.
 - **Reduced preview**: dataset previews are at most 1536 px on the long edge (`PREVIEW_MAX`). When an
@@ -173,9 +192,15 @@ text selection in answer to a background update.
 
 - **`state/queue.js`**: `queue.get()` gives `{paused, activeId, entries, phase, error}`; `watch()`,
   `refresh()`, `open()`, `finished()`, `held()`, `pending()`, `byId(id)`, `forRun(runId)`,
-  `submit(yaml, {recipePath})`, `replay(runId)`, `release/hold/cancel/stop(id)`, `setPaused(bool)`.
-  `entryStatus(status)` gives `{kind, label, open, waiting, active}`; `ENTRY_ACTIONS` lists each action's
-  label and the states it is allowed from.
+  `submit(yaml, {recipePath})`, `replay(runId)`, `resume(runId, {additionalIterations?})` (continuation;
+  with `additionalIterations`, an extension of a completed run), `continuationOf(runId)`
+  (the open one or null), `continuationsOf(runId)` (all, newest first), `line()` (released entries that
+  wait, in starting order), `reorder(expected, order)` (ids of the line as seen, and as wanted; the answer
+  replaces the list, a refusal is thrown after a fresh reading, and a poll that was out is dropped),
+  `release/hold/cancel/stop(id)`,
+  `setPaused(bool)`. `entryStatus(status)` gives `{kind, label, open, waiting, active}`; `ENTRY_ACTIONS`
+  lists each action's label and the states it is allowed from; `isContinuation(entry)`;
+  `placeWords(entry)` ("Next", "2nd in line") and `statusPlaceWords(entry)` ("released, next").
 - **`state/catalog.js`**: `catalog.load()`, `catalog.get()` (`{phase, tasks, architectures, losses}`),
   `catalog.task(id)`, `catalog.taskLabel(id)`, `catalog.networksFor(taskId)`, `folderWords(taskId)`.
 - **`state/runs.js`**: `runStatus()` also returns `imported` and `resumable`; `isImported(run)`;
@@ -206,7 +231,24 @@ Part contracts (each returns a handle; `destroy()` is the cleanup of the module 
   above the run list (open entries, pause control, link to the queue).
   `mountQueueView(host, {entryId})` gives `{setEntry(id), destroy()}`: the main area for the queue routes.
   `openReplayDialog(run)`: what a replay of this run would repeat, then "Add replay to queue" or
-  "Open as recipe".
+  "Open as recipe". `addContinuation({runId, name, additionalIterations, confirm, toastRefusal})` gives
+  `{ok, entry, existed}`, `{ok: false, message, offline}` or null (declined on the phone): the one action
+  behind every "Add to queue" of a stopped run and every extension of a completed one; it toasts (a
+  refusal only when `toastRefusal`), with the iterations the returned entry carries, not the typed ones.
+  `openExtendDialog({runId, name, run?})`: the "Extend training" dialog (reads the run when `run` is not
+  given). `extendAvailability(run)` reads the run detail's hint `{available, resumeStep?, reason?}`, or
+  null when it gives none (the service then decides).
+  A stopped or completed entry with an open continuation shows "Continuation in the queue: <state>"
+  (with the additional iterations of an extension) instead of its button; one continued before links its
+  newest finished continuation that trained (a continuation cancelled before it started continued nothing
+  and is not counted).
+  Moving in the line (queue view, open entries, released rows when the line has two or more): a grip at
+  the row's end is dragged with mouse, pen or finger (pointer events; only the grip has
+  `touch-action: none`, the rest of the row scrolls); "Move up" / "Move down" buttons are the way without
+  dragging (the grip is hidden from assistive technology, the focus follows the moved entry, a hidden
+  status line says the new place). While a row is held and while the request is out the lists are not
+  re-rendered (`hold`); Escape or a cancelled pointer drops nothing. A refusal is toasted and stays above
+  the list until the next move.
 - `runs/validation.js`: `mountValidation(host, {run})` gives `{setRun(run), destroy()}`: the Validation tab
   (saved validation images, per iteration and per sample, on the comparison stage against the recorded
   ground truth and input, and against another iteration).
@@ -1208,6 +1250,37 @@ gets a **Training videos** panel in its Datasets section, on the desktop page an
   `recipe/fields.js`: its Browse. `recipe/sections.js`: the datasets section rebuilds when a dataset's type
   changes, the pretrained section when the network does. `main.js`: `videoStep()`.
 
+## Copy log path and Copy for AI (2026-11-25)
+
+For handing a run to an assistant (or any program) on the training PC, from the desktop page or from the
+phone. Both only write to the clipboard of the device in hand; nothing is sent anywhere.
+
+### Rules
+
+- **Copy log path** stands beside the log's name at the top of Telemetry, for one log as for several (one
+  log shows its name where the list would be). The path is the service's (`sourcePaths` of the history
+  answer for the log on screen, a TensorBoard event file included); the page never builds one. With a
+  Windows and a WSL form there are two buttons, "Copy Windows path" and "Copy WSL path"; with one form,
+  "Copy log path". Each button's tooltip is the path it copies. From picking another log until its answer
+  is in, the buttons are `aria-disabled`: the path of the log before is never copied.
+- **Copy for AI** is in the run head on every loaded run, always just before Refresh (the buttons before
+  it come and go with the run's state). The service writes the text (`GET /api/run/ai-context`). The log
+  picked in this run's Telemetry tab goes with the request; without a pick the service names the newest
+  log, as Telemetry does. A pick that has left the run (404) is asked again without it, and the toast says so.
+- **A write to the clipboard starts inside the press.** A path is at hand, so `copyText` runs at once. The
+  AI text has to be fetched: `copyTextWhenReady` starts the write with a clipboard item whose text is the
+  promise (what Safari on the iPhone asks for), and falls back to `copyText` once the text is there.
+- **When the browser refuses**, `openCopyDialog` shows the text selected in a read-only field, with a
+  "Copy" button (a press of its own) and the choice to copy it by hand. A failed request is a toast; no
+  dialog opens without text.
+
+### Parts
+
+- `ui.js`: `copyTextWhenReady`, `openCopyDialog` (`.dialog__lead` in `base.css`).
+- `api.js`: `runAiContext(id, source)`; `history` documents `sourcePaths` and `sourceFormat`.
+- `runs/telemetry.js`: `readPaths`, `copyPath(form)`, the source row (`sourceName`, `.runs__tele-copy`),
+  `source()` on the mounted part. `runs/detail.js`: `aiBtn`, `copyForAi()`, `busy.ai`. `css/runs.css`.
+
 ## How the UI is checked
 
 Every interaction is exercised in a real browser against a running service: reading (real runs, real
@@ -1215,3 +1288,53 @@ validation images, real analysis jobs) against the service in use, and anything 
 actions, replays, studies, curricula, analysis jobs) against a separate private copy of the same service
 code that holds only clearly labelled test data and cannot start training. No test data, test path or
 development note belongs in the app or in this folder.
+
+## Live iteration count (2026-11-25)
+
+While a run trains, its counter moves with every iteration the trainer completes: the run head (counter
+and bar), its row in the run list, the Runs station of the rail and the next-step line, on the desktop page
+and the phone edition alike. A slow job is shown from its first iteration, long before its first log line.
+
+- **Only real counts.** Each number is an iteration the trainer has confirmed; nothing is forecast.
+- **Every count gets its turn.** One answer can confirm several iterations. The counters then step through
+  them one by one, one painted frame each at least, always behind the newest confirmed count and never past
+  it, timed to end about when the next answer is due (within a second). So a run of 25 iterations a second
+  and one of an iteration a second both tick once per iteration.
+- **Straight to the count where stepping would show the past as now.** The first count, another attempt,
+  a count that went back, a run that has ended, the first count after the page was hidden or the link was
+  lost, a silence of more than 8 s, and more counts than there are frames to paint them (roughly above 60 a
+  second): the counters then show the newest confirmed count at once.
+- **Read by itself.** The count comes from its own small answer (`GET /api/runs/<id>/progress`), one
+  loop of questions per run however many places show it. A new count changes only the number and the bar:
+  nothing else is read again or redrawn, and the focus stays where it is.
+- **The estimate says how old it is.** Speed, ETA and memory stay the trainer's last log sample; the head
+  names the rows that come from it ("Speed, ETA and memory as of iteration N"), since the counter runs ahead.
+- **Asked as often as it helps.** Twice a second while the count moves, once a second when it changes
+  more rarely; less often on a slow link (never busy more than a third of the time, measured by the quicker
+  of the last two answers) or while the trainer is not stepping (validation, saving); not at all while the
+  page is hidden or the run is not training. Failures are retried after 2, 4, 8 and 15 s, keeping the last
+  reading.
+- **A run that starts again starts clean.** The count read for the earlier attempt is dropped the moment
+  the run is seen starting, before any counter could show it for the new attempt.
+- **A run that stops ends on the trainer's count.** When a run stops while its page is open, the counter
+  ends on the trainer's own final count, not on the older last log line.
+- **A reading is never taken back.** An answer without a count (the trainer's signal goes away a moment
+  before the run is said to have ended) leaves the last reading of that attempt in place; only another
+  attempt's answer clears it. While no count can be read, the further of the last reading and the log's
+  iteration is shown.
+- **Attempts are never mixed.** A reading names its attempt (`attemptId`) and is shown only beside a
+  summary of the same attempt; after a resume the counters show the summary's number until it has caught
+  up. The run head takes the attempt from each monitor answer for this.
+- **Without the signal** (an older trainer or service, an imported run) the counter is the one from the
+  log, as before. A service that is updated and comes back is asked again without a reload.
+- **Not read aloud, and nothing moves.** The next-step line announces its sentence when it changes; the
+  count inside it is left out of the announcement, its "Open run" link keeps the focus, and digits of one
+  width keep that link where it is. A count rewrites its own text in place: no element is added or removed.
+- **On one line the name gives way.** Where the phone edition shows the next-step line on a single line,
+  a long run name is cut short and the count stays whole.
+
+Parts: `state/progress.js` (`progress.follow(id, listener)`, `get(id)`, `iterationOf(run)`), `api.js`
+(`runProgress(id)`), `runs/detail.js` (`progressBar().set(run, iteration)`, `setCount()`,
+`paintProgress()`, `syncProgress()`, the "as of" row), `views/runs.js` (`paintRowProgress()`,
+`row.release`), `main.js` (`paintStation()`, `paintNextCount()`, `syncLive()`), `css/base.css`
+(`.next__count`), `css/mobile.css` (`.next__text--count`, `.next__lead`).

@@ -147,3 +147,7 @@ line-ending = "auto"
 
 [tool.uv.pip]
 extra-index-url = ["https://download.pytorch.org/whl/nightly/cu134"]
+
+[tool.setuptools.package-data]
+"traiNNer.losses._vmaf" = ["vmaf_v0.6.1.json", "LICENSE*"]
+"traiNNer.losses._butteraugli" = ["LICENSE*", "THIRD_PARTY_NOTICES.md"]

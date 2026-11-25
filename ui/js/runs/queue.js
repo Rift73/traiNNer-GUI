@@ -1,24 +1,24 @@
 // The training queue on the Runs screen: the summary block above the run list, the queue view with one
-// entry's detail and lineage, and the replay dialog.
+// entry's detail and lineage, the replay dialog and the "Extend training" dialog.
 // An entry is a saved copy of a recipe. Only "Release" (a person pressing it) authorises training;
 // nothing here releases an entry by itself.
 
-import { h, mount, fmt } from '../dom.js';
+import { h, mount, fmt, uid } from '../dom.js';
 import { api, newRequestId } from '../api.js';
-import { queue, entryStatus, ENTRY_ACTIONS } from '../state/queue.js';
+import { queue, entryStatus, ENTRY_ACTIONS, isContinuation, ordinal, placeWords, statusPlaceWords } from '../state/queue.js';
 import { runs, runStatus } from '../state/runs.js';
-import { openAsRecipe, addToQueue, go, runHref, queueHref, studiesHref, curriculaHref } from '../actions.js';
+import { confirmForceStop, openAsRecipe, addToQueue, go, runHref, queueHref, studiesHref, curriculaHref } from '../actions.js';
 import { recipe } from '../state/recipe.js';
 import { toast, openDialog, confirmDialog, confirmOnPhone, issueList, badge, notice, loading, copyText } from '../ui.js';
 import { highlightedPre } from '../recipe/yaml-highlight.js';
 
 // ───────── words ─────────
 
-const PAUSED_LINE = 'Paused: released entries will not start. Training that is running continues.';
+const PAUSED_LINE = 'The queue is paused. Its active run saves a checkpoint and keeps its place.';
 
 const STATE_TEXT = {
   held: 'Saved. It will not start until you release it.',
-  pending: 'It starts when the trainer is free, after the entries released before it.',
+  pending: 'It starts when the trainer is free, after the released entries ahead of it in line.',
   running: 'Its training run is starting or running.',
   stopping: 'A stop was requested. The training run is shutting down.',
   completed: 'Its training run finished.',
@@ -32,7 +32,9 @@ const ACTION_WORDS = {
   release: { done: (name) => `Released ${name}.`, failed: (name) => `${name} was not released` },
   hold: { done: (name) => `Put ${name} on hold.`, failed: (name) => `${name} was not put on hold` },
   cancel: { done: (name) => `Cancelled ${name}.`, failed: (name) => `${name} was not cancelled` },
+  forceStop: { done: (name) => `Force stop requested for ${name}.`, failed: (name) => `Force stop was refused for ${name}` },
   stop: { done: (name) => `Stop training requested for ${name}.`, failed: (name) => `Training of ${name} was not stopped` },
+  continue: { failed: (name) => `${name} was not added to the queue` },
 };
 
 /** A phase entry's `name` is its recipe's (the same for every phase): name it by its phase instead. */
@@ -40,24 +42,30 @@ const entryName = (entry) => (isPhase(entry) ? phaseWords(entry) : entry?.name |
 const shortDigest = (digest) => (typeof digest === 'string' ? digest.slice(0, 12) : '');
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const allowed = (action, entry) => ENTRY_ACTIONS[action].from.includes(entry?.status);
-
-function ordinal(n) {
-  const tens = n % 100;
-  const suffix = tens >= 11 && tens <= 13 ? 'th' : { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th';
-  return `${n}${suffix}`;
+/** How many iterations a continuation that extends a completed run trains beyond resumeStep, or null. */
+function moreIterations(entry) {
+  const n = Number(entry?.additionalIterations);
+  return entry?.additionalIterations !== undefined && entry?.additionalIterations !== null && Number.isFinite(n) && n > 0 ? n : null;
 }
+/** "50,000 more iterations", "1 more iteration". */
+const moreCount = (n) => `${fmt.int(n)} more iteration${n === 1 ? '' : 's'}`;
+/** ", 50,000 more iterations" for an extension; '' otherwise. */
+const moreWords = (entry) => (moreIterations(entry) === null ? '' : `, ${moreCount(moreIterations(entry))}`);
 
-/** "Next", "2nd in line", … for released entries; '' otherwise. */
-function placeWords(entry, open) {
-  if (entry.status !== 'pending') return '';
-  const index = open.filter((item) => item.status === 'pending').findIndex((item) => item.id === entry.id);
-  if (index < 0) return '';
-  return index === 0 ? 'Next' : `${ordinal(index + 1)} in line`;
-}
-
-/** A replay carries its source run's name: tag it so it does not read as an ordinary entry. */
+/**
+ * A replay carries its source run's name: tag it so it does not read as an ordinary entry. A continuation
+ * (it carries resumeStep) is tagged as one, not as a replay.
+ */
 function replayTag(entry) {
-  return entry?.sourceRunId && !isPhase(entry) ? h('span', { class: 'queue__tag', title: `Replay of run ${entry.sourceRunId}` }, 'Replay') : null;
+  if (entry?.pauseAttempt && entry.runStatus === 'stopped' && Number.isInteger(entry.completedIteration)) {
+    return h('span', { class: 'queue__tag' }, `Paused at ${fmt.int(entry.completedIteration)}`);
+  }
+  if (!entry?.sourceRunId || isPhase(entry)) return null;
+  if (isContinuation(entry)) {
+    const from = Number.isFinite(Number(entry.resumeStep)) ? ` from iteration ${fmt.int(Number(entry.resumeStep))}` : '';
+    return h('span', { class: 'queue__tag', title: `Continues run ${entry.sourceRunId}${from}${moreWords(entry)}` }, 'Continuation');
+  }
+  return h('span', { class: 'queue__tag', title: `Replay of run ${entry.sourceRunId}` }, 'Replay');
 }
 
 /** A controlled-study cell (studyId, studyName, armId, armName, seed): "Lower LR, seed 41". */
@@ -180,6 +188,7 @@ const phaseKey = (entry, pool) =>
 /** Whether to offer an action: never Release on a replaced revision or a phase that waits for its predecessor. */
 function offered(action, entry, pool) {
   if (!allowed(action, entry)) return false;
+  if (action === 'forceStop') return Boolean(entry.runId && entry.attemptId);
   if (action === 'release' && isPhase(entry) && (entry.replacedBy || waitsFor(entry, pool))) return false;
   return true;
 }
@@ -242,6 +251,9 @@ function runLink(runId, rawStatus) {
 
 // ───────── shared pieces ─────────
 
+/** A control that gives way to another after it worked: "Add to queue" becomes the link to the continuation. */
+const FOCUS_NEXT = { 'act-continue': 'continuation', 'act-extend': 'continuation' };
+
 /**
  * Re-render list items in place: an item is rebuilt only when its signature changes, and focus inside a
  * rebuilt item moves to the element with the same data-focus key.
@@ -281,7 +293,7 @@ function reconcile(listEl, cache, items, signature, render) {
   }
   if (focusId && !listEl.contains(document.activeElement)) {
     const el = cache.get(focusId)?.el;
-    const target = (focusKey && el?.querySelector(`[data-focus="${focusKey}"]`)) || el?.querySelector('a');
+    const target = (focusKey && (el?.querySelector(`[data-focus="${focusKey}"]`) || el?.querySelector(`[data-focus="${FOCUS_NEXT[focusKey]}"]`))) || el?.querySelector('a');
     target?.focus();
   }
   // id of an item that held focus and left this list (it may now be in another list)
@@ -311,6 +323,8 @@ async function runAction(action, entry) {
       danger: true,
     });
     if (!ok) return null; // declined: nothing was asked of the service
+  } else if (action === 'forceStop') {
+    if (!(await confirmForceStop(name))) return null;
   } else if (action === 'stop') {
     const ok = await confirmDialog({
       title: `Stop training ${name}?`,
@@ -325,14 +339,15 @@ async function runAction(action, entry) {
     const ok = await confirmOnPhone({
       title: `Release ${name}?`,
       body: queue.get().paused
-        ? 'The queue is paused, so the entry waits until you continue the queue. Then it starts when the trainer is free, after the entries released before it.'
-        : 'It starts when the trainer is free, after the entries released before it.',
+        ? 'The queue is paused, so the entry waits until you continue the queue. Then it starts when the trainer is free, after the released entries ahead of it in line.'
+        : 'It joins the end of the line and starts when the trainer is free, after the released entries ahead of it.',
       confirmLabel: 'Release',
     });
     if (!ok) return null;
   }
   try {
-    const result = await queue[action](entry.id);
+    const result = action === 'forceStop' ? await runs.forceStop(entry.runId, entry.attemptId) : await queue[action](entry.id);
+    if (action === 'forceStop') queue.refresh();
     actionErrors.delete(entry.id);
     let message = ACTION_WORDS[action].done(entryName(result ?? entry));
     if (action === 'release' && queue.get().paused) message += ' The queue is paused, so it waits until you continue the queue.';
@@ -373,7 +388,7 @@ const busyActions = new Set();
 
 /** Button for one action; ignores presses while a request for this entry and action is open. */
 function actionButton(action, entry, { small = true, quiet = false } = {}) {
-  const danger = action === 'cancel' || action === 'stop';
+  const danger = ['cancel', 'stop', 'forceStop'].includes(action);
   const cls = ['btn', 'queue__btn', small ? 'btn--sm' : '', danger && !quiet ? 'btn--danger' : '', quiet ? 'btn--quiet' : ''].filter(Boolean).join(' ');
   const key = `${action}:${entry.id}`;
   const button = h(
@@ -413,6 +428,237 @@ function actionButton(action, entry, { small = true, quiet = false } = {}) {
   return button;
 }
 
+// ───────── continuation of a stopped run ─────────
+
+const PAUSED_WAIT = ' The queue is paused, so it waits until you continue the queue.';
+
+/** Where a released continuation stands in the line, as the end of the toast sentence. */
+function lineWords(entry) {
+  const s = queue.get();
+  if (entry.status === 'held') return ' It is on hold and will not start until you release it.';
+  if (s.paused) return PAUSED_WAIT;
+  const open = queue.open();
+  const active = (s.activeId ? queue.byId(s.activeId) : null) ?? open.find((item) => entryStatus(item.status).active) ?? null;
+  const released = open.filter((item) => item.status === 'pending');
+  const index = released.findIndex((item) => item.id === entry.id);
+  const ahead = index >= 0 ? index : released.length;
+  if (active && active.id !== entry.id) {
+    const doing = active.status === 'stopping' ? 'stopping' : 'training';
+    const others = ahead > 0 ? ` and ${fmt.plural(ahead, 'released entry', 'released entries')} ahead of it` : '';
+    return ` It starts after ${entryName(active)}, which is ${doing} now${others}.`;
+  }
+  if (ahead > 0) return ` It is ${ordinal(ahead + 1)} in line, after the released entries ahead of it.`;
+  if (runs.active().length) return ' It starts when the run that is training now ends.';
+  return ' It is next in line and starts when the trainer is free.';
+}
+
+/**
+ * Queue a continuation of stopped run `runId`: the same run continues from its newest saved checkpoint
+ * when the trainer is free. With `additionalIterations` it extends completed run `runId` instead: a new
+ * run continues it from its final training state for that many more iterations. Released on arrival, so
+ * the phone edition asks first (`confirm: false` when the caller's own dialog is the question). Toasts the
+ * outcome; a refusal only when `toastRefusal`.
+ * @param {{runId: string, name?: string, additionalIterations?: number|null, confirm?: boolean, toastRefusal?: boolean}} run
+ * @returns {Promise<{ok: true, entry: object, existed: boolean}|{ok: false, message: string, offline: boolean}|null>}
+ *   null = the person declined; nothing was asked of the service.
+ */
+export async function addContinuation({ runId, name, additionalIterations = null, confirm = true, toastRefusal = true }) {
+  const label = name || runId || 'this run';
+  const extend = additionalIterations !== null && additionalIterations !== undefined;
+  if (confirm) {
+    const ok = await confirmOnPhone({
+      title: `Add ${label} to the queue?`,
+      body:
+        (extend
+          ? `This run resumes from its final saved training state for ${moreCount(Number(additionalIterations))} when the trainer is free, after the released entries ahead of it in line.`
+          : 'This run resumes from its newest saved checkpoint when the trainer is free, after the released entries ahead of it in line.') +
+        (queue.get().paused ? ' The queue is paused, so it waits until you continue the queue.' : ''),
+      confirmLabel: 'Add to queue',
+    });
+    if (!ok) return null;
+  }
+  try {
+    await queue.refresh();
+  } catch {
+    // the store keeps what it had; the answer below still says what was queued
+  }
+  const before = queue.continuationOf(runId)?.id ?? null;
+  let entry;
+  try {
+    entry = extend ? await queue.resume(runId, { additionalIterations }) : await queue.resume(runId);
+  } catch (error) {
+    if (toastRefusal) toast(`${label} was not added to the queue: ${error.message}`, { kind: 'err' });
+    queue.refresh();
+    return { ok: false, message: error.message, offline: Boolean(error.offline) };
+  }
+  const live = queue.byId(entry?.id) ?? entry ?? {};
+  // A new continuation arrives released and without a run; one seen open before the press, or one that has
+  // moved on (training, stopping, a run of its own), was already there. A held one not seen before is said
+  // as added and on hold (the service saves new ones released, so the store was likely stale).
+  const existed = (before !== null && live.id === before) || !['pending', 'held'].includes(live.status) || Boolean(live.runId);
+  const action = { label: 'Open queue', run: () => go(queueHref(live.id)) };
+  // Three sentences: they stay up longer than a one-line toast.
+  const timeout = 9000;
+  if (existed) {
+    const words = statusPlaceWords(live);
+    const paused = live.status === 'pending' && queue.get().paused ? PAUSED_WAIT : '';
+    // An open extension of the same run keeps the amount it was queued with.
+    const theirs = moreIterations(live);
+    const other = extend && theirs !== null && theirs !== Number(additionalIterations) ? ` It was queued with ${moreCount(theirs)}; cancel that entry to queue another amount.` : '';
+    toast(`${label} is already in the queue to continue (${words}). Nothing was added.${paused}${other}`, { kind: 'info', action, timeout });
+  } else if (extend) {
+    // Said from the entry the service returned, not from what was typed.
+    const step = Number.isFinite(Number(live.resumeStep)) && live.resumeStep !== null && live.resumeStep !== '' ? Number(live.resumeStep) : null;
+    const more = moreIterations(live);
+    const from = step !== null ? ` from iteration ${fmt.int(step)}` : '';
+    const amount = more !== null ? ` for ${moreCount(more)}${step !== null ? ` (new total ${fmt.int(step + more)})` : ''}` : '';
+    toast(`Added ${label} to the queue. It continues${from}${amount}.${lineWords(live)}`, { kind: 'ok', action, timeout });
+  } else {
+    const from = Number.isFinite(Number(live.resumeStep)) ? ` It continues from iteration ${fmt.int(Number(live.resumeStep))}.` : ' It resumes when the trainer is free.';
+    toast(`Added ${label} to the queue.${from}${lineWords(live)}`, { kind: 'ok', action, timeout });
+  }
+  return { ok: true, entry: live, existed };
+}
+
+/**
+ * What the run detail says about extending this completed run: {available, resumeStep?, reason?}, or null
+ * when it says nothing (then the service decides when asked).
+ * @param {object|null} run the run detail (GET /api/run)
+ * @returns {{available: boolean, resumeStep?: number, reason?: string}|null}
+ */
+export function extendAvailability(run) {
+  const value = run?.extendTraining;
+  if (isPlainObject(value) && typeof value.available === 'boolean') return value;
+  // Without that word, one case is already plain in the detail: the service refuses a run that ended by
+  // early stopping (its patience is used up, so a continuation would stop again at once).
+  if (run?.completionReason === 'earlyStopping') {
+    return { available: false, reason: 'This run ended by early stopping. Its patience is used up, so a continuation would stop again at once.' };
+  }
+  return null;
+}
+
+function superseded(entry) {
+  const owner = queue.forRun(entry.runId);
+  return owner && owner.id !== entry.id;
+}
+
+/** A finished entry whose stopped run can be continued from its checkpoint (study cells too; not phases). */
+function continuable(entry) {
+  if (entry?.status !== 'stopped' || !entry.runId || isPhase(entry) || superseded(entry)) return false;
+  return entry.runStatus === undefined || entry.runStatus === null || String(entry.runStatus).toLowerCase() === 'stopped';
+}
+
+/** A finished entry whose completed run can be extended by more iterations (study cells too; not phases). */
+function extendable(entry) {
+  if (entry?.status !== 'completed' || !entry.runId || isPhase(entry) || superseded(entry)) return false;
+  return entry.runStatus === undefined || entry.runStatus === null || String(entry.runStatus).toLowerCase() === 'completed';
+}
+
+/** A finished entry whose run can be followed by a continuation: continued (stopped) or extended (completed). */
+const followable = (entry) => continuable(entry) || extendable(entry);
+
+/**
+ * The newest finished continuation of run `runId` that really trained (it has a run of its own). One that
+ * was cancelled before it started continued nothing.
+ */
+const continuedBefore = (runId) => queue.continuationsOf(runId).find((item) => !entryStatus(item.status).open && item.runId && item.runId !== runId) ?? null;
+
+/** Continuation fields that change what a row or the facts show, for signatures. */
+function continuationKey(entry) {
+  if (!followable(entry)) return '';
+  const open = queue.continuationOf(entry.runId);
+  const done = continuedBefore(entry.runId);
+  return [open?.id ?? '', open ? statusPlaceWords(open) : '', open?.additionalIterations ?? '', done?.id ?? '', done?.status ?? ''];
+}
+
+/** "Continuation in the queue: released, next" with a link to that entry (", 50,000 more iterations" for an extension). */
+function continuationLine(continuation) {
+  return h(
+    'span',
+    null,
+    'Continuation in the queue: ',
+    h('a', { href: queueHref(continuation.id), dataset: { focus: 'continuation', continuesRun: continuation.sourceRunId ?? '' } }, statusPlaceWords(continuation)),
+    moreWords(continuation),
+  );
+}
+
+/** "Continued before in <entry>": the newest finished continuation, so an older stop is not read as the latest state. */
+function continuedBeforeLine(runId) {
+  if (queue.continuationOf(runId)) return null;
+  const done = continuedBefore(runId);
+  if (!done) return null;
+  return h(
+    'p',
+    { class: 'queue__blocked muted' },
+    'Continued before in ',
+    h('a', { href: queueHref(done.id), dataset: { focus: 'continued' } }, `${entryName(done)} (${entryStatus(done.status).label.toLowerCase()})`),
+  );
+}
+
+/** "Add to queue" for a stopped entry's run; ignores presses while its request is open. */
+function continueButton(entry, { small = true } = {}) {
+  const key = `continue:${entry.id}`;
+  const name = entryName(entry);
+  const words = `Add to queue: continue ${name} from its newest saved checkpoint`;
+  const button = h(
+    'button',
+    {
+      class: ['btn', 'queue__btn', small ? 'btn--sm' : ''].filter(Boolean).join(' '),
+      type: 'button',
+      title: words,
+      dataset: { focus: 'act-continue', busyKey: key },
+      'aria-label': words,
+      'aria-disabled': busyActions.has(key) ? 'true' : null,
+      onclick: async () => {
+        if (busyActions.has(key)) return;
+        busyActions.add(key);
+        button.setAttribute('aria-disabled', 'true');
+        try {
+          const result = await addContinuation({ runId: entry.runId, name });
+          if (result?.ok) actionErrors.delete(entry.id);
+          else if (result && !result.ok) {
+            actionErrors.set(entry.id, { action: 'continue', message: result.message, status: entry.status });
+            // When the row or detail was not rebuilt by the refresh, write the refusal beside this button.
+            const holder = button.parentElement;
+            if (holder?.isConnected) {
+              const sibling = holder.nextElementSibling;
+              if (sibling?.dataset?.errorFor === String(entry.id)) sibling.remove();
+              const el = actionErrorEl(entry);
+              if (el) holder.after(el);
+            }
+          }
+        } finally {
+          busyActions.delete(key);
+          for (const el of document.querySelectorAll('.queue__btn[aria-disabled]')) {
+            if (el.dataset.busyKey === key) el.removeAttribute('aria-disabled');
+          }
+          button.removeAttribute('aria-disabled');
+        }
+      },
+    },
+    'Add to queue',
+  );
+  return button;
+}
+
+/** "Extend training…" for a completed entry's run: opens the dialog that asks how many more iterations. */
+function extendButton(entry, { small = true } = {}) {
+  const name = entryName(entry);
+  const words = `Extend training: continue ${name} for more iterations`;
+  return h(
+    'button',
+    {
+      class: ['btn', 'queue__btn', small ? 'btn--sm' : ''].filter(Boolean).join(' '),
+      type: 'button',
+      title: words,
+      dataset: { focus: 'act-extend' },
+      'aria-label': words,
+      onclick: () => openExtendDialog({ runId: entry.runId, name }),
+    },
+    'Extend training…',
+  );
+}
+
 /** "Pause the queue" / "Continue the queue", kept in place across updates. */
 function pauseControl({ small = true } = {}) {
   let paused = false;
@@ -424,13 +670,13 @@ function pauseControl({ small = true } = {}) {
       if (busy) return;
       const next = !paused;
       // Continuing lets released entries start training: the phone edition asks first.
-      if (!next && !(await confirmOnPhone({ title: 'Continue the queue?', body: 'Released entries start when the trainer is free.', confirmLabel: 'Continue the queue' }))) return;
+      if (!next && !(await confirmOnPhone({ title: 'Resume the queue?', body: 'The paused run resumes from its checkpoint when the trainer is free.', confirmLabel: 'Resume the queue' }))) return;
       if (busy) return;
       busy = true;
       button.setAttribute('aria-disabled', 'true');
       try {
         await queue.setPaused(next);
-        toast(next ? 'Paused the queue. Released entries will not start until you continue the queue.' : 'Continued the queue. Released entries start when the trainer is free.', { kind: 'ok' });
+        toast(next ? 'Paused the queue. Any active queue run will save and stop.' : 'Resumed the queue. Training continues when the trainer is free.', { kind: 'ok' });
       } catch (error) {
         toast(`The queue was not ${next ? 'paused' : 'continued'}: ${error.message}`, { kind: 'err' });
         queue.refresh();
@@ -443,7 +689,7 @@ function pauseControl({ small = true } = {}) {
   const line = h('p', { class: 'queue__paused', hidden: true }, PAUSED_LINE);
   const update = (value) => {
     paused = Boolean(value);
-    const label = paused ? 'Continue the queue' : 'Pause the queue';
+    const label = paused ? 'Resume the queue' : 'Pause the queue';
     if (button.textContent !== label) button.textContent = label;
     line.hidden = !paused;
   };
@@ -524,7 +770,7 @@ export function mountQueueSummary(host, { selectedId = null } = {}) {
     }
 
     empty.hidden = !(ready && open.length === 0);
-    // At most SUMMARY_MAX rows (open() order: training first, then released by release order, then on
+    // At most SUMMARY_MAX rows (open() order: training first, then released by their place in line, then on
     // hold), so the run list below stays in view; the rest is one line linking to the queue view.
     const shown = open.slice(0, SUMMARY_MAX);
     const pool = s.entries;
@@ -535,7 +781,7 @@ export function mountQueueSummary(host, { selectedId = null } = {}) {
       shown,
       (entry) =>
         JSON.stringify([
-          entry.name, entry.status, entry.sourceRunId ?? '', studyKey(entry), phaseKey(entry, pool), placeWords(entry, open), entry.blockedReason ?? '',
+          entry.name, entry.status, entry.attemptId, entry.sourceRunId ?? '', studyKey(entry), phaseKey(entry, pool), placeWords(entry, open), entry.blockedReason ?? '',
           actionErrorKey(entry), entry.id === selected,
         ]),
       (entry) => summaryRow(entry, open, pool),
@@ -549,7 +795,7 @@ export function mountQueueSummary(host, { selectedId = null } = {}) {
   const summaryRow = (entry, open, pool) => {
     const place = placeWords(entry, open);
     const current = entry.id === selected;
-    const action = offered('release', entry, pool) ? 'release' : offered('hold', entry, pool) ? 'hold' : null;
+    const action = ['forceStop', 'release', 'hold'].find((key) => offered(key, entry, pool));
     return h(
       'li',
       { class: `queue__row${current ? ' queue__row--current' : ''}` },
@@ -614,6 +860,9 @@ export function mountQueueView(host, { entryId = null } = {}) {
   const problem = h('div', { class: 'queue__problem' });
   const openTitle = h('h2', { class: 'queue__section-title' }, 'Open entries');
   const openList = h('ol', { class: 'queue__list queue__list--wide' });
+  // What a move did, for a screen reader (the rows say it to the eye); and the refusal of the last move.
+  const moveStatus = h('p', { class: 'visually-hidden', role: 'status', 'aria-live': 'polite' });
+  const moveProblem = h('div', { class: 'queue__move-problem' });
   const openEmpty = h(
     'p',
     { class: 'queue__empty', hidden: true },
@@ -636,7 +885,7 @@ export function mountQueueView(host, { entryId = null } = {}) {
       h('div', { class: 'queue__head-actions' }, addRecipe, pause.button),
     ),
     problem,
-    h('div', { class: 'queue__body' }, h('div', { class: 'queue__lists' }, openTitle, openList, openEmpty, finished), detailHost),
+    h('div', { class: 'queue__body' }, h('div', { class: 'queue__lists' }, openTitle, moveProblem, openList, moveStatus, openEmpty, finished), detailHost),
   );
   host.appendChild(root);
 
@@ -645,6 +894,232 @@ export function mountQueueView(host, { entryId = null } = {}) {
   let lastProblem = '';
   let detail = null;
   let autoOpened = false;
+
+  // ── the line: moving a released entry that waits ──
+  // While a row is being dragged, and while the request of a move is out, the lists are left as they are:
+  // a poll must not pull a row from under the finger or put a dropped row back for a moment. What the
+  // store learned meanwhile is drawn when the hold ends.
+  let hold = false;
+  let moving = false;
+  let drag = null;
+
+  /** Where a waiting released entry stands in the line, when the line has more than one entry; else null. */
+  const linePlace = (entry, open) => {
+    if (entry.status !== 'pending') return null;
+    const line = open.filter((item) => item.status === 'pending');
+    const at = line.findIndex((item) => item.id === entry.id);
+    return at >= 0 && line.length > 1 ? { first: at === 0, last: at === line.length - 1 } : null;
+  };
+
+  /** Ask the service for the new order; the answer (or, after a refusal, a fresh reading) is drawn. */
+  const applyOrder = async (expected, order, entry) => {
+    const name = entryName(entry);
+    moving = true;
+    hold = true;
+    root.classList.add('queue--moving');
+    openList.setAttribute('aria-busy', 'true');
+    mount(moveProblem, null);
+    moveStatus.textContent = '';
+    try {
+      await queue.reorder(expected, order);
+      const place = placeWords(queue.byId(entry.id) ?? entry);
+      moveStatus.textContent = place ? `${name} is now ${place === 'Next' ? 'next in line' : place}.` : `${name} was moved.`;
+    } catch (error) {
+      // The store was read again before the refusal arrived here: the list below is the line as it is.
+      const said = `${name} was not moved: ${error.message}${error.status === 409 ? ' The list was read again and shows the line as it is now.' : ''}`;
+      // The toast is seen wherever the list is scrolled to (and is the alert); the line above the list stays.
+      const line = notice('err', said);
+      line.removeAttribute('role');
+      mount(moveProblem, line);
+      toast(said, { kind: 'err' });
+    } finally {
+      moving = false;
+      hold = false;
+      root.classList.remove('queue--moving');
+      openList.removeAttribute('aria-busy');
+      render();
+    }
+  };
+
+  /** "Move up" / "Move down": one place, without dragging. */
+  const moveBy = (entry, delta) => {
+    if (hold || moving) return;
+    const ids = queue.line().map((item) => item.id);
+    const from = ids.indexOf(entry.id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    const order = [...ids];
+    order.splice(to, 0, order.splice(from, 1)[0]);
+    applyOrder(ids, order, entry);
+  };
+
+  const moveButton = (entry, delta, disabled) =>
+    h(
+      'button',
+      {
+        class: 'btn btn--sm queue__btn queue__move',
+        type: 'button',
+        title: delta < 0 ? 'Move up in the line' : 'Move down in the line',
+        'aria-label': `${delta < 0 ? 'Move up' : 'Move down'}: ${entryName(entry)}`,
+        'aria-disabled': disabled ? 'true' : null,
+        dataset: { focus: delta < 0 ? 'act-up' : 'act-down' },
+        onclick: () => {
+          if (!disabled) moveBy(entry, delta);
+        },
+      },
+      h('span', { 'aria-hidden': 'true' }, delta < 0 ? '↑' : '↓'),
+    );
+
+  /** The nearest ancestor that scrolls up and down (the list's pane on a desktop, the page on a phone). */
+  const scrollerOf = (el) => {
+    for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const flow = getComputedStyle(node).overflowY;
+      if ((flow === 'auto' || flow === 'scroll') && node.scrollHeight > node.clientHeight) return node;
+    }
+    return document.scrollingElement ?? document.documentElement;
+  };
+
+  /** Place the dragged row under the pointer and make room for it among the other rows of the line. */
+  const placeDrag = () => {
+    const d = drag;
+    if (!d) return;
+    const size = d.heights[d.from];
+    const lastIndex = d.rows.length - 1;
+    const least = d.tops[0] - d.tops[d.from];
+    const most = d.tops[lastIndex] + d.heights[lastIndex] - size - d.tops[d.from];
+    const dy = Math.min(most, Math.max(least, d.y - d.startY + (d.scroller.scrollTop - d.startScroll)));
+    const centre = d.tops[d.from] + dy + size / 2;
+    let to = d.from;
+    d.rows.forEach((el, i) => {
+      if (i === d.from) return;
+      const middle = d.tops[i] + d.heights[i] / 2;
+      const shift = i < d.from ? (centre < middle ? size : 0) : centre > middle ? -size : 0;
+      if (shift > 0) to -= 1;
+      else if (shift < 0) to += 1;
+      el.style.transform = shift ? `translateY(${shift}px)` : '';
+    });
+    d.to = to;
+    d.row.style.transform = `translateY(${dy}px)`;
+  };
+
+  /** One frame of a drag: scroll when the pointer is held near an edge of the scroller, then place the rows. */
+  const dragFrame = () => {
+    const d = drag;
+    if (!d) return;
+    const whole = d.scroller === document.scrollingElement || d.scroller === document.documentElement;
+    const box = whole ? { top: 0, bottom: window.innerHeight } : d.scroller.getBoundingClientRect();
+    const edge = 56;
+    const step = d.y < box.top + edge ? -Math.ceil((box.top + edge - d.y) / 6) : d.y > box.bottom - edge ? Math.ceil((d.y - (box.bottom - edge)) / 6) : 0;
+    if (step) d.scroller.scrollTop += Math.max(-14, Math.min(14, step));
+    placeDrag();
+    d.frame = requestAnimationFrame(dragFrame);
+  };
+
+  const endDrag = (commit) => {
+    const d = drag;
+    if (!d) return;
+    drag = null;
+    cancelAnimationFrame(d.frame);
+    d.handle.removeEventListener('pointermove', d.onMove);
+    d.handle.removeEventListener('pointerup', d.onUp);
+    d.handle.removeEventListener('pointercancel', d.onCancel);
+    d.handle.removeEventListener('lostpointercapture', d.onCancel);
+    window.removeEventListener('keydown', d.onKey, true);
+    try {
+      d.handle.releasePointerCapture(d.pointerId);
+    } catch {
+      // the capture was already gone
+    }
+    root.classList.remove('queue--dragging');
+    d.row.classList.remove('queue__row--dragging');
+    for (const el of d.rows) el.style.transform = '';
+    if (!commit || d.to === d.from) {
+      hold = false;
+      render();
+      return;
+    }
+    const order = [...d.ids];
+    order.splice(d.to, 0, order.splice(d.from, 1)[0]);
+    // The rows stay where they were dropped until the service has answered.
+    const after = d.rows[d.rows.length - 1].nextElementSibling;
+    const byId = new Map(d.ids.map((entryId, i) => [entryId, d.rows[i]]));
+    for (const entryId of order) openList.insertBefore(byId.get(entryId), after);
+    applyOrder(d.ids, order, d.entry);
+  };
+
+  /** A press on a row's handle (mouse, pen or finger) picks the row up. */
+  const beginDrag = (event, entry) => {
+    if (drag || hold || moving || !event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    const line = queue.line();
+    const rows = line.map((item) => openCache.get(String(item.id))?.el);
+    const from = line.findIndex((item) => item.id === entry.id);
+    if (from < 0 || line.length < 2 || rows.some((el) => !el?.isConnected)) return;
+    event.preventDefault(); // no text selection, and the focus stays where it was
+    const handle = event.currentTarget;
+    const boxes = rows.map((el) => el.getBoundingClientRect());
+    const scroller = scrollerOf(openList);
+    const d = {
+      entry,
+      handle,
+      pointerId: event.pointerId,
+      row: rows[from],
+      rows,
+      ids: line.map((item) => item.id),
+      tops: boxes.map((box) => box.top),
+      heights: boxes.map((box) => box.height),
+      from,
+      to: from,
+      startY: event.clientY,
+      y: event.clientY,
+      scroller,
+      startScroll: scroller.scrollTop,
+      frame: 0,
+      onMove: (e) => {
+        if (e.pointerId === d.pointerId) d.y = e.clientY;
+      },
+      onUp: (e) => {
+        if (e.pointerId !== d.pointerId) return;
+        d.y = e.clientY;
+        placeDrag();
+        endDrag(true);
+      },
+      onCancel: (e) => {
+        if (e.pointerId === d.pointerId) endDrag(false);
+      },
+      onKey: (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        endDrag(false);
+      },
+    };
+    drag = d;
+    hold = true;
+    mount(moveProblem, null);
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // without capture the handle still gets the moves made over it; a release elsewhere cancels below
+    }
+    handle.addEventListener('pointermove', d.onMove);
+    handle.addEventListener('pointerup', d.onUp);
+    handle.addEventListener('pointercancel', d.onCancel);
+    handle.addEventListener('lostpointercapture', d.onCancel);
+    window.addEventListener('keydown', d.onKey, true);
+    root.classList.add('queue--dragging');
+    d.row.classList.add('queue__row--dragging');
+    d.frame = requestAnimationFrame(dragFrame);
+  };
+
+  /** The grip of a row in the line. Pointer only: the Move up and Move down buttons are the other way. */
+  const dragHandle = (entry) =>
+    h('span', {
+      class: 'queue__handle',
+      'aria-hidden': 'true',
+      title: 'Drag to move in the line',
+      onpointerdown: (event) => beginDrag(event, entry),
+      oncontextmenu: (event) => event.preventDefault(),
+    });
 
   const conditionText = (s, open) => {
     const active = s.activeId ? queue.byId(s.activeId) : open.find((entry) => entryStatus(entry.status).active);
@@ -677,8 +1152,9 @@ export function mountQueueView(host, { entryId = null } = {}) {
   const rowSig = (open, starts) => (entry) => {
     const pool = queue.get().entries;
     return JSON.stringify([
-      entry.name, entry.status, entry.sourceRunId ?? '', studyKey(entry), phaseKey(entry, pool), starts.has(entry.id), entry.updatedAt,
-      placeWords(entry, open), entry.blockedReason ?? '', entry.runId ?? '', actionErrorKey(entry), entry.id === selected,
+      entry.name, entry.status, entry.sourceRunId ?? '', entry.resumeStep ?? '', entry.additionalIterations ?? '', studyKey(entry), phaseKey(entry, pool), starts.has(entry.id), entry.updatedAt,
+      placeWords(entry, open), entry.blockedReason ?? '', entry.runId ?? '', entry.runStatus ?? '', continuable(entry), extendable(entry), continuationKey(entry),
+      actionErrorKey(entry), entry.id === selected, linePlace(entry, open) ?? '',
     ]);
   };
 
@@ -688,9 +1164,15 @@ export function mountQueueView(host, { entryId = null } = {}) {
     const st = entryStatus(entry.status);
     const pool = queue.get().entries;
     const actions = st.open ? Object.keys(ENTRY_ACTIONS).filter((action) => offered(action, entry, pool)) : [];
+    const canContinue = continuable(entry);
+    const canExtend = extendable(entry);
+    const follows = canContinue || canExtend;
+    const continuation = follows ? queue.continuationOf(entry.runId) : null;
+    // A released entry that waits, with others: it can be moved in the line (grip, or the two buttons).
+    const inLine = linePlace(entry, open);
     return h(
       'li',
-      { class: `queue__row queue__row--wide${current ? ' queue__row--current' : ''}` },
+      { class: `queue__row queue__row--wide${current ? ' queue__row--current' : ''}${inLine ? ' queue__row--movable' : ''}` },
       starts.has(entry.id) ? h('p', { class: 'queue__study-head' }, `Study ${entry.studyName || entry.studyId}`) : null,
       h(
         'a',
@@ -708,12 +1190,29 @@ export function mountQueueView(host, { entryId = null } = {}) {
       curriculumLink(entry),
       entry.blockedReason ? h('p', { class: 'queue__blocked' }, entry.blockedReason) : null,
       phaseRowNote(entry, pool),
-      actions.length ? h('div', { class: 'queue__row-actions' }, actions.map((action) => actionButton(action, entry, { quiet: action === 'cancel' }))) : null,
+      actions.length || inLine
+        ? h(
+            'div',
+            { class: 'queue__row-actions' },
+            actions.map((action) => actionButton(action, entry, { quiet: action === 'cancel' })),
+            inLine ? h('span', { class: 'queue__moves' }, moveButton(entry, -1, inLine.first), moveButton(entry, 1, inLine.last)) : null,
+          )
+        : null,
+      follows ? continuedBeforeLine(entry.runId) : null,
+      continuation ? h('p', { class: 'queue__blocked' }, continuationLine(continuation)) : null,
+      canContinue && !continuation ? h('div', { class: 'queue__row-actions' }, continueButton(entry)) : null,
+      canExtend && !continuation ? h('div', { class: 'queue__row-actions' }, extendButton(entry)) : null,
       actionErrorEl(entry),
+      inLine ? dragHandle(entry) : null,
     );
   };
 
   const render = () => {
+    // A drag or its request is open: the lists wait (see hold above); the entry's own pane does not.
+    if (hold) {
+      detail?.update();
+      return;
+    }
     const s = queue.get();
     const ready = s.phase === 'ready' || s.entries.length > 0;
     const open = queue.open();
@@ -740,7 +1239,7 @@ export function mountQueueView(host, { entryId = null } = {}) {
     finished.hidden = done.length === 0;
     const finishedLabel = `Finished entries (${fmt.int(done.length)})`;
     if (finishedSummary.textContent !== finishedLabel) finishedSummary.textContent = finishedLabel;
-    const noStarts = new Set(); // finished entries are newest first, not in release order: no study runs
+    const noStarts = new Set(); // finished entries are newest first, not in line order: no study runs
     const lostDone = reconcile(finishedList, finishedCache, done, rowSig(open, noStarts), (entry) => viewRow(entry, open, noStarts));
     // An entry that finished while a control in its row had focus: follow it into the finished list
     // (open the list so the link can take focus).
@@ -770,7 +1269,9 @@ export function mountQueueView(host, { entryId = null } = {}) {
           { class: 'queue__intro' },
           h('h2', { class: 'queue__section-title' }, 'What the queue is'),
           h('p', null, 'Each queue entry is a saved copy of a recipe. An entry on hold never starts by itself.'),
-          h('p', null, 'Released entries start one at a time, in the order they were released, when the trainer is free. Select an entry to see its recipe text, its runs and what you can do with it.'),
+          h('p', null, 'Released entries wait in a line and start one at a time, from the front of the line, when the trainer is free. A newly released entry joins the end.'),
+          h('p', null, 'To change the order, drag a released entry by its handle, or use its Move up and Move down buttons. Entries that are training, on hold or finished have no place in the line.'),
+          h('p', null, 'Select an entry to see its recipe text, its runs and what you can do with it.'),
         ),
       );
       return;
@@ -796,6 +1297,7 @@ export function mountQueueView(host, { entryId = null } = {}) {
       showDetail();
     },
     destroy() {
+      endDrag(false);
       unsubscribe();
       curriculumListeners.delete(render);
       unsubscribeRecipe();
@@ -932,6 +1434,10 @@ function mountEntryDetail(host, id) {
     const pending = predecessorPending(entry, all);
     const actions = Object.keys(ENTRY_ACTIONS).filter((action) => offered(action, entry, all) && !(action === 'release' && pending));
     const previous = waitsFor(entry, all);
+    const canContinue = continuable(entry);
+    const canExtend = extendable(entry);
+    const follows = canContinue || canExtend;
+    const continuation = follows ? queue.continuationOf(entry.runId) : null;
     let sentence = STATE_TEXT[entry.status] ?? '';
     if (entry.status === 'pending' && paused) sentence += ' The queue is paused, so it will not start until you continue the queue.';
     if (entry.status === 'failed' && entry.error) sentence += ' The service reported why below.';
@@ -946,7 +1452,10 @@ function mountEntryDetail(host, id) {
       ['Recipe file', entry.recipePath ? h('span', { class: 'mono' }, entry.recipePath) : null],
       ['Recipe fingerprint', entry.recipeDigest ? h('span', { class: 'mono', title: entry.recipeDigest }, shortDigest(entry.recipeDigest)) : null],
       ['Run', entry.runId ? runLink(entry.runId, entry.runStatus) : null],
-      ['Repeats run', entry.sourceRunId && !isPhase(entry) ? runLink(entry.sourceRunId) : null],
+      ['Repeats run', entry.sourceRunId && !isPhase(entry) && !isContinuation(entry) ? runLink(entry.sourceRunId) : null],
+      ['Continues run', entry.sourceRunId && !isPhase(entry) && isContinuation(entry) ? runLink(entry.sourceRunId) : null],
+      ['From iteration', !isPhase(entry) && isContinuation(entry) && Number.isFinite(Number(entry.resumeStep)) ? fmt.int(Number(entry.resumeStep)) : null],
+      ['Additional iterations', !isPhase(entry) && isContinuation(entry) && moreIterations(entry) !== null ? fmt.int(moreIterations(entry)) : null],
       ['Archived recipe', entry.sourceRecipe ? h('span', { class: 'mono' }, String(entry.sourceRecipe)) : null],
       ['Archive folder', entry.sourceRoot ? h('span', { class: 'mono' }, String(entry.sourceRoot)) : null],
     ].filter(([, value]) => value !== null && value !== '');
@@ -1007,11 +1516,25 @@ function mountEntryDetail(host, id) {
       actions.length
         ? h('div', { class: 'queue__actions' }, actions.map((action) => actionButton(action, entry, { small: false, quiet: false })))
         : null,
+      continuation ? notice('', continuationLine(continuation)) : null,
+      canContinue && !continuation
+        ? [
+            h('div', { class: 'queue__actions' }, continueButton(entry, { small: false })),
+            h('p', { class: 'queue__state-text' }, 'This run resumes from its newest saved checkpoint when the trainer is free.'),
+          ]
+        : null,
+      canExtend && !continuation
+        ? [
+            h('div', { class: 'queue__actions' }, extendButton(entry, { small: false })),
+            h('p', { class: 'queue__state-text' }, 'This run resumes from its final checkpoint for the number of iterations you enter.'),
+          ]
+        : null,
+      follows ? continuedBeforeLine(entry.runId) : null,
       actionErrorEl(entry),
       rows.length ? h('dl', { class: 'kv queue__kv' }, rows.map(([label, value]) => [h('dt', null, label), h('dd', null, value)])) : null,
     );
     if (focusKey && !facts.contains(document.activeElement)) {
-      (facts.querySelector(`[data-focus="${focusKey}"]`) || facts.querySelector('[data-focus="title"]'))?.focus();
+      (facts.querySelector(`[data-focus="${focusKey}"]`) || facts.querySelector(`[data-focus="${FOCUS_NEXT[focusKey]}"]`) || facts.querySelector('[data-focus="title"]'))?.focus();
     }
   };
 
@@ -1095,9 +1618,18 @@ function mountEntryDetail(host, id) {
                   revisionWords(item) ? h('span', { class: 'queue__cell' }, revisionWords(item)) : null,
                   statusBadge(item.status),
                   isPhase(item) && item.replacedBy ? h('span', { class: 'muted' }, 'replaced') : null,
-                  item.sourceRunId && !isPhase(item)
-                    ? h('span', { class: 'muted' }, 'replay of ', h('a', { href: runHref(item.sourceRunId) }, runs.byId?.(item.sourceRunId)?.name || item.sourceRunId))
-                    : null,
+                  item.sourceRunId && !isPhase(item) && isContinuation(item)
+                    ? h(
+                        'span',
+                        { class: 'muted' },
+                        'continues ',
+                        h('a', { href: runHref(item.sourceRunId) }, runs.byId?.(item.sourceRunId)?.name || item.sourceRunId),
+                        Number.isFinite(Number(item.resumeStep)) ? ` from iteration ${fmt.int(Number(item.resumeStep))}` : '',
+                        moreWords(item),
+                      )
+                    : item.sourceRunId && !isPhase(item)
+                      ? h('span', { class: 'muted' }, 'replay of ', h('a', { href: runHref(item.sourceRunId) }, runs.byId?.(item.sourceRunId)?.name || item.sourceRunId))
+                      : null,
                   item.createdAt ? h('span', { class: 'queue__time' }, timeEl(item.createdAt)) : null,
                 ),
               ),
@@ -1126,6 +1658,7 @@ function mountEntryDetail(host, id) {
       phaseKey(entry, pool()), entry.mode, entry.startStep, entry.targetStep, entry.weights, entry.handoff ?? null, actionErrorKey(entry),
       isPhase(entry) ? (() => { const previous = waitsFor(entry, pool()); return previous ? [previous.id, previous.status] : ''; })() : '',
       predecessorPending(entry, pool()),
+      entry.resumeStep ?? null, entry.additionalIterations ?? null, continuable(entry), extendable(entry), continuationKey(entry),
     ]);
     if (sig !== factsSig) {
       factsSig = sig;
@@ -1134,7 +1667,7 @@ function mountEntryDetail(host, id) {
     // Lineage: refetch when the store's view of this group changes (a new replay, a run started).
     if (entry.groupId) {
       const members = queue.get().entries.filter((item) => item.groupId === entry.groupId);
-      const gsig = JSON.stringify([entry.groupId, members.map((item) => [item.id, item.status, item.runId ?? '', item.sourceRunId ?? '', studyKey(item), item.replacedBy ?? '', item.revision ?? ''])]);
+      const gsig = JSON.stringify([entry.groupId, members.map((item) => [item.id, item.status, item.runId ?? '', item.sourceRunId ?? '', item.resumeStep ?? '', item.additionalIterations ?? '', studyKey(item), item.replacedBy ?? '', item.revision ?? ''])]);
       if (gsig !== groupSig) {
         groupSig = gsig;
         groupId = entry.groupId;
@@ -1330,4 +1863,300 @@ export async function openReplayDialog(run) {
 
   await closed;
   controller.abort();
+}
+
+// ───────── extend training dialog ─────────
+
+/** Digit-group separators a person may type ("50,000", "50 000"). */
+const GROUPING = /[\s,]/g;
+
+/** "50,000", "50 000" or "50000" → 50000; null unless a whole number from 1 to Number.MAX_SAFE_INTEGER. */
+function readIterations(text) {
+  const digits = String(text ?? '').replace(GROUPING, '');
+  if (!/^\d+$/.test(digits)) return null;
+  const n = Number(digits);
+  return Number.isSafeInteger(n) && n >= 1 ? n : null;
+}
+
+/** The field's message for text that readIterations refuses. */
+function iterationsProblem(text) {
+  const digits = String(text ?? '').replace(GROUPING, '');
+  if (!digits) return 'Enter how many more iterations to train, 1 or more.';
+  if (/^\d+$/.test(digits) && Number(digits) >= 1) return 'That number is too large.';
+  return 'Enter a whole number, 1 or more, such as 50000.';
+}
+
+/** A number the service reported (a number or numeric text), or null. */
+function reported(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+/** What still works for a completed run that cannot be extended. Nothing offered here starts a run by itself. */
+function extendAlternatives() {
+  return h(
+    'div',
+    { class: 'queue__options' },
+    h('p', null, 'Nothing was started. What still works for this run:'),
+    h(
+      'ul',
+      { class: 'queue__options-list' },
+      h('li', null, 'Fine-tune from its saved weights: on the run\'s Files tab choose a checkpoint, then "Fine-tune from this…". That starts a new run from the weights; the optimizer state and the iteration count start again.'),
+      h('li', null, 'Replay: repeats the run from the start. In the Replay dialog, "Open as recipe" lets you set a larger total first.'),
+    ),
+  );
+}
+
+/**
+ * "Extend training" of completed run `runId`: asks how many more iterations, then adds a released
+ * continuation that trains from the run's final training state to the new total. The dialog is the
+ * confirmation on both editions. A refusal stays in the dialog with what was typed.
+ * @param {{runId: string, name?: string, run?: object|null}} options  run: its loaded detail, when at hand
+ * @returns {Promise<void>} resolves when the dialog closes
+ */
+export async function openExtendDialog({ runId, name, run = null }) {
+  const label = name || run?.name || runId || 'this run';
+  const phone = document.documentElement.dataset.edition === 'mobile';
+  const controller = new AbortController();
+  const opener = document.activeElement;
+  let open = true;
+  let sending = false;
+  let input = null; // the field, once it is offered
+  let flag = () => {};
+  let sync = () => {};
+  let closeDialog;
+  let cancelButton;
+  let addButton;
+
+  const status = h('div', { class: 'queue__replay-status', role: 'status', 'aria-live': 'polite' }, loading('Reading this run and the queue…'));
+  const content = h('div', { class: 'queue__replay-content' });
+  const body = h('div', { class: 'stack queue__replay' }, status, content);
+
+  const { closed, dialog } = openDialog({
+    title: `Extend training of ${label}`,
+    body,
+    foot: (close) => {
+      closeDialog = close;
+      cancelButton = h('button', { class: 'btn', type: 'button', autofocus: true, onclick: () => close(null) }, 'Cancel');
+      // aria-disabled, not disabled: a disabled button would drop focus out of the dialog's controls.
+      addButton = h('button', { class: 'btn btn--primary', type: 'button', 'aria-disabled': 'true', onclick: () => submit() }, 'Add to queue');
+      return [cancelButton, addButton];
+    },
+  });
+  closed.then(() => {
+    open = false;
+    controller.abort();
+  });
+  // One short field and a few lines: a column that reads, not the full width a recipe text gets.
+  // (On the phone it is a sheet across the whole width, whatever is set here.)
+  dialog.style.width = 'min(560px, 94vw)';
+
+  /** Nothing can be added: only Close is left. */
+  const onlyClose = () => {
+    addButton.hidden = true;
+    cancelButton.textContent = 'Close';
+  };
+
+  async function submit() {
+    if (sending || !input || !open) return;
+    const n = readIterations(input.value);
+    if (n === null) {
+      flag(iterationsProblem(input.value));
+      input.focus();
+      return;
+    }
+    sending = true;
+    addButton.setAttribute('aria-disabled', 'true');
+    mount(status, loading('Adding the continuation to the queue…'));
+    let result;
+    try {
+      result = await addContinuation({ runId, name: label, additionalIterations: n, confirm: false, toastRefusal: false });
+    } catch (error) {
+      result = { ok: false, message: error.message, offline: Boolean(error.offline) };
+    }
+    sending = false;
+    // Added, or one was already there: the toast from addContinuation says which.
+    if (result?.ok) {
+      if (open) closeDialog('added');
+      return;
+    }
+    const message = result?.message || 'The service did not answer.';
+    if (!open) {
+      toast(`${label} was not added to the queue: ${message}`, { kind: 'err' });
+      return;
+    }
+    // A continuation of this run is in the queue after all (queued elsewhere meanwhile, or with another
+    // amount): that entry is what there is to act on, not the other ways to train.
+    if (!result?.offline) {
+      try {
+        await queue.refresh();
+      } catch {
+        // the store keeps what it had
+      }
+      if (!open) return;
+      const existing = queue.continuationOf(runId);
+      if (existing) {
+        showExisting(existing, `Nothing was added to the queue: ${message}`);
+        return;
+      }
+    }
+    sync();
+    mount(status, notice('err', `Nothing was added to the queue: ${message}`), result?.offline ? null : extendAlternatives());
+    status.scrollIntoView({ block: 'nearest' }); // a short sheet scrolls: the answer is not left below its edge
+  }
+
+  /** One open continuation per run: its entry is offered instead of a field. `refusal`: what the service just said. */
+  function showExisting(existing, refusal = null) {
+    const more = moreIterations(existing);
+    input = null;
+    mount(status, refusal ? notice('err', refusal) : null);
+    mount(
+      content,
+      notice(
+        '',
+        h(
+          'span',
+          null,
+          `A continuation of this run is already in the queue (${statusPlaceWords(existing)}${more !== null ? `, ${moreCount(more)}` : ''}). `,
+          refusal ? 'To queue another amount, cancel that entry first. ' : null,
+          h(
+            'a',
+            {
+              href: queueHref(existing.id),
+              onclick: (event) => {
+                if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                closeDialog(null);
+                go(queueHref(existing.id));
+              },
+            },
+            'Open its queue entry',
+          ),
+        ),
+      ),
+    );
+    onlyClose();
+  }
+
+  (async () => {
+    let detail = run;
+    let readError = null;
+    const reads = [Promise.resolve().then(() => queue.refresh()).catch(() => null)];
+    if (!detail) {
+      reads.push(
+        api.run(runId, { signal: controller.signal }).then(
+          (value) => {
+            detail = value;
+          },
+          (error) => {
+            readError = error;
+          },
+        ),
+      );
+    }
+    await Promise.all(reads);
+    if (!open || controller.signal.aborted) return;
+    if (readError) {
+      mount(status, notice('err', `This run could not be read: ${readError.message}`));
+      onlyClose();
+      return;
+    }
+
+    // One open continuation per run: offer its entry instead of a field.
+    const existing = queue.continuationOf(runId);
+    if (existing) {
+      showExisting(existing);
+      return;
+    }
+
+    const availability = extendAvailability(detail);
+    if (availability?.available === false) {
+      const reason = typeof availability.reason === 'string' && availability.reason.trim() ? availability.reason : "This run's final training state is not available.";
+      mount(status, null);
+      mount(content, notice('err', reason), extendAlternatives());
+      onlyClose();
+      return;
+    }
+
+    // The service continues from the iteration the run completed at and counts the new total from there:
+    // its own word (availability), else the completion it recorded, else the recipe's total (older runs).
+    const total = reported(detail?.total);
+    const step = reported(availability?.resumeStep) ?? reported(detail?.completedIteration) ?? total;
+    const trained = step === null ? 'Not reported' : `${fmt.plural(step, 'iteration')}${total !== null && total !== step ? ` (the recipe's total was ${fmt.int(total)})` : ''}`;
+
+    const inputId = uid('extend');
+    const error = h('p', { class: 'field__error', id: `${inputId}-error`, role: 'alert' });
+    flag = (problem) => {
+      error.textContent = problem ?? '';
+      if (problem) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+    };
+    input = h('input', {
+      class: 'input',
+      id: inputId,
+      type: 'text',
+      inputmode: 'numeric',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      value: '',
+      'aria-describedby': `${inputId}-help ${inputId}-error`,
+      oninput: () => sync(),
+      onchange: () => {
+        if (input.value.trim() && readIterations(input.value) === null) flag(iterationsProblem(input.value));
+      },
+      onkeydown: (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        submit();
+      },
+    });
+    const newTotal = h('span', { 'aria-live': 'polite' }, '–');
+    sync = () => {
+      const n = readIterations(input.value);
+      // A corrected field loses its message at once; a mistake is named when the field is left, or on Add.
+      if (n !== null) flag(null);
+      const text = n === null ? '–' : step !== null ? fmt.plural(step + n, 'iteration') : `the original total plus ${fmt.int(n)}`;
+      if (newTotal.textContent !== text) newTotal.textContent = text;
+      if (n === null || sending) addButton.setAttribute('aria-disabled', 'true');
+      else addButton.removeAttribute('aria-disabled');
+    };
+    const rows = [
+      ['Trained so far', trained],
+      ['New total', newTotal],
+      ['Continues from', `its final training state${step !== null ? `, iteration ${fmt.int(step)}` : ''}`],
+    ];
+    mount(status, null);
+    mount(
+      content,
+      h(
+        'div',
+        { class: 'field runs__resume-field' },
+        h('label', { class: 'field__label', for: inputId }, 'Additional iterations'),
+        input,
+        h('p', { class: 'field__help', id: `${inputId}-help` }, 'A whole number, such as 50000.'),
+        error,
+      ),
+      h('dl', { class: 'kv queue__kv' }, rows.map(([key, value]) => [h('dt', null, key), h('dd', null, value)])),
+      h(
+        'p',
+        null,
+        'This run keeps its checkpoints and training history. It resumes from the final checkpoint and trains to the new total when it reaches the front of the queue.' +
+          (queue.get().paused ? PAUSED_WAIT : ''),
+      ),
+    );
+    sync();
+    // On the phone edition the keyboard would cover the sheet: the field waits to be touched.
+    const at = document.activeElement;
+    if (!phone && (at === cancelButton || at === dialog || at === document.body || !dialog.contains(at))) input.focus();
+  })();
+
+  await closed;
+  controller.abort();
+  // The browser returns focus to the opener. When the opener gave way meanwhile (a continuation of this run
+  // is now in the queue in its place), focus goes to the link to that continuation instead.
+  const at = document.activeElement;
+  if ((!at || at === document.body) && opener instanceof HTMLElement && (!opener.isConnected || opener.closest('[hidden]'))) {
+    document.querySelector(`[data-continues-run="${CSS.escape(String(runId))}"]`)?.focus({ preventScroll: true });
+  }
 }

@@ -1,33 +1,34 @@
 // Two sides side by side (#/runs/compare/<left>[/<right>]). A side is a training run (its id) or a
-// completed CPU evaluation job (`job:<id>`, analysis kind "evaluate"):
+// completed CPU evaluation job (`job:<id>`), or a TensorBoard event file (`tb:<encoded path>`):
 //   1. the recorded scores of both (POST /api/compare), exactly as the service returns them: image by
 //      image, or the whole-dataset score for tasks scored over the whole dataset;
 //   2. both sides' saved outputs for one image on the comparison stage;
-//   3. one logged series of both runs on one chart (GET /api/run/history; two training runs only);
+//   3. one logged series of both runs on one chart (GET /api/run/history; training runs and TensorBoard files);
 //   4. the recipe options that differ (a run's yaml or a job's evaluation.yml, parsed by POST /api/preflight).
 // Left and right keep their sides everywhere: --series-1 is the left side, --series-2 the right side.
 //
 //   const part = mountRunCompare(host, { leftId, rightId });  part.setRuns(left, right);  part.destroy();
 
 import { h, mount, fmt, uid } from '../dom.js';
-import { api } from '../api.js';
+import { api, watchHistory } from '../api.js';
 import { runs, runStatus } from '../state/runs.js';
 import { catalog } from '../state/catalog.js';
 import { go, compareHref, runHref, analysisHref } from '../actions.js';
 import { notice, loading, emptyState } from '../ui.js';
+import { pickPath, parentOf } from '../components/path-picker.js';
 import { createChart } from '../components/chart.js';
 import { createCompare } from '../components/compare.js';
 import { diffConfigs, compactValue } from '../recipe/diff.js';
 
 const SIDES = ['left', 'right'];
 const SIDE_WORD = { left: 'Left', right: 'Right' };
-const KIND_NOUN = { run: 'run', job: 'evaluation' };
+const KIND_NOUN = { run: 'run', job: 'evaluation', tensorboard: 'TensorBoard run' };
+const TB_PREFIX = 'tb:';
 const JOB_PREFIX = 'job:';
 const JOB_RECIPE = 'evaluation.yml'; // the recipe an evaluation job's evaluator ran with, among its files
 const JOBS_MAX_AGE = 15000; // the list of evaluation jobs is read again when older than this (ms)
-const HISTORY_BUDGET = 800;
+const HISTORY_BUDGET = 2048;
 const DEFAULT_SERIES = 'l_g_total';
-const MAX_INDEX_CALLS = 400;
 const POOLED = 'pooledDataset';
 const POOLED_SENTENCE =
   'These are the evaluator’s scores over the whole dataset, not means of per-image scores, so there is no image-by-image list.';
@@ -35,12 +36,21 @@ const RECORD_HINT =
   'The recipe option val.record_samples turns the per-image record on. It saves the scores of the metrics validation already computes, so validation metrics (val.metrics_enabled) must be on as well.';
 
 /**
- * One side of the route: a run id, or `job:<id>` for a completed evaluation job.
- * @returns {{kind: 'run'|'job', id: string} | null}
+ * Each file path is encoded inside its side token so slashes survive route decoding.
+ * @returns {{kind: 'run'|'job'|'tensorboard', id: string} | null}
  */
 function parseSide(token) {
   const text = token === null || token === undefined ? '' : String(token);
   if (!text) return null;
+  if (text.startsWith(TB_PREFIX)) {
+    try {
+      let path = decodeURIComponent(text.slice(TB_PREFIX.length));
+      if (baseName(path).startsWith('events.out.tfevents.')) path = parentOf(path);
+      return path ? { kind: 'tensorboard', id: path } : null;
+    } catch {
+      return null;
+    }
+  }
   if (!text.startsWith(JOB_PREFIX)) return { kind: 'run', id: text };
   const id = text.slice(JOB_PREFIX.length);
   return id ? { kind: 'job', id } : null;
@@ -280,14 +290,14 @@ function optionLabel(run) {
 }
 
 /**
- * Each id is a side token: a run id, or `job:<id>` for a completed evaluation job.
+ * Each id identifies a managed run, an evaluation job, or a TensorBoard event file.
  * @param {HTMLElement} host
  * @param {{leftId?: string|null, rightId?: string|null}} options
  * @returns {{setRuns(leftId: string|null, rightId: string|null): void, destroy(): void}}
  */
 export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
   const ids = { left: null, right: null }; // the tokens, as the route and the pickers carry them
-  const refs = { left: null, right: null }; // the same sides parsed once: {kind: 'run'|'job', id}
+  const refs = { left: null, right: null }; // parsed side tokens
   const setSides = (left, right) => {
     refs.left = parseSide(left);
     refs.right = parseSide(right);
@@ -371,6 +381,20 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
 
   const selectIds = { left: uid('evaluation-left'), right: uid('evaluation-right') };
   const selects = {};
+  let lastLogFolder = '';
+  async function browseLog(side) {
+    const ref = parseSide(currentValue(side));
+    const path = await pickPath({
+      title: 'Choose a TensorBoard run folder',
+      mode: 'folder',
+      showFilesInitially: true,
+      start: ref?.kind === 'tensorboard' ? ref.id : lastLogFolder,
+      confirmLabel: 'Compare full history',
+    });
+    if (!path || destroyed) return;
+    lastLogFolder = parentOf(path);
+    choose(side, TB_PREFIX + encodeURIComponent(path));
+  }
   const optionSignature = { left: '', right: '' };
   for (const side of SIDES) {
     selects[side] = h('select', {
@@ -390,6 +414,8 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
         { class: 'evaluation__pick' },
         h('label', { class: 'evaluation__label', for: selectIds[side] }, swatch(side), SIDE_WORD[side]),
         selects[side],
+        h('button', { class: 'btn', type: 'button', onclick: () => browseLog(side),
+          'aria-label': `Browse TensorBoard run folder for the ${side} side` }, 'Browse TensorBoard run folder…'),
       ),
     ),
     swapBtn,
@@ -424,9 +450,7 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
     if (jobsPhase === 'error') jobNote = `Could not read the evaluation jobs: ${jobsError}`;
     else if (!jobEntries.length) jobNote = jobsPhase === 'ready' ? 'No completed evaluation job yet' : 'Reading the evaluation jobs…';
     // The left side can only be changed, not cleared: the route always names a left side.
-    // Only two lists that were both read and are both empty can say there is nothing to compare.
-    const nothing = !runEntries.length && !jobEntries.length && runs.get().phase === 'ready' && jobsPhase === 'ready';
-    const placeholder = side === 'right' || !value ? (nothing ? 'Nothing to compare yet' : 'Choose a run or an evaluation job') : '';
+    const placeholder = side === 'right' || !value ? 'Choose a run or an evaluation job' : '';
     const signature = [placeholder, value, ...runEntries.map((e) => e.join('=')), '#', ...jobEntries.map((e) => e.join('=')), jobNote].join('|');
     if (signature === optionSignature[side]) return;
     optionSignature[side] = signature;
@@ -434,6 +458,7 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
     mount(
       select,
       placeholder ? h('option', { value: '' }, placeholder) : null,
+      ref?.kind === 'tensorboard' ? h('optgroup', { label: 'TensorBoard' }, h('option', { value }, baseName(ref.id))) : null,
       h('optgroup', { label: 'Training runs' }, runEntries.length ? options(runEntries) : h('option', { disabled: true }, 'No runs yet')),
       h('optgroup', { label: 'Evaluation jobs' }, options(jobEntries), jobNote ? h('option', { disabled: true }, jobNote) : null),
     );
@@ -474,6 +499,7 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
   function nameOf(side) {
     const ref = refs[side];
     if (!ref) return '';
+    if (ref.kind === 'tensorboard') return baseName(ref.id);
     if (ref.kind === 'job') {
       const job = jobOf(ref.id);
       return job ? jobLabel(job) : `Evaluation job ${ref.id}`;
@@ -508,6 +534,13 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
     }
     const cards = SIDES.map((side) => {
       const ref = refs[side];
+      if (ref.kind === 'tensorboard') {
+        return h('div', { class: `evaluation__fact evaluation__fact--${side}` },
+          h('div', { class: 'evaluation__fact-head' }, swatch(side),
+            h('span', { class: 'evaluation__side-word' }, `${SIDE_WORD[side]} TensorBoard run`),
+            h('span', { class: 'evaluation__fact-name' }, nameOf(side))),
+          h('div', { class: 'evaluation__value mono' }, ref.id));
+      }
       if (ref.kind === 'job') {
         readJob(ref.id);
         const parts = {
@@ -623,35 +656,16 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
   // ───────── fewer than two sides ─────────
 
   function renderIntro() {
-    const count = (runs.get().list ?? []).length + jobs.length;
-    let next = 'Choose a left side and a right side above.';
-    if (!ids.left && pendingRight) next = 'Choose the left side as well.';
-    else if (ids.left && !ids.right) next = 'Choose the right side as well.';
-    // Only two lists that were both read can say there is nothing, or too little, to compare.
-    if (runs.get().phase === 'ready' && jobsPhase === 'ready' && count < 2) {
-      next =
-        count === 0
-          ? 'There are no runs or evaluation jobs yet. Start training from the Recipe screen, then come back here.'
-          : 'There is only one run or evaluation job so far. A comparison needs a second one.';
-    }
-    mount(
-      body,
-      emptyState({
-        title: 'Compare runs and evaluations',
-        text: h(
-          'span',
-          null,
-          'This screen puts two training runs, two evaluation jobs, or one of each side by side: the scores both recorded (which images improved and which regressed, or the score over the whole dataset for tasks scored that way), both sides’ saved outputs for one image on the comparison stage, and the recipe options that differ. Two training runs also get one logged value of both on one chart. ',
-          next,
-        ),
-      }),
-    );
+    const next = ids.left && !ids.right ? 'Choose the right side' : pendingRight ? 'Choose the left side' : 'Choose both sides';
+    mount(body, emptyState({
+      title: 'Compare runs and evaluations',
+      text: `${next} above. Browse a TensorBoard run folder to compare its logged values over iterations. Runs and evaluation jobs can also compare recorded scores, images and recipes.`,
+    }));
   }
 
   function renderSame() {
-    const what = refs.left?.kind === 'job' ? 'evaluation job' : 'run';
-    const other = what === 'run' ? 'Choose a different run on one side to compare two runs.' : 'Choose a different evaluation job or a run on one side to compare.';
-    mount(body, h('p', { class: 'evaluation__lead', role: 'status' }, `Left and right are the same ${what} (${nameOf('left')}). ${other}`));
+    mount(body, h('p', { class: 'evaluation__lead', role: 'status' },
+      `Both sides are the same ${nounOf('left')}. Choose a different source on one side.`));
   }
 
   /** What the body shows while there is no pair to compare. */
@@ -684,14 +698,18 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
       renderIntro();
       return;
     }
-    if (ids.left === ids.right) {
-      // One side against itself: nothing to compare, so no request is made.
+    if (ids.left === ids.right && refs.left.kind !== 'tensorboard') {
+      // A TensorBoard folder can show a different writer on each side.
       renderSame();
       return;
     }
     const ctl = new AbortController();
     pair = { left: refs.left, right: refs.right, ctl, signal: ctl.signal, detail: {}, cleanups: [] };
     const current = pair;
+    if (SIDES.some((side) => current[side].kind === 'tensorboard')) {
+      mount(body, historyPart(current));
+      return;
+    }
     const outputs = outputsPart(current);
     const evaluation = evaluationPart(current, outputs);
     const history = historyPart(current);
@@ -1577,14 +1595,30 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
       // Only training writes a log, so nothing is asked of the service for an evaluation job.
       return section('Logged history', null, h('p', { class: 'evaluation__lead' }, 'An evaluation job has no training log, so there is no logged value to chart.'));
     }
+    const hasArchive = SIDES.some((side) => p[side].kind === 'tensorboard');
+    function read(side, params, signal) {
+      const ref = p[side];
+      return ref.kind === 'tensorboard'
+        ? api.tensorboardHistory(ref.id, params, { signal })
+        : api.history(ref.id, { scope: hasArchive ? 'comparison' : 'training', ...params }, { signal });
+    }
     const progress = { left: '', right: '' };
     const status = h('div', { class: 'evaluation__status', role: 'status', 'aria-live': 'polite' }, loading('Reading the training logs…'));
     const controls = h('div', { class: 'evaluation__controls' });
+    const writerControls = h('div', { class: 'evaluation__controls' });
+    const selectedWriter = { left: '', right: '' };
+    const lastMetric = { left: '', right: '' };
+    let generation = 0;
+    const indexes = {};
+    const curves = {};
+    let controlKey = null;
+    let drawCurrent;
     const chartHost = h('div', { class: 'evaluation__chart' });
     const notes = h('ul', { class: 'evaluation__notes', 'aria-live': 'polite' });
     const el = section(
       'Logged history',
-      'One value from both runs’ training logs (losses, learning rate, speed, memory), drawn against iteration on one chart. Validation scores are not part of the training log; they are compared in the recorded evaluation above.',
+      hasArchive ? 'Compare scalar values by iteration. Select the same dataset and metric on both sides.' : 'Compare a value recorded in both training logs by iteration.',
+      writerControls,
       status,
       controls,
       chartHost,
@@ -1604,86 +1638,145 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
       mount(status, loading(text || 'Reading the training logs…'));
     };
 
-    async function index(side) {
-      let reply = null;
-      for (let call = 0; call < MAX_INDEX_CALLS; call += 1) {
-        reply = await api.history(p[side].id, {}, { signal: p.signal });
-        if (!live(p)) return reply;
+    async function index(side, version) {
+      if (indexes[side]) return indexes[side];
+      const source = selectedWriter[side];
+      let reply;
+      let previous;
+      do {
+        reply = await read(side, { source }, p.signal);
+        if (!live(p) || version !== generation) return reply;
         if (!reply?.more) break;
+        const cursor = `${reply.indexedBytes}/${reply.sourceBytes}`;
+        if (previous === cursor) throw new Error('Indexing stopped before the full history could be read.');
+        previous = cursor;
         const done = bytes(reply.indexedBytes);
         const total = bytes(reply.sourceBytes);
         progress[side] = done && total ? `${SIDE_WORD[side]} run: ${done} of ${total} of the training log indexed.` : `${SIDE_WORD[side]} run: indexing the training log.`;
         showProgress();
-      }
+      } while (live(p) && version === generation);
       progress[side] = '';
+      indexes[side] = reply;
       return reply;
     }
 
-    Promise.allSettled(SIDES.map(index)).then((settled) => {
-      if (!live(p)) return;
+    async function reloadHistory(background) {
+      const version = ++generation;
+      ctl?.abort();
+      token++;
+      if (!background) showProgress();
+      const settled = await Promise.allSettled(SIDES.map((side) => index(side, version)));
+      if (!live(p) || version !== generation) return;
       const info = {};
       const lines = [];
       settled.forEach((outcome, i) => {
         const side = SIDES[i];
         if (outcome.status === 'fulfilled') info[side] = outcome.value;
-        else if (!isAbort(outcome.reason)) lines.push(`Could not read the training log of ${nameOf(side)} (${side} run): ${outcome.reason?.message ?? 'no answer'}`);
+        else if (!isAbort(outcome.reason)) lines.push(`Could not read ${nameOf(side)}: ${outcome.reason?.message ?? 'no answer'}`);
       });
-      if (lines.length) {
-        mount(status, notice('err', lines.join(' ')));
-        return;
+      if (lines.length) throw new Error(lines.join(' '));
+      const layout = JSON.stringify(SIDES.map((side) => [
+        selectedWriter[side], info[side].sources, info[side].source, info[side].writerCount,
+        info[side].partialHistory, info[side].resumeSteps, info[side].series?.map((s) => s.key),
+      ]));
+      if (layout === controlKey && drawCurrent) {
+        return drawCurrent(background);
       }
-      const noLog = SIDES.filter((side) => !info[side]?.source);
-      if (noLog.length) {
-        mount(status, notice('', noLog.map((side) => `${nameOf(side)} (${side} run) has no training log to read.`).join(' ')));
-        return;
-      }
-      if (info.left.more || info.right.more) {
-        lines.push('A training log is still being indexed; the values below cover the part read so far.');
+      controlKey = layout;
+      drawCurrent = null;
+      mount(writerControls, SIDES.filter((side) => info[side].writerCount > 1).map((side) => {
+        const id = uid('history-files');
+        const select = h('select', { class: 'select evaluation__select', id,
+          onchange: () => { selectedWriter[side] = select.value; refreshSide(side); } },
+          h('option', { value: '' }, `Full history (${info[side].writerCount} event files)`),
+          info[side].sources.map((path) => h('option', { value: path, title: path }, baseName(path))));
+        select.value = selectedWriter[side];
+        return h('div', { class: 'evaluation__pick' },
+          h('label', { class: 'evaluation__label', for: id }, `${SIDE_WORD[side]} history`), select);
+      }));
+      for (const side of SIDES) {
+        if (info[side].partialHistory) lines.push(`${SIDE_WORD[side]}: some earlier training history could not be linked.`);
       }
       const keysOf = (reply) => (Array.isArray(reply.series) ? reply.series.map((s) => s.key) : []);
-      const rightKeys = new Set(keysOf(info.right));
-      const common = keysOf(info.left).filter((key) => rightKeys.has(key));
-      if (!common.length) {
-        mount(status, notice('', 'The two runs logged no value under the same name, so there is nothing to draw on one chart.'));
+      const keys = { left: keysOf(info.left), right: keysOf(info.right) };
+      const rightKeys = new Set(keys.right);
+      const common = keys.left.filter((key) => rightKeys.has(key));
+      if (SIDES.some((side) => !keys[side].length) || (!hasArchive && !common.length)) {
+        chart?.destroy();
+        chart = null;
+        mount(chartHost);
+        mount(controls);
+        mount(notes);
+      }
+      if (SIDES.some((side) => !keys[side].length)) {
+        mount(status, notice('', SIDES.filter((side) => !keys[side].length)
+          .map((side) => `${SIDE_WORD[side]} has no scalar values in the selected history.`).join(' ')));
         return;
       }
-      mount(
-        status,
-        h(
-          'p',
-          { class: 'evaluation__lead' },
-          SIDES.map((side) => {
-            const count = Array.isArray(info[side].sources) ? info[side].sources.length : 0;
-            return `${SIDE_WORD[side]} run read from ${info[side].source}${count > 1 ? ` (the newest of ${count} training logs)` : ''}. `;
-          }),
-          lines.join(' '),
-        ),
-      );
-      const selectId = uid('evaluation-series');
-      const select = h(
-        'select',
-        { class: 'select evaluation__select', id: selectId, onchange: () => draw(select.value) },
-        common.map((key) => h('option', { value: key }, key)),
-      );
-      select.value = common.includes(DEFAULT_SERIES) ? DEFAULT_SERIES : common[0];
-      mount(controls, h('div', { class: 'evaluation__pick' }, h('label', { class: 'evaluation__label', for: selectId }, 'Logged value'), select));
-      draw(select.value);
+      if (!hasArchive && !common.length) {
+        mount(status, notice('', 'The two runs have no logged values with matching names.'));
+        return;
+      }
+      mount(status, h('p', { class: 'evaluation__lead' },
+        SIDES.map((side) => `${SIDE_WORD[side]} source: ${info[side].source || 'Full training history'}. `), lines.join(' ')));
+      const preferred = (hasArchive && common.find((key) => key.toLowerCase().endsWith('/psnr')))
+        || (common.includes(DEFAULT_SERIES) && DEFAULT_SERIES) || common[0];
+      const choices = {};
+      function valueControl(side, options) {
+        const id = uid('evaluation-series');
+        const select = h('select', { class: 'select evaluation__select', id,
+          onchange: () => {
+            if (hasArchive && side === 'left') choices.right.value = rightKeys.has(select.value) ? select.value : '';
+            draw();
+          } }, options.map((key) => h('option', { value: key }, key)));
+        select.value = options.includes(lastMetric[side]) ? lastMetric[side] : preferred || options[0];
+        choices[side] = select;
+        const label = hasArchive ? `${SIDE_WORD[side]} logged value` : 'Logged value';
+        return h('div', { class: 'evaluation__pick' }, h('label', { class: 'evaluation__label', for: id }, label), select);
+      }
+      mount(controls, hasArchive ? SIDES.map((side) => valueControl(side, keys[side])) : valueControl('left', common));
+      if (!hasArchive) choices.right = choices.left;
+      if (hasArchive) {
+        choices.right.insertBefore(h('option', { value: '' }, 'Choose a comparable value'), choices.right.firstChild);
+        choices.right.value = keys.right.includes(lastMetric.right) ? lastMetric.right : preferred || '';
+      }
+      drawCurrent = draw;
+      return draw(background);
 
-      async function draw(key) {
+      async function draw(quiet = false) {
         ctl?.abort();
         ctl?.release();
         ctl = childController(p.signal);
         const mine = ++token;
-        mount(notes, h('li', null, loading(`Reading ${key} from both logs…`)));
-        const results = await Promise.allSettled(
-          SIDES.map((side) => api.history(p[side].id, { metric: key, budget: HISTORY_BUDGET, source: info[side].source }, { signal: ctl.signal })),
-        );
+        const selected = { left: choices.left.value, right: choices.right.value };
+        Object.assign(lastMetric, selected);
+        if (!selected.right) {
+          chart?.destroy();
+          chart = null;
+          mount(notes, h('li', null, 'Choose the corresponding logged value on the right.'));
+          return;
+        }
+        if (!quiet) mount(notes, h('li', null, loading('Reading both series…')));
+        const signal = ctl.signal;
+        const results = await Promise.allSettled(SIDES.map(async (side) => {
+          const params = { metric: selected[side], budget: HISTORY_BUDGET, ...chart?.iterationRange(), source: selectedWriter[side] };
+          const key = JSON.stringify(params);
+          if (curves[side]?.key === key) return curves[side].reply;
+          const reply = await read(side, params, signal);
+          if (!signal.aborted) curves[side] = { key, reply };
+          return reply;
+        }));
         if (mine !== token || !live(p)) return;
+        if (quiet) {
+          const failed = results.find((r) => r.status === 'rejected');
+          if (failed) throw failed.reason;
+        }
         const series = [];
         const items = [];
         results.forEach((outcome, i) => {
           const side = SIDES[i];
           const word = SIDE_WORD[side];
+          const key = selected[side];
           if (outcome.status !== 'fulfilled') {
             if (!isAbort(outcome.reason)) items.push(`${word} run: could not read ${key}: ${outcome.reason?.message ?? 'no answer'}`);
             return;
@@ -1701,7 +1794,7 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
             else gaps += 1;
             points.push({ x, y: Number.isFinite(y) ? y : null });
           }
-          series.push({ name: `${word}: ${nameOf(side)}`, points });
+          series.push({ name: `${word}: ${nameOf(side)}${selected.left !== selected.right ? ` · ${key}` : ''}`, points });
           const matched = Number.isFinite(reply.matchedPoints) ? reply.matchedPoints : raw.length;
           let text = reply.downsampled
             ? `${word} run: ${fmt.int(raw.length)} of ${fmt.int(matched)} logged points drawn (downsampled by the service: each stretch of iterations keeps its first, last, lowest and highest point).`
@@ -1712,15 +1805,35 @@ export function mountRunCompare(host, { leftId = null, rightId = null } = {}) {
         });
         // Both series are always passed, the left one first by name, so the left run takes the
         // first series colour and the right run the second even when one side has no values.
-        if (!chart) chart = createChart(chartHost, { title: 'Logged history' });
-        chart.update({ series, xLabel: 'Iteration' });
+        if (!chart) chart = createChart(chartHost, { title: 'Logged history', onXRangeChange: () => drawCurrent?.() });
+        const markers = [...new Set(SIDES.flatMap((side) => info[side].resumeSteps || []))];
+        chart.update({ series, xLabel: 'Iteration', markers, yKey: JSON.stringify(selected) });
         mount(notes, items.map((text) => h('li', { class: 'evaluation__note' }, text)));
       }
-    }).catch((error) => {
-      if (!live(p)) return;
-      mount(status, notice('err', `Could not show the logged history: ${error?.message ?? 'unknown error'}`));
-    });
+    }
 
+    function refreshSide(side, background = false) {
+      delete indexes[side];
+      delete curves[side];
+      return refreshHistory(background);
+    }
+
+    function refreshHistory(background = false) {
+      return reloadHistory(background).catch((error) => {
+        if (live(p) && !isAbort(error)) {
+          controlKey = null;
+          mount(status, notice('err', `Could not show the logged history: ${error.message}`));
+          if (background) throw error;
+        }
+      });
+    }
+    refreshHistory();
+    for (const side of SIDES) {
+      const ref = p[side];
+      const params = ref.kind === 'tensorboard' ? { kind: 'tensorboard', path: ref.id }
+        : { kind: hasArchive ? 'comparison' : 'training', id: ref.id };
+      p.cleanups.push(watchHistory(params, () => refreshSide(side, true)));
+    }
     return el;
   }
 

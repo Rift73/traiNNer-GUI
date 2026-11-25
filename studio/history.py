@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .native import executable
+from .paths import clipboard_paths
 
 BUDGET = 4 * 1024 * 1024
 
@@ -103,7 +104,8 @@ def step_range(from_step: int | None, to_step: int | None) -> tuple[int, int]:
     return from_step or 0, to_step if to_step is not None else 2**63-1
 
 
-def source_index(experiment: Path, state: Path, source: str | None, *, trainer_only: bool = False) -> tuple[dict, Path | None]:
+def history_source_files(experiment: Path, *, trainer_only: bool = False) -> dict[str, Path]:
+    """Map history source labels to their files in selection order."""
     files = {p.name: p for p in _logs(experiment)}
     if not trainer_only:
         from .tensorboard_history import sources
@@ -111,6 +113,11 @@ def source_index(experiment: Path, state: Path, source: str | None, *, trainer_o
         for path in sources(experiment):
             location = "experiment" if path.parent == experiment else "tb_logger"
             files[f"TensorBoard/{location}/{path.name}"] = path
+    return files
+
+
+def source_index(experiment: Path, state: Path, source: str | None, *, trainer_only: bool = False) -> tuple[dict, Path | None]:
+    files = history_source_files(experiment, trainer_only=trainer_only)
     reply = {"sources": list(files), "source": None}
     if not files and source is None:
         return reply, None
@@ -118,8 +125,13 @@ def source_index(experiment: Path, state: Path, source: str | None, *, trainer_o
     if source not in files:
         raise FileNotFoundError("The selected history source does not belong to this run.")
     log = files[source]
+    meta, index = index_file(state, log, source)
+    return {**reply, **meta}, index
+
+
+def index_file(state: Path, log: Path, source: str) -> tuple[dict, Path]:
     tensorboard = source.startswith("TensorBoard/")
-    reply["sourceFormat"] = "tensorboard" if tensorboard else "trainer-log"
+    reply = {"sourceFormat": "tensorboard" if tensorboard else "trainer-log"}
     folder = state.resolve() / "history"
     folder.mkdir(parents=True, exist_ok=True)
     prefix = b"tensorboard-scalars-v1\0" if tensorboard else b"trainer-log-v4\0"
@@ -127,21 +139,81 @@ def source_index(experiment: Path, state: Path, source: str | None, *, trainer_o
     index = folder / (tag+".sqlite3")
     with closing(sqlite3.connect(index, timeout=15)) as db:
         consumed,size,more = _refresh(db,log,tensorboard=tensorboard)
-    reply.update(source=source, indexedBytes=consumed, sourceBytes=size, more=more)
+    reply.update(source=source, sourcePaths=clipboard_paths(log),
+                 indexedBytes=consumed, sourceBytes=size, more=more)
     return reply, index
 
 
 def history(experiment: Path, state: Path, source: str | None = None,
             metric: str | None = None, budget: int = 1000,
             from_step: int | None = None, to_step: int | None = None) -> dict:
+    bounds = plot_bounds(budget, from_step, to_step)
+    reply, index = source_index(experiment, state, source)
+    return indexed_history(reply, index, metric, budget, bounds)
+
+
+def plot_bounds(budget, from_step, to_step):
     if type(budget) is not int or not 8 <= budget <= 8192:
         raise ValueError("The plotted point budget must be an integer from 8 to 8192.")
-    first_step, last_step = step_range(from_step, to_step)
-    reply, index = source_index(experiment, state, source)
+    return step_range(from_step, to_step)
+
+
+def history_revision(root, kind, previous):
+    """Wait for a change to the files this chart reads. Never index while waiting."""
+    import time
+
+    from .validation_summary import _open
+
+    deadline = time.monotonic() + 12
+    while True:
+        stamps = []
+        if kind != "tensorboard":
+            with _open(root) as db:
+                latest = db.execute("SELECT max(id) FROM evaluation").fetchone()[0] if db else None
+            stamps.append(latest)
+        if kind == "tensorboard":
+            paths = [root] if root.is_file() else root.glob("events.out.tfevents.*")
+        elif kind == "scores" and latest is not None:
+            paths = []
+        else:
+            paths = history_source_files(root, trainer_only=kind != "comparison").values()
+        for path in sorted(paths):
+            try:
+                stat = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            stamps.append((path.name, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+        cursor = hashlib.sha256(repr(stamps).encode()).hexdigest()[:32]
+        if cursor != previous or time.monotonic() >= deadline:
+            return {"cursor": cursor}
+        time.sleep(1 if kind == "tensorboard" else 0.4)
+
+
+def indexed_history(reply, index, metric, budget, bounds, *, validation=None):
+    first_step, last_step = bounds
     reply.update(series=[], points=[])
     if index is None:
         return reply
     with closing(sqlite3.connect(index.as_uri() + "?mode=ro", uri=True, timeout=15)) as db:
+        if validation is not None:
+            root, attempt = validation
+            path = root / "validation-summary.sqlite3"
+            if path.is_file() and path.resolve() == path:
+                # Include committed validation while the TensorBoard writer buffers its copy.
+                # Individual writer views keep showing exactly what that file contains.
+                db.execute("PRAGMA trusted_schema=OFF")
+                db.execute("ATTACH DATABASE ? AS scores", (path.as_uri() + "?mode=ro",))
+                if db.execute("PRAGMA scores.user_version").fetchone()[0] == 1:
+                    db.execute("CREATE TEMP TABLE current_attempt(id TEXT PRIMARY KEY)")
+                    db.execute("INSERT INTO current_attempt VALUES(?)", (attempt,))
+                    db.execute("""CREATE TEMP VIEW points AS
+                        SELECT metric,step,value FROM main.points UNION ALL
+                        SELECT 'metrics/' || e.dataset || '/' || s.metric,e.step,s.value
+                        FROM scores.evaluation e JOIN current_attempt a ON a.id=e.attempt
+                        JOIN scores.scalar s ON s.evaluation=e.id
+                        WHERE NOT EXISTS (SELECT 1 FROM main.points p WHERE p.step=e.step
+                            AND p.metric='metrics/' || e.dataset || '/' || s.metric)""")
+                    db.commit()
         db.execute("BEGIN")
         series = [{"key": key, "count": n, "first": first, "last": last}
                   for key,n,first,last in db.execute(

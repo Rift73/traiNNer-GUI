@@ -156,7 +156,10 @@ export function mountSourcePane(el) {
     const ok = await copyText(input.value);
     toast(ok ? 'Copied the YAML.' : 'The browser did not allow copying. Select the text and copy it instead.', { kind: ok ? 'info' : 'err' });
   });
-  const toolbar = h('div', { class: 'src__toolbar' }, copyButton, smallButton('Download', download), wrapButton, status);
+  const toolbar = h('div', { class: 'src__toolbar' }, copyButton, smallButton('Download', download), smallButton('Format YAML', async () => {
+    try { await recipe.applyEdits([]); }
+    catch (error) { toast(error.message, { kind: 'err' }); }
+  }), wrapButton, status);
   mount(
     panels.yaml,
     toolbar,

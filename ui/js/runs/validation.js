@@ -61,6 +61,7 @@ export function mountValidation(host, { run } = {}) {
     iterations: new Set(),
     datasets: new Set(),
     filter: { iteration: '', dataset: '', text: '' },
+    canReveal: false,
     more: false,
     moreError: '',
     /** the load in flight is a "Check for new images" */
@@ -153,7 +154,29 @@ export function mountValidation(host, { run } = {}) {
       },
     });
   }
-  const pickers = h('div', { class: 'validation__pickers' }, field(ids.a, 'Image A', pickSelect.a), field(ids.b, 'Image B', pickSelect.b));
+  const revealButtons = {};
+  const pickers = h('div', { class: 'validation__pickers' }, ['a', 'b'].map((side) => {
+    const label = `Image ${side.toUpperCase()}`;
+    const button = h('button', {
+      class: 'btn btn--sm', type: 'button', hidden: true,
+      'aria-label': `Open ${label} in Explorer`, title: 'Select this file in Explorer on the training PC',
+      onclick: async () => {
+        const url = sourceFor(jd.pick[side])?.url;
+        if (!url) return;
+        button.disabled = true;
+        try {
+          await api.revealImage(Object.fromEntries(new URL(url, location.href).searchParams));
+          toast('Opened in Explorer on the training PC.');
+        } catch (error) {
+          toast(reasonOf(error), { kind: 'err' });
+        } finally {
+          button.disabled = false;
+        }
+      },
+    }, 'Open in Explorer');
+    revealButtons[side] = button;
+    return field(ids[side], label, h('div', { class: 'row row--wrap' }, pickSelect[side], button));
+  }));
 
   const strip = h('div', { class: 'validation__strip', role: 'group', 'aria-labelledby': ids.strip });
   const stripField = h(
@@ -206,7 +229,7 @@ export function mountValidation(host, { run } = {}) {
   const emptyEl = h('div', { class: 'validation__empty', hidden: true });
   const grid = h('ul', { class: 'validation__grid', 'aria-label': 'Validation images', onkeydown: onGridKey });
   const sheet = h('div', { class: 'stage validation__sheet', hidden: true }, grid);
-  const moreButton = h('button', { class: 'btn', type: 'button', onclick: () => loadMore() }, 'Load more');
+  const moreButton = h('button', { class: 'btn', type: 'button', hidden: true, onclick: () => loadMore() }, 'Retry');
   const moreError = h('p', { class: 'validation__moreerror', role: 'status' });
   const moreEl = h('div', { class: 'validation__more', hidden: true }, moreButton, moreError);
 
@@ -228,6 +251,10 @@ export function mountValidation(host, { run } = {}) {
   // Sticky at the top of the panel, so the switch stays in reach on a long Scores page.
   const root = h('div', { class: 'validation' }, h('div', { class: 'val__viewbar' }, viewBar), imagesPane, scoresPane);
   host.appendChild(root);
+
+  const pageObserver = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting && !destroyed && view === 'images' && !st.moreError) loadMore();
+  }, { rootMargin: '0px 0px 240px 0px' });
 
   function showView(next, remember) {
     view = next;
@@ -303,6 +330,7 @@ export function mountValidation(host, { run } = {}) {
 
   /** Add one API page. Rows without a usable key are kept out (nothing to select or label). */
   function accept(page) {
+    st.canReveal = page?.canReveal === true;
     const rows = Array.isArray(page?.images) ? page.images : [];
     if (page?.provenance === 'recorded' || page?.provenance === 'filename') st.provenance = page.provenance;
     st.next = typeof page?.next === 'string' && page.next ? page.next : null;
@@ -525,7 +553,7 @@ export function mountValidation(host, { run } = {}) {
     } else if (st.phase === 'ready' && !visible.length) {
       node = emptyState({
         title: `No loaded image has a sample name containing “${st.filter.text.trim()}”`,
-        text: st.next ? 'More images are available. Load more to search them too.' : '',
+        text: st.next ? 'Searching the remaining images…' : '',
       });
     }
     mount(emptyEl, node);
@@ -645,10 +673,11 @@ export function mountValidation(host, { run } = {}) {
 
   function renderMore() {
     moreEl.hidden = !(st.phase === 'ready' && st.next);
-    moreButton.disabled = st.more;
-    moreButton.textContent = st.more ? 'Loading more…' : 'Load more';
-    moreError.textContent = st.moreError;
-    moreError.hidden = !st.moreError;
+    moreButton.hidden = !st.moreError;
+    moreError.textContent = st.moreError || (st.more ? 'Loading more images…' : '');
+    moreError.hidden = !moreError.textContent;
+    pageObserver.unobserve(moreEl);
+    if (!moreEl.hidden && !st.more && !st.moreError) pageObserver.observe(moreEl);
   }
 
   // ───────── one sample on the stage ─────────
@@ -920,6 +949,8 @@ export function mountValidation(host, { run } = {}) {
     if (!compare || !jd.row) return;
     const a = sourceFor(jd.pick.a);
     const b = sourceFor(jd.pick.b);
+    revealButtons.a.hidden = !st.canReveal || !a;
+    revealButtons.b.hidden = !st.canReveal || !b;
     const key = JSON.stringify([a?.url, a?.source.label, a?.source.note, b?.url, b?.source.label, b?.source.note]);
     if (key === sourceKey) return;
     sourceKey = key;
@@ -1197,6 +1228,7 @@ export function mountValidation(host, { run } = {}) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      pageObserver.disconnect();
       listAbort?.abort();
       moreAbort?.abort();
       historyAbort?.abort();

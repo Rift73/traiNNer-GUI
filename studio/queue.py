@@ -1,4 +1,4 @@
-"""Persistent opt-in FIFO for managed WSL experiments.
+"""Persistent queue for managed WSL experiments, initially ordered by release.
 
 A dispatch claim is saved before calling RunManager. Reconciliation uses the
 same reserved request ID after a service interruption, including before a
@@ -194,6 +194,18 @@ class QueueManager:
         self._reconcile(state)
         return self._public(state)
 
+    def history_parents(self) -> dict[str, tuple[str, str, int]]:
+        """Checkpoint parents by launched run, without advancing or reconciling the queue."""
+        parents = {}
+        for entry in self._read()["entries"].values():
+            if "runId" not in entry:
+                continue
+            if "resumeStep" in entry and entry["sourceRunId"] != entry["runId"]:
+                parents[entry["runId"]] = (entry["sourceRunId"], entry["sourceAttemptId"], entry["resumeStep"])
+            elif entry.get("mode") == "continue" and (handoff := entry.get("handoff")):
+                parents[entry["runId"]] = (handoff["runId"], handoff["attemptId"], handoff["step"])
+        return parents
+
     def detail(self, entry_id: str) -> dict[str, Any]:
         state = self._read()
         self._reconcile(state)
@@ -266,6 +278,7 @@ class QueueManager:
         recipe_path: str | None = None,
         provenance: dict[str, Any] | None = None,
         input_precondition: dict | None = None,
+        continuation: dict | None = None,
     ) -> dict[str, Any]:
         entry = self._held_entry(
             entry_id,
@@ -277,6 +290,10 @@ class QueueManager:
         )
         if input_precondition is not None:
             entry["inputPrecondition"] = input_precondition
+        if continuation is not None:
+            entry.update(continuation)
+            self._assign_release_order(state, entry)
+            entry["status"] = "pending"
         atomic_text(self._recipe(entry), text)
         state["entries"][entry_id] = entry
         self._save(state)
@@ -696,7 +713,7 @@ class QueueManager:
         with self._locked() as state:
             self._reconcile(state, recover_unlaunched=True)
             if existing := state["entries"].get(entry_id):
-                if existing.get("sourceRunId") != run_id:
+                if existing.get("sourceRunId") != run_id or "resumeStep" in existing:
                     raise ValueError(
                         "This request ID already saved a different queue entry."
                     )
@@ -710,6 +727,52 @@ class QueueManager:
                 group_id=info["groupId"],
                 provenance=info,
             )
+
+    def resume(
+        self, run_id: str, request_id: str | None = None, *, additional_iterations: int | None = None
+    ) -> dict[str, Any]:
+        """Queue a stopped run's continuation or a completed run's requested extension."""
+        if additional_iterations is not None and (
+            type(additional_iterations) is not int or additional_iterations < 1
+        ):
+            raise ValueError("Additional iterations must be a positive whole number.")
+        entry_id = self._entry_id(request_id)
+        with self._locked() as state:
+            if self._reconcile(state, recover_unlaunched=True):
+                self._save(state)
+            if existing := state["entries"].get(entry_id):
+                if (
+                    existing.get("sourceRunId") != run_id
+                    or "resumeStep" not in existing
+                    or existing.get("additionalIterations") != additional_iterations
+                ):
+                    raise ValueError("This request ID already saved a different queue entry.")
+                return existing
+            for entry in state["entries"].values():
+                if entry.get("runId") == run_id and entry.get("pauseAttempt") and entry["status"] in WAITING | ACTIVE:
+                    if additional_iterations is not None:
+                        raise ValueError("Resume the paused queue entry before extending this run.")
+                    return entry
+                if (entry.get("sourceRunId") == run_id and "resumeStep" in entry
+                        and entry["status"] in WAITING | ACTIVE):
+                    if entry.get("additionalIterations") != additional_iterations:
+                        raise FileExistsError("A continuation with a different target is already queued for this run.")
+                    return entry
+            text, parent_id, checkpoint = self.runs.queued_resume_source(
+                run_id, additional_iterations=additional_iterations
+            )
+            if additional_iterations is not None:
+                checkpoint["additionalIterations"] = additional_iterations
+            parent = state["entries"].get(parent_id)
+            return self._add(
+                state, entry_id, text, source_run_id=run_id,
+                group_id=parent["groupId"] if parent else run_id, continuation=checkpoint,
+            )
+
+    @staticmethod
+    def _assign_release_order(state: dict, entry: dict) -> None:
+        state["nextOrder"] += 1
+        entry["order"] = state["nextOrder"]
 
     def _transition(
         self, entry_id: str, target: str, allowed: set[str]
@@ -741,12 +804,42 @@ class QueueManager:
                                 "The pinned phase checkpoint changed. Retry the phase to select an intact source."
                             )
                         entry.update(handoff=handoff, sourceRunId=handoff["runId"])
-                state["nextOrder"] += 1
-                entry["order"] = state["nextOrder"]
+                self._assign_release_order(state, entry)
             entry.pop("blockedReason", None)
             entry.update(status=target, updatedAt=process.timestamp())
             self._save(state)
             return entry
+
+    def reorder(self, expected: list[str], order: list[str]) -> dict[str, Any]:
+        """Reorder the pending line as observed by the caller, under the dispatch lock."""
+        for ids in (expected, order):
+            if not isinstance(ids, list) or any(not isinstance(key, str) for key in ids):
+                raise ValueError("Provide the waiting queue entry IDs as lists.")
+        if len(set(expected)) != len(expected) or sorted(order) != sorted(expected):
+            raise ValueError("The new order must include each waiting entry exactly once.")
+
+        with self._locked() as state:
+            changed = self._reconcile(state, recover_unlaunched=True)
+            pending = sorted(
+                (e for e in state["entries"].values() if e["status"] == "pending"),
+                key=lambda e: e["order"],
+            )
+            current = [e["id"] for e in pending]
+            if current != order:
+                if current != expected:
+                    raise FileExistsError("The waiting queue changed. Refresh it and move the entry again.")
+                # Reuse the occupied order numbers so subsequent releases still join the tail.
+                slots = [e["order"] for e in pending]
+                now = process.timestamp()
+                for key, slot in zip(order, slots, strict=True):
+                    entry = state["entries"][key]
+                    if entry["order"] != slot:
+                        entry.update(order=slot, updatedAt=now)
+                        entry.pop("blockedReason", None)
+                changed = True
+            if changed:
+                self._save(state)
+            return self._public(state)
 
     def release(self, entry_id: str) -> dict[str, Any]:
         """Authorize one held entry to run when it reaches the front."""
@@ -780,9 +873,17 @@ class QueueManager:
             raise ValueError("Provide a boolean pause value.")
         with self._locked() as state:
             changed = self._reconcile(state, recover_unlaunched=True)
+            if paused and (active := state["activeId"]):
+                entry = self._entry(state, active)
+                if entry["status"] == "running" and "pauseAttempt" not in entry:
+                    run = self._claimed_run(entry)
+                    if run and run["status"] in {"running", "starting"}:
+                        entry["pauseAttempt"] = run["attemptId"]
+                        changed = True
             if changed or state["paused"] != paused:
                 state["paused"] = paused
                 self._save(state)
+            # Dispatch also delivers the saved request after a service restart.
             return self._public(state)
 
     @staticmethod
@@ -804,12 +905,26 @@ class QueueManager:
         run_status = run["status"]
         status = "running" if run_status in {"starting", "running"} else run_status
         fields = {"runId": run["id"], "status": status, "runStatus": run_status}
+        if run.get("attemptId"):
+            fields["attemptId"] = run["attemptId"]
         for key in ("completionReason", "completedIteration"):
             if key in run:
                 fields[key] = run[key]
         if isinstance(run.get("error"), str):
             fields["error"] = run["error"]
         changed = any(entry.get(key) != value for key, value in fields.items())
+        if "pauseAttempt" in entry:
+            if (run.get("attemptId") == entry["pauseAttempt"] and run_status == "stopped"
+                    and run.get("completionReason") != "forceStopped"):
+                # Reuse this entry, its original place, run directory and study/phase identity.
+                fields["status"] = "pending"
+                changed = True
+            elif run.get("attemptId") != entry["pauseAttempt"] or run_status not in ACTIVE:
+                entry.pop("pauseAttempt")
+                changed = True
+                if run_status in ACTIVE:
+                    for key in ("completedIteration", "completionReason", "error"):
+                        entry.pop(key, None)
         if changed:
             entry.pop("blockedReason", None)
             entry.update(fields, updatedAt=run.get("updatedAt") or process.timestamp())
@@ -818,13 +933,23 @@ class QueueManager:
             changed = True
         return changed
 
+    def _claimed_run(self, entry: dict) -> dict | None:
+        if "runId" in entry:
+            return self.runs.launch_status(entry["runId"])
+        if "resumeStep" in entry:
+            run = self.runs.launch_status(entry["sourceRunId"])
+            if run and run.get("queueEntryId") == entry["id"]:
+                return run
+        # Also recovers claims made by older services that created a separate run.
+        return self.runs.requested_run(QUEUE_REQUEST_PREFIX + entry["id"])
+
     def _reconcile(
         self, state: dict[str, Any], *, recover_unlaunched: bool = False
     ) -> bool:
         if (claimed := state["activeId"]) is None:
             return False
         entry = self._entry(state, claimed)
-        run = self.runs.requested_run(QUEUE_REQUEST_PREFIX + claimed)
+        run = self._claimed_run(entry)
         if run is not None:
             return self._attach(state, entry, run)
         if not recover_unlaunched:
@@ -842,6 +967,10 @@ class QueueManager:
             return None
         with self._locked() as state:
             changed = self._reconcile(state, recover_unlaunched=True)
+            if active := state["activeId"]:
+                current = self._entry(state, active)
+                if current.get("pauseAttempt") and current["status"] == "running":
+                    self.runs.pause_queue_attempt(current["runId"], current["pauseAttempt"])
             if state["paused"] or state["activeId"] is not None:
                 if changed:
                     self._save(state)
@@ -869,6 +998,21 @@ class QueueManager:
 
             entry_id = entry["id"]
             request_id = QUEUE_REQUEST_PREFIX + entry_id
+            if "pauseAttempt" in entry:
+                state["activeId"] = entry_id
+                self._save(state)
+                try:
+                    run = self.runs.resume_queue_attempt(entry["runId"], entry["pauseAttempt"])
+                except RunBusyError as error:
+                    state["activeId"] = None
+                    entry["blockedReason"] = str(error)
+                except (ValueError, OSError) as error:
+                    state.update(paused=True, activeId=None)
+                    entry["blockedReason"] = f"Could not resume the paused run: {error}"
+                else:
+                    self._attach(state, entry, run)
+                self._save(state)
+                return entry
             try:
                 saved = self._saved_recipe(entry)
                 launch = {}
@@ -895,9 +1039,10 @@ class QueueManager:
             state["activeId"] = entry_id
             self._save(state)
             try:
-                run = self.runs.start(
-                    text, request_id=request_id, queue_entry_id=entry_id, **launch
-                )
+                if "resumeStep" in entry:
+                    run = self.runs.launch_queued_continuation(entry, text)
+                else:
+                    run = self.runs.start(text, request_id=request_id, queue_entry_id=entry_id, **launch)
             except RunBusyError as error:
                 state["activeId"] = None
                 entry.update(blockedReason=str(error), updatedAt=process.timestamp())
@@ -906,7 +1051,7 @@ class QueueManager:
             except (OSError, ValueError) as error:
                 # A failure after run publication must still reconcile against
                 # the owned run rather than placing a second launch.
-                if run := self.runs.requested_run(request_id):
+                if run := self._claimed_run(entry):
                     self._attach(state, entry, run)
                 else:
                     state["activeId"] = None

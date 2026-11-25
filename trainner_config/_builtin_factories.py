@@ -106,10 +106,11 @@ BUILTINS: dict[str, dict[str, tuple[str, dict[str, str]]]] = {
         "perceptual_anime_loss": ("2475516c0b77dec3cfbb4488e0cc69c6a6d9d5f1d69f273fb4ba67b8a88665d1", {"loss": "perceptualanimeloss"}),
         "perceptual_fp16_loss": ("d37976fcdae8c36365e51e72e1d247afeba94ff7423afe43109e28f9bca1e461", {"loss": "perceptualfp16loss"}),
         "perceptual_loss": ("6c821660c8502b3c76bd06ecb45ad6a81c858c2ff689e79bd137af2c24032b90", {"loss": "perceptualloss"}),
+        "quality_loss": ("1a3f5b87f36586b65b5f31bf9f949fca5290b787240afc7bc3a27d9d2566dbf2", {"loss": "admloss butteraugliloss chromawaveletloss ssimulacra2loss vifloss vmafloss"}),
         "sobel_edge_loss": ("24909c9ccbbed550bda0c951b1a9006f356249adfff7e232a89a3f5d3236f03d", {"loss": "sobeledgeloss"}),
         "spark_loss": ("9b94d0d4d72898f6e8bf15058b98771ccefb42ea37bdae32caf62a168aaab5dd", {"loss": "sparkloss"}),
         "structure_texture_loss": ("20ae59b3462797c35a397150e67764a3b175bd3219c3bf81115b3d0ad2dce7ba", {"loss": "structuretextureloss"}),
-        "vosr_loss": ("7937c9b17e452f6901b56a486decb2c2990164946e84108d2d9bf5e6fd6042e2", {"loss": "vosrloss"}),
+        "vosr_loss": ("ffbc92c7730b39946d34e11a6f76ee9a34a9dc8fb2b1d4c42aa9b2fda3884d5f", {"loss": "vosrloss"}),
     },
     "data": {
         "base_dataset": ("8fdbd4dfb4823d2566498c81ea831a6feda76b7ea37310d6620af266a61bf1a6", {"dataset": "basedataset"}),

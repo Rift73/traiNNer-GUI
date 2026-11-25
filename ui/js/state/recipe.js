@@ -106,6 +106,19 @@ function setYaml(yaml, { immediate = false } = {}) {
   else scheduleCheck();
 }
 
+// Older editor versions emitted entire object lists on one line. Reformat the
+// open draft once, without racing raw edits or changing the saved file.
+async function expandCompactDraft(yaml) {
+  if (!/^\s*(?:(?:-\s+)?[\w.-]+:\s*)?(?:\[\s*\{|\{[^\n}]+:|\[[^\n]{80,}\])/m.test(yaml)) return;
+  try {
+    const result = await api.render(yaml, []);
+    if (store.get().yaml === yaml && typeof result.yaml === 'string') setYaml(result.yaml);
+  } catch (error) {
+    // Invalid pasted drafts remain editable. Preflight displays their parser errors.
+    if (!(error instanceof ApiError)) throw error;
+  }
+}
+
 /**
  * Open a recipe document.
  * @param {{path?: string|null, name?: string, yaml: string}} doc
@@ -126,6 +139,7 @@ function load(doc, { label = '', saved = true } = {}) {
   });
   saveDraft();
   scheduleCheck.flush();
+  void expandCompactDraft(doc.yaml);
 }
 
 /** Saved recipes live under recipes/; templates (options/…) are read-only starting points. */
@@ -142,8 +156,8 @@ async function openPath(path, options) {
  * Change options through the backend so comments and layout survive.
  * Each edit sets a value (`{path, value}`) or deletes a key or list item (`{path, remove: true}`).
  * A list cannot be extended by index: to add an item, set the whole list (`{path: listPath, value: [...]}`).
- * A new key is written as the first key of its mapping; a whole list or mapping that is set is written
- * on one line and loses the comments inside it.
+ * A new key is written as the first key of its mapping; replaced collections use indented YAML. Comments
+ * outside the replaced value remain in place.
  * @param {Array<{path: Array<string|number>, value: any} | {path: Array<string|number>, remove: true}>} edits at most 128
  * @returns {Promise<void>} rejects with ApiError when the backend refuses the edit
  */
@@ -222,6 +236,7 @@ function restore() {
     revision: typeof draft.revision === 'string' ? draft.revision : null,
   });
   scheduleCheck.flush();
+  void expandCompactDraft(draft.yaml);
   return true;
 }
 

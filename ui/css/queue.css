@@ -143,6 +143,118 @@
   border-left: 2px solid var(--err);
 }
 
+/* What still works when a run cannot be extended: a lead line and a short bulleted list (dialog). */
+.queue__options {
+  display: grid;
+  gap: var(--s1);
+}
+
+.queue__options > p {
+  margin: 0;
+}
+
+.queue__options-list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding-left: var(--s4);
+  list-style: disc;
+}
+
+/* ───────── the line: moving a released entry that waits ───────── */
+
+/* A row of the line keeps a strip at its end for the grip. */
+.queue__row.queue__row--movable {
+  position: relative;
+  padding-right: calc(var(--control-h) + var(--s3));
+}
+
+/* The grip. The whole strip takes the press; a finger on it never scrolls the page, a finger anywhere
+   else on the row scrolls as usual. Pointer only: "Move up" and "Move down" are the other way. */
+.queue__handle {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: calc(var(--control-h) + var(--s2));
+  color: var(--ink-3);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Two columns of three dots. */
+.queue__handle::before {
+  content: '';
+  width: 12px;
+  height: 18px;
+  background: radial-gradient(circle, currentColor 1.5px, transparent 2px) 0 0 / 6px 6px;
+}
+
+.queue__handle:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+/* The held row is one lifted sheet: its grip keeps the ink, not the wash. */
+.queue--dragging .queue__handle {
+  background: transparent;
+}
+
+.queue__moves {
+  display: inline-flex;
+  gap: var(--s1);
+}
+
+.queue__move {
+  justify-content: center;
+  min-width: var(--control-sm, 28px);
+  padding: 0;
+}
+
+/* At an end of the line: it stays focusable (the focus follows the entry there) and does nothing. */
+.queue__move[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* While a row is held: the others make room, the held one follows the pointer above them. */
+.queue--dragging,
+.queue--dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.queue--dragging .queue__row--movable {
+  transition: transform 140ms ease;
+}
+
+.queue--dragging .queue__row--dragging {
+  z-index: 2;
+  background: var(--raised);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+  transition: none;
+}
+
+/* The request of a move is out: no second move until it has answered. */
+.queue--moving .queue__handle,
+.queue--moving .queue__move {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.queue__move-problem {
+  padding: 0 var(--s3) var(--s2);
+}
+
+.queue__move-problem:empty {
+  display: none;
+}
+
 /* Curriculum phases: link to the curriculum under a row, pinned handoff files in the entry detail. */
 .queue__curriculum-link {
   justify-self: start;

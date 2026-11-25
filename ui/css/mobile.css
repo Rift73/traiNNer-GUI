@@ -279,6 +279,22 @@ h2,
     white-space: nowrap;
   }
 
+  /* A training run's sentence on one line: its name gives way and its count stays, since the count is what
+     is being followed. */
+  :root:not([data-level="home"]) .next__text--count {
+    display: flex;
+  }
+
+  :root:not([data-level="home"]) .next__lead {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  :root:not([data-level="home"]) .next__count {
+    flex: none;
+  }
+
   :root:not([data-level="home"]) .next > .btn {
     flex: none;
     height: var(--control-sm);
@@ -421,6 +437,21 @@ h2,
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* As upright on one line: the run's name gives way, its count stays. */
+  .next__text--count {
+    display: flex;
+  }
+
+  .next__lead {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .next__count {
+    flex: none;
   }
 
   .next > .btn {

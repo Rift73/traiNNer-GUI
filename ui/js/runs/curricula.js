@@ -1836,7 +1836,7 @@ export function mountCurriculaView(host, { curriculumId = null } = {}) {
       // A released phase trains as soon as the trainer is free: the phone edition asks first.
       const ok = await confirmOnPhone({
         title: `Release ${where}?`,
-        body: queue.get().paused ? 'The queue is paused, so it waits until you continue the queue. Then it starts when the trainer is free.' : 'It starts when the trainer is free, after the entries released before it.',
+        body: queue.get().paused ? 'The queue is paused, so it waits until you continue the queue. Then it starts when the trainer is free.' : 'It starts when the trainer is free, after the released entries ahead of it in line.',
         confirmLabel: 'Release',
       });
       if (!ok) return;

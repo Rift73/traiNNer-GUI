@@ -60,7 +60,7 @@ function datasetsLede(task, fallback, wholeImages = false) {
   if (restorationWords(words)) return wholeImages ? fallback.replace('how they are cropped and batched', how) : fallback;
   return `The ${folderNoun(words.lq)} and ${folderNoun(words.gt)} folders used for training and validation, and ${how}.`;
 }
-const ONE_LINE = 'Adding rewrites this list on one line; comments inside it are lost.';
+const REPLACE_LIST_NOTE = 'Adding an item replaces the list and removes comments inside it.';
 const NEUFLOW_RDUAL = "NeuFlow v2 weights for RDUAL's frozen motion estimator. Optional: when the generator checkpoint does not include them and this is empty, the first training downloads the official weights once and reuses them. A path set here must exist.";
 /** The three starts of an RDUAL training: [case, ...rest], a string in `` is an option name. */
 const RDUAL_CASES = [
@@ -1199,7 +1199,7 @@ export function mountForm(el) {
         picker.el,
         h('button', { class: 'btn btn--sm', type: 'button', onclick: add }, 'Add schedule'),
       ),
-      list.length ? h('p', { class: 'fld__desc form__help' }, 'Adding or moving a schedule rewrites this list on one line; comments inside it are lost.') : null,
+      list.length ? h('p', { class: 'fld__desc form__help' }, 'Adding or moving a schedule replaces the list and removes comments inside it.') : null,
     );
   }
 
@@ -1928,7 +1928,10 @@ export function mountForm(el) {
       updaters.push((c) => {
         off.hidden = getAt(c, [...base, 'loss_weight']) !== 0;
       });
-      const others = Object.keys(props).filter((k) => k !== 'type' && k !== 'loss_weight');
+      // Managed VOSR assets need no paths. Keep explicit overrides editable in older recipes.
+      const others = Object.keys(props).filter((k) =>
+        k !== 'type' && k !== 'loss_weight' &&
+        (type !== 'vosrloss' || (k !== 'engine_dir' && k !== 'plugin') || k in v));
       const unknown = Object.keys(v).filter((k) => k !== 'type' && k !== 'loss_weight' && !(k in props));
       const weightKind = props.loss_weight ? schema.kind(props.loss_weight) : { ...kindFromValue(v.loss_weight ?? 0), kind: 'number' };
       const remove = h(
@@ -1978,6 +1981,9 @@ export function mountForm(el) {
             remove,
           ),
           blockTarget(base),
+          type === 'vosrloss'
+            ? h('p', { class: 'fld__desc' }, 'On an RTX 5090 with TensorRT 11.4.0.106, the engines and plugin download automatically on first use.')
+            : null,
           leaf([...base, 'loss_weight'], 'loss_weight', weightKind),
           own ?? (others.length || unknown.length ? opts.el : null),
         ),
@@ -2043,7 +2049,7 @@ export function mountForm(el) {
         add,
         addError,
       ),
-      losses.length ? h('p', { class: 'fld__desc form__help' }, ONE_LINE) : null,
+      losses.length ? h('p', { class: 'fld__desc form__help' }, REPLACE_LIST_NOTE) : null,
       losses.length ? measureLosses() : null,
     );
     return rows;

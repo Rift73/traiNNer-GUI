@@ -1,18 +1,24 @@
 // The training queue, kept fresh by polling GET /api/queue.
 // An entry is a saved copy of a recipe. It starts "held": nothing runs until the person releases it.
-// Released entries start one at a time, in release order, when the trainer is free.
+// Released entries wait in a line and start one at a time, from its front, when the trainer is free. A
+// release joins the end of the line; the person can move a waiting entry to another place in it.
 
 import { api, newRequestId } from '../api.js';
 import { createStore } from '../store.js';
 
 const store = createStore({
-  /** true = no further entry is started (one that is training continues) */
+  /** true = stop the active queue run at a checkpoint and suspend dispatch */
   paused: false,
   /** id of the entry being started or trained, or null */
   activeId: null,
   /**
    * [{id, name, status, groupId, recipeDigest, createdAt, updatedAt, recipePath?, sourceRunId?, order?,
-   *   blockedReason?, runId?, runStatus?, error?, issues?}] in creation order
+   *   blockedReason?, runId?, runStatus?, error?, issues?, sourceAttemptId?, resumeStep?, additionalIterations?}]
+   * in creation order.
+   * A continuation (resumeStep = iteration of the checkpoint it continues stopped run sourceRunId from)
+   * is saved released and starts another attempt of the same run; one that extends a completed run also carries
+   * additionalIterations (how many iterations it trains beyond resumeStep). A replay carries sourceRunId
+   * without resumeStep.
    */
   entries: [],
   /** 'idle' | 'loading' | 'ready' | 'error' */
@@ -43,12 +49,37 @@ export function entryStatus(status) {
   return { kind: '', label: word ? word.charAt(0).toUpperCase() + word.slice(1) : 'Unknown', open: false, waiting: false, active: false };
 }
 
+/** A continuation of a stopped run (it carries resumeStep); a replay carries sourceRunId only. */
+export const isContinuation = (entry) => entry?.resumeStep !== undefined && entry?.resumeStep !== null;
+
+/** "1st", "2nd", "11th", … */
+export function ordinal(n) {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th';
+  return `${n}${suffix}`;
+}
+
+/** "Next", "2nd in line", … for released entries among `open` (queue.open() order); '' otherwise. */
+export function placeWords(entry, open = queue.open()) {
+  if (entry?.status !== 'pending') return '';
+  const index = open.filter((item) => item.status === 'pending').findIndex((item) => item.id === entry.id);
+  if (index < 0) return '';
+  return index === 0 ? 'Next' : `${ordinal(index + 1)} in line`;
+}
+
+/** Status and place of an entry in words, lowercased: "released, next", "training". */
+export function statusPlaceWords(entry, open = queue.open()) {
+  const place = placeWords(entry, open);
+  return [entryStatus(entry?.status).label.toLowerCase(), place.toLowerCase()].filter(Boolean).join(', ');
+}
+
 /** What each action does and from which states the backend accepts it. */
 export const ENTRY_ACTIONS = {
   release: { label: 'Release', from: ['held'], done: 'Released' },
   hold: { label: 'Put on hold', from: ['pending'], done: 'Put on hold' },
   cancel: { label: 'Cancel entry', from: ['held', 'pending'], done: 'Cancelled' },
-  stop: { label: 'Stop training', from: ['running', 'stopping'], done: 'Stop requested for' },
+  forceStop: { label: 'Force stop', from: ['stopping'], done: 'Force stop requested for' },
+  stop: { label: 'Stop training', from: ['running'], done: 'Stop requested for' },
 };
 
 let timer = 0;
@@ -79,12 +110,18 @@ function accept(snapshot) {
   });
 }
 
+// Raised when an answer replaces the whole list (a reorder) or a fresh reading is wanted: a poll that was
+// already out then carries an older list and is dropped, so it cannot put a moved entry back.
+let epoch = 0;
+
 async function refresh() {
   if (inFlight) return inFlight;
   if (store.get().phase === 'idle') store.set({ phase: 'loading' });
   inFlight = (async () => {
+    const started = epoch;
     try {
-      accept(await api.queue());
+      const snapshot = await api.queue();
+      if (started === epoch) accept(snapshot);
     } catch (error) {
       store.set({ phase: 'error', error: error.message });
     } finally {
@@ -93,6 +130,13 @@ async function refresh() {
     }
   })();
   return inFlight;
+}
+
+/** Read the queue again without settling for a poll that is already out (its list may be the older one). */
+async function reload() {
+  epoch += 1;
+  if (inFlight) await inFlight;
+  return refresh();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -144,11 +188,13 @@ export const queue = {
       .entries.filter((entry) => !entryStatus(entry.status).open)
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   },
+  /** The line: released entries that wait, in the order they will start. */
+  line: () => queue.open().filter((entry) => entry.status === 'pending'),
   held: () => store.get().entries.filter((entry) => entry.status === 'held'),
   pending: () => store.get().entries.filter((entry) => entry.status === 'pending'),
   byId: (id) => store.get().entries.find((entry) => entry.id === id) ?? null,
-  /** The queue entry that started run `runId`, if any. */
-  forRun: (runId) => store.get().entries.find((entry) => entry.runId === runId) ?? null,
+  /** The most recent launched entry for this run. */
+  forRun: (runId) => store.get().entries.filter((entry) => entry.runId === runId).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] ?? null,
 
   /**
    * Save a copy of this recipe text in the queue, on hold.
@@ -167,6 +213,48 @@ export const queue = {
     upsert(entry);
     refresh();
     return entry;
+  },
+  /**
+   * Queue a released entry that continues stopped run `runId` from its newest checkpoint (or get the open
+   * one). With `additionalIterations` (a positive whole number): extend completed run `runId` from its final
+   * training state by that many iterations.
+   */
+  async resume(runId, { requestId = newRequestId(), additionalIterations = null } = {}) {
+    const extra = additionalIterations === null || additionalIterations === undefined ? undefined : { additionalIterations };
+    const entry = await api.queueResume(runId, requestId, extra);
+    upsert(entry);
+    refresh();
+    return entry;
+  },
+  /** The continuation of run `runId` that has not finished, or null. */
+  continuationOf: (runId) =>
+    store.get().entries.find((entry) => entryStatus(entry.status).open && (
+      (entry.pauseAttempt && entry.runId === runId) || (isContinuation(entry) && entry.sourceRunId === runId)
+    )) ?? null,
+  /** Every continuation of run `runId`, newest first. */
+  continuationsOf: (runId) =>
+    store
+      .get()
+      .entries.filter((entry) => isContinuation(entry) && entry.sourceRunId === runId)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+  /**
+   * Put the line in another order. `expected`: the ids of the line as the person saw it; `order`: the same
+   * ids as wanted. The answer is the whole queue. A refusal (the line changed meanwhile) is thrown after the
+   * queue has been read again, so the store already shows the line as it is.
+   */
+  async reorder(expected, order) {
+    epoch += 1;
+    let snapshot;
+    try {
+      snapshot = await api.queueReorder(expected, order);
+    } catch (error) {
+      await reload();
+      throw error;
+    }
+    epoch += 1;
+    accept(snapshot);
+    schedule();
+    return snapshot;
   },
   /** Allow a held entry to start when the trainer is free. */
   release: (id) => act('release', id),

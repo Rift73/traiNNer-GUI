@@ -674,6 +674,12 @@ class BaseModel:
     def settle_training_updates(self) -> None:
         """Wait for every update whose outcome is still on the device."""
 
+    def confirmed_training_iteration(self, iteration: int) -> int:
+        """Read the committed count after the trainer accounts for this attempt."""
+        # Deferred SR counts updates provisionally. The pending outcomes and
+        # resolved rejections still owed to the trainer cannot contribute yet.
+        return iteration - len(self._deferred_updates) - self._owed_rejection_reports
+
     def confirm_training_step(self) -> bool:
         """At a published iteration, settle and charge one unpaid rejection to this attempt."""
         self.settle_training_updates()

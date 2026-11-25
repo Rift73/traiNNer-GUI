@@ -997,7 +997,7 @@ export function mountStudiesView(host, { studyId = null } = {}) {
       body: h(
         'div',
         null,
-        h('p', null, `${fmt.plural(n, 'entry', 'entries')} will be authorised to train. They run one at a time, in the order they are released, whenever the trainer is free.`),
+        h('p', null, `${fmt.plural(n, 'entry', 'entries')} will be authorised to train. They join the end of the line in this order and run one at a time, whenever the trainer is free. Entries in the line can be moved in the queue.`),
         queue.get().paused ? h('p', null, 'The queue is paused, so none of them starts until you continue the queue.') : null,
       ),
       confirmLabel: `Release ${fmt.plural(n, 'entry', 'entries')}`,

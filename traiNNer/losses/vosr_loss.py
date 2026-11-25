@@ -139,14 +139,22 @@ class VosrTeacher:
     """VOSR 2.0's restoration of an RGB LR batch, with fresh noise per sample.
 
     Args:
-        engine_dir (str): folder with the 512 px FP8 stage engines (<stage>.plan).
-        plugin (str): the vosr2_qkv TensorRT plugin library.
+        engine_dir (str): optional local engine override. Omit for first-use download.
+        plugin (str): optional local plugin override. Omit for first-use download.
         lanes (int): windows run side by side.
     """
 
-    def __init__(self, engine_dir: str, plugin: str, lanes: int = 2) -> None:
+    def __init__(self, engine_dir: str | None = None, plugin: str | None = None, lanes: int = 2) -> None:
         # Imported here: every *_loss.py module loads at start-up, TensorRT only when VOSR is configured
-        from traiNNer.losses import vosr2_trt
+        try:
+            from traiNNer.losses import vosr2_trt
+        except ModuleNotFoundError as exc:
+            if exc.name != "tensorrt":
+                raise
+            raise RuntimeError(
+                "VOSR requires the Linux TensorRT Python runtime. The hosted RTX 5090 "
+                "engines use TensorRT 11.4.0.106. Engines and the plugin download on first use."
+            ) from exc
 
         self.window = vosr2_trt.Vosr2Window(engine_dir, plugin, lanes=lanes)
         self.pad_to_window = vosr2_trt.pad_to_window
@@ -181,8 +189,8 @@ class VOSRLoss(nn.Module):
     Args:
         loss_weight (float): compares directly with ganloss's loss_weight: equal weights give equal pull, 0.1
             against a GAN weight of 0.02 gives 5x the GAN's pull. Must be positive.
-        engine_dir (str): folder with the 512 px FP8 stage engines (<stage>.plan).
-        plugin (str): the vosr2_qkv TensorRT plugin library.
+        engine_dir (str): optional local engine override. Omit for first-use download.
+        plugin (str): optional local plugin override. Omit for first-use download.
         criterion (str): 'charbonnier', 'l1' (pixels) or 'perceptual' (VGG19 features, as perceptualloss).
         perceptual_options (dict): with criterion 'perceptual', perceptualloss's options other than loss_weight
             (criterion, stride_fd, w_lambda, layer_weights, ...). Its criterion 'charbonnier' (default) or 'l1'
@@ -197,8 +205,8 @@ class VOSRLoss(nn.Module):
     def __init__(
         self,
         loss_weight: float,
-        engine_dir: str,
-        plugin: str,
+        engine_dir: str | None = None,
+        plugin: str | None = None,
         criterion: str = "charbonnier",
         perceptual_options: dict[str, Any] | None = None,
         lanes: int = 2,

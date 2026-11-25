@@ -4,14 +4,11 @@ This fork supports two distinct uses of a VOSR 2 restoration. Neither mode is en
 
 ## Runtime assets
 
-The teacher is the fixed 512 x 512 FP8 TensorRT window runner in
-`traiNNer/losses/vosr2_trt.py`. It requires CUDA, a compatible TensorRT Python
-runtime, the `vosr2_qkv` plugin, and ten compatible stage engines:
-`encoder_pre`, `encoder_qkv`, `encoder_post`, `decoder_pre`,
-`decoder_qkv`, `decoder_post`, `attention_grouped`, `dino`, `dit_kv`,
-and `dit_cached`, each with a `.plan` suffix. These binaries and model
-weights are not distributed in this repository. TensorRT is imported only
-when a teacher is constructed; ordinary training does not require it.
+On Linux x86-64 with an RTX 5090 and TensorRT 11.4.0.106, enabling VOSR downloads ten fixed-window FP8 engines and their matching Linux plugin on first use. Both `vosrloss` and `train.vosr_target` use the same cache. Normal training needs neither the assets nor TensorRT.
+
+The versioned bundle is hosted on Feral. The first download is 1.41 GB. Only the manifest and zstd-compressed binaries are cached in `$XDG_CACHE_HOME/trainner` (default `~/.cache/trainner`). The trainer verifies SHA-256, unpacks one engine at a time into host RAM and hands it to TensorRT. TensorRT makes the engine weights resident on the GPU. Linux loads the plugin from an anonymous in-memory file. Allow host memory for the largest serialized engine (1.20 GB) alongside TensorRT's own allocations.
+
+Other GPU or TensorRT builds require compatible local assets. Existing recipes can still specify `engine_dir` and `plugin` as overrides. [Hosted build manifest](https://rift.steropes.feralhosting.com/vosr2-linux-56ec71afc098/manifest.json)
 
 The degraded RGB LR is quantized to 8-bit, enlarged with Pillow-compatible
 bicubic arithmetic, reflect-padded to 512, and restored with fresh noise.
@@ -27,8 +24,6 @@ Add to the existing `train.losses` list:
 ```yaml
 - type: vosrloss
   loss_weight: 0.1
-  engine_dir: /path/to/vosr2-512-engines
-  plugin: /path/to/vosr2_qkv.so
   criterion: charbonnier
   lanes: 2
   still_frames: 2
@@ -63,8 +58,6 @@ output_pixel_format: rgb
 otf_hf_noise_prob: 0.0
 train:
   vosr_target:
-    engine_dir: /path/to/vosr2-512-engines
-    plugin: /path/to/vosr2_qkv.so
     lanes: 2
 ```
 

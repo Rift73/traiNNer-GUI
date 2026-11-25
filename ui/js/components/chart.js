@@ -2,7 +2,7 @@
 //   const chart = createChart(host, { title, height, scaleToggle, smoothing });
 //   chart.update({ series, xLabel });  chart.destroy();
 // Options: `scaleToggle: false` drops the Linear / Log switch, `smoothing: false` drops the smoothing
-// slider (both default to true; with both false there is no control bar). X ticks: see xTicks().
+// slider. Axis ranges are available on every chart. X ticks: see xTicks().
 // series: [{name, points: [{x, y}]}] with points sorted by x. A y of null (or any non-finite value)
 // is a gap: the line breaks there, it is never drawn as zero (see runs/metrics.js: historyPoints).
 // update() is cheap and keeps hidden series, y scale, smoothing and the cursor.
@@ -138,16 +138,18 @@ export function xTicks(x0, x1, plotW, { integer = false } = {}) {
  * @returns {{min: number, max: number, ticks: number[]}}
  */
 export function logTicks(min, max) {
-  const lo = 10 ** Math.floor(Math.log10(min));
-  let hi = 10 ** Math.ceil(Math.log10(max));
-  if (hi === lo) hi = lo * 10;
+  if (!(min > 0) || !Number.isFinite(max)) return { min: 1, max: 10, ticks: [1, 10] };
+  const lo = 10 ** Math.floor(Math.log10(min)) || min;
+  let hi = Math.min(Number.MAX_VALUE, 10 ** Math.ceil(Math.log10(max)));
+  if (hi === lo) hi = Math.min(Number.MAX_VALUE, lo * 10);
   const decades = Math.round(Math.log10(hi / lo));
   const mults = decades <= 2 ? [1, 2, 5] : [1];
   const ticks = [];
-  for (let d = lo; d <= hi * 1.0001; d *= 10) {
+  for (let exp = Math.floor(Math.log10(min)); exp <= Math.ceil(Math.log10(max)) + (min === max ? 1 : 0); exp++) {
+    const d = 10 ** exp;
     for (const m of mults) {
       const v = Number((d * m).toPrecision(6));
-      if (v <= hi * 1.0001) ticks.push(v);
+      if (v > 0 && Number.isFinite(v) && v <= hi * 1.0001) ticks.push(v);
     }
   }
   return { min: lo, max: hi, ticks };
@@ -160,7 +162,10 @@ export function formatTick(v, step) {
   if (v === 0) return '0';
   const abs = Math.abs(v);
   // The step decides the notation so one axis never mixes "5000" with "10K" or "0.001" with "2e-4".
-  if (abs >= 1e4 || (step && step >= 1000)) return compact.format(v);
+  if (abs >= 1e4 || (step && step >= 1000)) {
+    const label = compact.format(v);
+    if (!step || (compact.format(v - step) !== label && compact.format(v + step) !== label)) return label;
+  }
   if (abs < 1e-3 || (step && step < 1e-3 && abs < 1)) {
     const digits = step ? clamp(Math.floor(Math.log10(abs)) - Math.floor(Math.log10(step)), 0, 6) : 2;
     return v.toExponential(digits).replace(/\.?0+e/, 'e').replace('e+', 'e');
@@ -265,23 +270,42 @@ function svg(tag, attrs) {
   return el;
 }
 
+// When one end is automatic and all measurements fall outside the fixed end,
+// keep the requested bound and leave a small, ordered interval on its other side.
+function axisWindow(low, high, fixedMin, fixedMax, log = false) {
+  let min = fixedMin ?? low;
+  let max = fixedMax ?? high;
+  if (Number.isFinite(min) && Number.isFinite(max) && min <= max &&
+      (min < max || (fixedMin === null && fixedMax === null))) return [min, max];
+  if (Number.isFinite(min) && fixedMax === null) {
+    max = log ? min * 1.1 : min + Math.max(Math.abs(min) * 0.1, 1);
+  } else if (Number.isFinite(max) && fixedMin === null) {
+    min = log ? max / 1.1 : max - Math.max(Math.abs(max) * 0.1, 1);
+  } else {
+    return log ? [1, 10] : [0, 1];
+  }
+  return [min, max];
+}
+
 // ───────── component ─────────
 
 /**
  * @param {HTMLElement} host
- * @param {{title?: string, height?: number, scaleToggle?: boolean, smoothing?: boolean}} [options]
+ * @param {{title?: string, height?: number, scaleToggle?: boolean, smoothing?: boolean, onXRangeChange?: Function}} [options]
  *   scaleToggle: false leaves out the Linear / Log switch (the scale stays linear);
  *   smoothing: false leaves out the smoothing slider (lines are never smoothed). Both default to true.
  */
-export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggle = true, smoothing: smoothingControl = true } = {}) {
+export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggle = true, smoothing: smoothingControl = true, onXRangeChange } = {}) {
   const id = uid('chart');
   const state = {
     series: [],
+    markers: [],
     xLabel: 'Iteration',
     hidden: new Set(),
     slots: new Map(), // name -> colour slot, assigned once so a series keeps its colour
     log: false,
     smoothing: 0,
+    bounds: { xMin: null, xMax: null, yMin: null, yMax: null },
     cursorX: null, // data x of the cursor, kept across updates
     pointerInside: false,
     width: 0,
@@ -307,16 +331,81 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
       draw();
     },
   });
-  // Controls a small chart does not need are left out (options scaleToggle / smoothing).
-  const bar =
-    scaleToggle || smoothingControl
-      ? h(
-          'div',
-          { class: 'chart__bar' },
-          scaleToggle ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Y scale' }, linearBtn, logBtn) : null,
-          smoothingControl ? [h('label', { class: 'chart__smooth', for: smoothId }, 'Smoothing'), smoothInput, smoothOut] : null,
-        )
-      : null;
+  const rangeFields = {};
+  const fields = Object.keys(state.bounds).map((key) => {
+    const axis = key[0].toUpperCase();
+    const end = key.endsWith('Min') ? 'minimum' : 'maximum';
+    const input = h('input', { class: 'input num', id: id + key, type: 'number',
+      step: axis === 'X' ? '1' : 'any', min: axis === 'X' ? '0' : null,
+      inputmode: axis === 'X' ? 'numeric' : 'decimal', placeholder: 'Auto' });
+    rangeFields[key] = input;
+    return h('label', { for: input.id }, `${axis} ${end}`, input);
+  });
+  const rangeError = h('p', { class: 'chart__range-error', role: 'alert', hidden: true });
+  const rangeButton = h('button', { type: 'button', class: 'btn btn--sm', 'aria-controls': id + '-bounds',
+    'aria-expanded': 'false', onclick: () => {
+      rangeForm.hidden = !rangeForm.hidden;
+      rangeButton.setAttribute('aria-expanded', String(!rangeForm.hidden));
+    } }, 'Axis ranges');
+  const rangeForm = h('form', { class: 'chart__bounds', id: id + '-bounds', hidden: true,
+    'aria-label': title + ' axis ranges', novalidate: true,
+    onsubmit: (event) => { event.preventDefault(); applyRanges(); } },
+    h('div', { class: 'chart__bound-fields' }, fields),
+    h('div', { class: 'chart__bar' },
+      h('button', { type: 'submit', class: 'btn btn--sm' }, 'Apply'),
+      h('button', { type: 'button', class: 'btn btn--sm', onclick: () => {
+        for (const input of Object.values(rangeFields)) input.value = '';
+        applyRanges();
+      } }, 'Reset to auto')),
+    rangeError);
+  const bar = h('div', { class: 'chart__bar' },
+    scaleToggle ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Y scale' }, linearBtn, logBtn) : null,
+    smoothingControl ? [h('label', { class: 'chart__smooth', for: smoothId }, 'Smoothing'), smoothInput, smoothOut] : null,
+    rangeButton);
+
+  function updateRangeButton() {
+    const custom = Object.values(state.bounds).some((v) => v !== null);
+    rangeButton.textContent = custom ? 'Axis ranges · Custom' : 'Axis ranges';
+  }
+
+  function applyRanges() {
+    const next = {};
+    function invalid(key, message) {
+      const input = rangeFields[key];
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+      rangeError.textContent = message;
+      rangeError.hidden = false;
+    }
+    for (const [key, input] of Object.entries(rangeFields)) {
+      input.removeAttribute('aria-invalid');
+      const value = input.value === '' ? null : input.valueAsNumber;
+      if (input.validity.badInput || (value !== null && !Number.isFinite(value))) {
+        return invalid(key, 'Enter a number or leave the field blank for Auto.');
+      }
+      if (key[0] === 'x' && value !== null && (!Number.isSafeInteger(value) || value < 0)) {
+        return invalid(key, 'Iteration bounds must be non-negative whole numbers.');
+      }
+      if (key[0] === 'y' && value !== null && state.log && value <= 0) {
+        return invalid(key, 'Log scale needs positive Y bounds.');
+      }
+      next[key] = value;
+    }
+    for (const axis of ['x', 'y']) {
+      const [min, max] = [next[axis + 'Min'], next[axis + 'Max']];
+      if (min !== null && max !== null && (min >= max || !Number.isFinite(max - min))) {
+        return invalid(axis + 'Max', `Choose a ${axis.toUpperCase()} maximum greater than its minimum within a finite range.`);
+      }
+    }
+    rangeError.hidden = true;
+    const xChanged = next.xMin !== state.bounds.xMin || next.xMax !== state.bounds.xMax;
+    state.bounds = next;
+    updateRangeButton();
+    hideCursor();
+    renderLegend();
+    draw();
+    if (xChanged) onXRangeChange?.();
+  }
 
   const plotSvg = svg('svg', { class: 'chart__svg', 'aria-hidden': 'true', height });
   const tooltip = h('div', { class: 'chart__tip', hidden: true });
@@ -347,7 +436,7 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
   );
   const legend = h('ul', { class: 'chart__legend', 'aria-label': `${title} series` });
   const note = h('p', { class: 'chart__note', hidden: true }, 'Solid lines are smoothed for display; the faint lines are the reported values.');
-  const root = h('div', { class: 'chart' }, bar, plot, legend, note, hint, live);
+  const root = h('div', { class: 'chart' }, bar, rangeForm, plot, legend, note, hint, live);
   host.appendChild(root);
 
   const legendItems = new Map(); // name -> {li, input, value}
@@ -375,7 +464,7 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
 
   function logAllowed() {
     const vis = visibleSeries();
-    return vis.length > 0 && vis.every((s) => s.real.every((p) => p.y > 0));
+    return [state.bounds.yMin, state.bounds.yMax].every((v) => v === null || v > 0) && vis.length > 0 && vis.every((s) => s.real.every((p) => p.y > 0));
   }
 
   function setLog(on) {
@@ -388,7 +477,7 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
     const allowed = logAllowed();
     if (state.log && !allowed) state.log = false;
     logBtn.disabled = !allowed;
-    logBtn.title = allowed ? '' : 'Log scale needs every shown value to be above zero.';
+    logBtn.title = allowed ? '' : 'Log scale needs positive values and positive Y bounds.';
     linearBtn.setAttribute('aria-pressed', String(!state.log));
     logBtn.setAttribute('aria-pressed', String(state.log));
     note.hidden = !(state.smoothing > 0);
@@ -435,8 +524,10 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
       }
       // Move only when out of place: moving a focused checkbox would drop its focus.
       if (legend.children[index] !== item.li) legend.insertBefore(item.li, legend.children[index] ?? null);
-      const last = s.real[s.real.length - 1];
-      const text = last ? `latest ${fmt.num(last.y)}` : 'no values';
+      const { xMin, xMax } = state.bounds;
+      const ranged = xMin !== null || xMax !== null;
+      const last = ranged ? s.real.findLast((p) => (xMin === null || p.x >= xMin) && (xMax === null || p.x <= xMax)) : s.real.at(-1);
+      const text = last ? `${ranged ? 'last in range' : 'latest'} ${fmt.num(last.y)}` : ranged ? 'no values in range' : 'no values';
       if (item.value.textContent !== text) item.value.textContent = text;
     });
   }
@@ -460,44 +551,57 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
       x0 = Math.min(x0, s.points[0].x);
       x1 = Math.max(x1, s.points[s.points.length - 1].x);
     }
-    let y0 = Infinity;
-    let y1 = -Infinity;
-    for (const s of vis) for (const p of s.real) {
-      if (p.y < y0) y0 = p.y;
-      if (p.y > y1) y1 = p.y;
-    }
     const plotW = Math.max(10, width - PAD.left - PAD.right);
     const plotH = height - PAD.top - PAD.bottom;
     const g = svg('g');
     plotSvg.appendChild(g);
-    if (!Number.isFinite(x0)) {
+    if (!Number.isFinite(x0) && state.bounds.xMin === null && state.bounds.xMax === null) {
+      tooltip.hidden = true;
       const t = svg('text', { x: PAD.left + plotW / 2, y: PAD.top + plotH / 2, 'text-anchor': 'middle', class: 'chart__empty' });
       t.textContent = all.length ? 'All series are hidden.' : 'No values to draw.';
       g.appendChild(t);
       return;
     }
+    for (const step of state.markers) {
+      x0 = Math.min(x0, step);
+      x1 = Math.max(x1, step);
+    }
+    const bounds = state.bounds;
+    [x0, x1] = axisWindow(x0, x1, bounds.xMin, bounds.xMax);
     const xt = xTicks(x0, x1, plotW, { integer: state.xInteger });
     const xMin = xt.min;
     const xMax = xt.max;
     const sx = (x) => PAD.left + ((x - xMin) / (xMax - xMin)) * plotW;
 
-    let sy;
-    let yTicks;
-    let yStep = null;
-    if (!vis.length) {
-      yTicks = [];
-      sy = () => PAD.top + plotH;
-    } else if (state.log) {
-      const lt = logTicks(y0, y1);
-      const l0 = Math.log10(lt.min);
-      const l1 = Math.log10(lt.max);
-      sy = (y) => PAD.top + plotH - ((Math.log10(y) - l0) / (l1 - l0)) * plotH;
-      yTicks = lt.ticks;
-    } else {
-      const nt = niceTicks(y0, y1, Math.max(2, Math.floor(plotH / 40)));
-      sy = (y) => PAD.top + plotH - ((y - nt.min) / (nt.max - nt.min)) * plotH;
-      yTicks = nt.ticks;
-      yStep = nt.step;
+    const inWindow = (point) => point.x >= xMin && point.x <= xMax;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const s of vis) for (const point of s.real) {
+      if (!inWindow(point)) continue;
+      y0 = Math.min(y0, point.y);
+      y1 = Math.max(y1, point.y);
+    }
+    const hasValues = Number.isFinite(y0);
+    [y0, y1] = axisWindow(y0, y1, bounds.yMin, bounds.yMax, state.log);
+    const count = Math.max(2, Math.floor(plotH / 40));
+    const autoY = state.log ? logTicks(y0, y1) : niceTicks(y0, y1, count);
+    const yMin = bounds.yMin ?? autoY.min;
+    const yMax = bounds.yMax ?? autoY.max;
+    const transform = state.log ? Math.log10 : (y) => y;
+    const bottom = transform(yMin);
+    const span = transform(yMax) - bottom;
+    const sy = (y) => PAD.top + plotH - ((transform(y) - bottom) / span) * plotH;
+    let yTicks = autoY.ticks;
+    let yStep = autoY.step;
+    const customY = bounds.yMin !== null || bounds.yMax !== null;
+    if (customY) {
+      if (state.log && yMax / yMin < 2) {
+        const narrow = niceTicks(yMin, yMax, count);
+        yTicks = narrow.ticks;
+        yStep = narrow.step;
+      }
+      yTicks = [yMin, ...yTicks.filter((v) => v > yMin && v < yMax &&
+        sy(yMin) - sy(v) >= 18 && sy(v) - sy(yMax) >= 18), yMax];
     }
 
     // grid and axes (recessive: --rule hairlines, muted labels)
@@ -505,7 +609,8 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
       const y = Math.round(sy(v)) + 0.5;
       g.appendChild(svg('line', { class: 'chart__grid', x1: PAD.left, x2: PAD.left + plotW, y1: y, y2: y }));
       const label = svg('text', { class: 'chart__tick', x: PAD.left - 6, y, dy: '0.32em', 'text-anchor': 'end' });
-      label.textContent = state.log ? formatTick(v, v / 10) : formatTick(v, yStep);
+      label.textContent = customY && (v === bounds.yMin || v === bounds.yMax)
+        ? String(v) : formatTick(v, yStep ?? v / 10);
       g.appendChild(label);
     }
     xt.ticks.forEach((v, i) => {
@@ -522,17 +627,32 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
     xl.textContent = state.xLabel;
     g.appendChild(xl);
 
+    for (const step of state.markers) {
+      if (step < xMin || step > xMax) continue;
+      const x = sx(step);
+      const line = svg('line', { class: 'chart__resume', x1: x, x2: x, y1: PAD.top, y2: PAD.top + plotH,
+        stroke: 'currentColor', 'stroke-dasharray': '5 4' });
+      const title = svg('title');
+      title.textContent = `Resumed at iteration ${fmt.int(step)}`;
+      line.appendChild(title);
+      g.appendChild(line);
+    }
     const toPath = (points) => {
       let d = '';
       for (const p of points) d += `${d ? 'L' : 'M'}${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`;
       return d;
     };
-    const lines = svg('g', { 'clip-path': null });
+    const clip = svg('clipPath', { id: id + '-clip' });
+    clip.appendChild(svg('rect', { x: PAD.left, y: PAD.top, width: plotW, height: plotH }));
+    g.appendChild(clip);
+    const lines = svg('g', { 'clip-path': `url(#${id}-clip)` });
     for (const s of vis) {
       const { colour, dashed } = colourStyle(s.name);
       const style = `stroke: ${colour}${dashed ? '; stroke-dasharray: 5 3' : ''}`;
       // One path per run of real values: a null value is a gap in the line, never a drop to zero.
-      for (const seg of s.segs) {
+      for (const full of s.segs) {
+        const seg = bounds.xMin !== null || bounds.xMax !== null ? full.filter(inWindow) : full;
+        if (!seg.length) continue;
         if (seg.length === 1) {
           lines.appendChild(svg('circle', { class: 'chart__dot', cx: sx(seg[0].x), cy: sy(seg[0].y), r: 3, style: `fill: ${colour}` }));
           continue;
@@ -548,12 +668,17 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
       }
     }
     g.appendChild(lines);
-    const cursorLayer = svg('g', { class: 'chart__cursor-layer' });
+    if (!hasValues) {
+      const empty = svg('text', { class: 'chart__empty', x: PAD.left + plotW / 2, y: PAD.top + plotH / 2, 'text-anchor': 'middle' });
+      empty.textContent = all.length && !vis.length ? 'No visible series.' : 'No measurements in this iteration range.';
+      g.appendChild(empty);
+    }
+    const cursorLayer = svg('g', { class: 'chart__cursor-layer', 'clip-path': `url(#${id}-clip)` });
     g.appendChild(cursorLayer);
 
     // Union of the x values reported by the visible series: the cursor moves between real points only.
     const xsSet = new Set();
-    for (const s of vis) for (const p of s.real) xsSet.add(p.x);
+    for (const s of vis) for (const p of s.real) if (inWindow(p)) xsSet.add(p.x);
     const xs = [...xsSet].sort((a, b) => a - b);
     state.frame = { sx, sy, xMin, xMax, plotW, plotH, xs, vis, cursorLayer };
     drawCursor(false);
@@ -640,7 +765,23 @@ export function createChart(host, { title = 'Chart', height = HEIGHT, scaleToggl
 
   return {
     /** @param {{series: Array<{name: string, points: Array<{x: number, y: number}>}>, xLabel?: string}} data */
-    update({ series, xLabel }) {
+    iterationRange: () => ({ from: state.bounds.xMin, to: state.bounds.xMax }),
+    update({ series, xLabel, markers = [], plotHeight = height, yKey }) {
+      if (state.yKey !== yKey) {
+        state.yKey = yKey;
+        state.bounds.yMin = state.bounds.yMax = null;
+        rangeFields.yMin.value = rangeFields.yMax.value = '';
+        rangeFields.yMin.removeAttribute('aria-invalid');
+        rangeFields.yMax.removeAttribute('aria-invalid');
+        rangeError.hidden = true;
+        updateRangeButton();
+      }
+      if (plotHeight !== height) {
+        height = plotHeight;
+        plot.style.height = `${height}px`;
+        plotSvg.setAttribute('height', height);
+      }
+      state.markers = markers;
       state.series = [...(series ?? [])]
         .map((s) => {
           const points = Array.isArray(s.points) ? s.points : [];

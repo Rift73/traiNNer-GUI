@@ -21,14 +21,18 @@ from trainner_data.file_version import artifact_version
 from . import run_observe as observe
 from . import run_process as process
 from .external_runs import ARCHIVE_PREFIX, ExternalRuns
+from .paths import local_path
 from .recipes import atomic_text, safe_name, task_from_config
 from .reproduction_pins import checked_files
 from .run_checkpoints import (
+    detached_paths,
     import_options,
     latest_recipe,
+    phase_checkpoint,
     phase_options,
     prepare_import,
     prepared_import_plan,
+    resume_import_plan,
 )
 from .update_gate import MANAGED_ROOT, is_managed_runtime, studio_admission
 from .workspace import PROJECT_DIR_ENV, WindowsProject, require_ext4
@@ -124,6 +128,63 @@ def _resume_edits(
         if previous_rates != existing:
             edits.append({"path": ["train", "resume_previous_lrs"], "value": previous_rates})
     return edits, original_rates
+
+
+def _extend_completed_recipe(
+    text: str,
+    experiment: Path,
+    config: dict[str, Any],
+    completion: dict[str, Any],
+    additional_iterations: int,
+) -> str:
+    train = config.get("train")
+    goal = train.get("total_iter") if isinstance(train, dict) else None
+    if type(goal) is not int or goal < 1:
+        raise ValueError("The completed run recipe has no valid training goal.")
+    reason = completion.get("completionReason")
+    history = completion.get("earlyStopping")
+    bad_observations = history.get("badObservations") if isinstance(history, dict) else None
+    policy = train.get("early_stopping")
+    patience = policy.get("patience") if isinstance(policy, dict) else None
+    if reason == "earlyStopping" or (
+        type(bad_observations) is int and type(patience) is int and bad_observations >= patience
+    ):
+        raise ValueError(
+            "The run exhausted its early-stopping patience. "
+            "Start a new run from its model weights to train with fresh patience."
+        )
+
+    step = completion.get("completedIteration", goal)
+    if (
+        type(step) is not int
+        or not 0 < step <= goal
+        or reason not in (None, "targetReached")
+        or (reason == "targetReached" and step != goal)
+    ):
+        raise ValueError("The run has no valid completed training step.")
+    state = experiment / "training_states" / f"{step}.state"
+    if not observe.regular_file(state):
+        raise ValueError(f"The completed run is missing its numbered checkpoint state at iteration {step}.")
+
+    edits = [{"path": ["train", "total_iter"], "value": step + additional_iterations}]
+    if train.get("restart_scheduler"):
+        edits.append({"path": ["train", "restart_scheduler"], "value": False})
+    if (qat := train.get("qat")) is not None:
+        from msgspec import convert
+        from trainner_config.options import QATOptions
+
+        # QAT's default phase boundaries depend on the original training goal.
+        _, norm, observers = convert(qat, type=QATOptions, strict=True).schedule(goal)
+        for field, value in (("freeze_norm_iter", norm), ("freeze_observers_iter", observers)):
+            if qat.get(field) is None:
+                edits.append({"path": ["train", "qat", field], "value": value})
+
+    extended = render(text, edits)
+    files = phase_checkpoint(experiment, config, read_recipe(extended), step, "continue", None)
+    from .resume_preflight import validate_extension_scheduler_horizons
+
+    validate_extension_scheduler_horizons(train, state, additional_iterations)
+    return import_options(extended, files, experiment, full_state=True)
 
 
 @lru_cache(maxsize=96)
@@ -243,15 +304,19 @@ class RunManager:
                 yield slot.fileno()
 
     def requested_run(self, request_id: str) -> dict[str, Any] | None:
-        """Resolve a launch request without rereading recipes or trainer logs."""
+        return self.launch_status(_request_run_id(request_id))
+
+    def launch_status(self, run_id: str) -> dict[str, Any] | None:
+        """Read the current attempt and its queue owner without scanning the trainer logs."""
         try:
-            directory, record = self._managed(_request_run_id(request_id))
+            directory, record = self._managed(run_id)
         except FileNotFoundError:
             return None
         attempt = _attempt(directory, record)
         return {
             "id": record["id"],
             "queueEntryId": record.get("queueEntryId"),
+            "attemptId": record["attempt"],
             **_state(attempt, self._control_path(attempt)),
         }
 
@@ -377,6 +442,8 @@ class RunManager:
         record: dict[str, Any],
         yaml_text: str,
         imported: list[dict[str, Any]] | None = None,
+        *,
+        resumed_phase_step: int | None = None,
     ) -> dict[str, Any]:
         with self.execution_slot(
             exclusive=bool(record.get("queueEntryId"))
@@ -398,7 +465,10 @@ class RunManager:
                 destination = experiment if full_state else attempt / "inputs"
                 yaml_text = import_options(yaml_text, imported, destination, full_state=full_state)
                 import_record = {"files": imported, "inputs": not full_state}
-            if phase is not None and (handoff := phase.get("handoff")) is not None:
+            if phase is not None and resumed_phase_step is not None:
+                # This attempt continues its own checkpoint, including optimizer state.
+                phase = {**phase, "startStep": resumed_phase_step}
+            elif phase is not None and (handoff := phase.get("handoff")) is not None:
                 weights_only = phase["mode"] == "finetune"
                 destination = attempt / "inputs" if weights_only else experiment
                 yaml_text = phase_options(yaml_text, phase, destination)
@@ -495,17 +565,52 @@ class RunManager:
             process.write_record(control / "checkpoint-request.json", request)
             return {**request, "status": "pending"}
 
-    def stop(self, run_id: str) -> dict[str, Any]:
+    def pause_queue_attempt(self, run_id: str, attempt_id: str) -> None:
+        directory = self._writable(run_id)
+        with _control(self._control_path(directory)):
+            _, record = self._managed(run_id)
+            if record["attempt"] != attempt_id:
+                return
+            attempt = _attempt(directory, record)
+            control = self._control_path(attempt)
+            # SIGINT before the trainer installs its handler would lose its startup state.
+            if (control / "checkpoint-ready").is_file() and _state(attempt, control)["status"] == "running":
+                (control / "stop").touch(exist_ok=True)
+
+    def resume_queue_attempt(self, run_id: str, attempt_id: str) -> dict[str, Any]:
+        directory = self._writable(run_id)
+        with _control(self._control_path(directory)):
+            _, record = self._managed(run_id)
+            if record["attempt"] != attempt_id:
+                return self._managed_view(directory, record)
+            attempt = _attempt(directory, record)
+            control = self._control_path(attempt)
+            if process.lock_held(control / "active.lock"):
+                raise RunBusyError("Waiting for the previous attempt to release the trainer.")
+            state = _state(attempt, control)
+            if state["status"] != "stopped" or state.get("completionReason") != "interrupted":
+                raise ValueError("This attempt has no confirmed graceful stop.")
+            text, same = self._resume_recipe(attempt, self._experiment(directory, record))
+            step = int(Path(read_recipe(text)["path"]["resume_state"]).stem)
+            if step != state.get("completedIteration"):
+                raise ValueError("The checkpoint for the paused iteration is incomplete. Check the run files.")
+            if not same:
+                record.pop("resumeOriginalLearningRates", None)
+            return self._launch(directory, record, text, resumed_phase_step=step)
+
+    def stop(self, run_id: str, *, force_attempt: str | None = None) -> dict[str, Any]:
         directory = self._writable(run_id)
         with _control(self._control_path(directory)):
             _, record = self._managed(run_id)
             attempt = _attempt(directory, record)
+            if force_attempt is not None and force_attempt != attempt.name:
+                raise ValueError("The run has switched attempts. Refresh before forcing it to stop.")
             control = self._control_path(attempt)
             status = _state(attempt, control)["status"]
             if status in ACTIVE:
-                signal_request = control / "stop"
-                if not signal_request.exists():
-                    signal_request.touch()
+                if force_attempt is not None:
+                    (control / "force-stop").touch(exist_ok=True)
+                (control / "stop").touch(exist_ok=True)
             elif status != "stopped":
                 raise ValueError("The run has no managed trainer to stop.")
             return self._managed_view(directory, record)
@@ -532,7 +637,63 @@ class RunManager:
             return opt.datasets["train"].num_worker_per_gpu
         return None
 
-    def _resume_recipe(self, attempt: Path, experiment: Path) -> tuple[str, bool]:
+    def fresh_recipe(self, text: str) -> str:
+        """Detach a draft from its checkpoint, retaining independent edits and initial weights."""
+        config = read_recipe(text)
+        paths = config.get("path") or {}
+        if not isinstance(paths, dict):
+            raise ValueError("Recipe path options must be a mapping.")
+        # Older queued resumes copied a numbered checkpoint into a new run. Follow
+        # the saved recipe of each known owner back to the original initialization.
+        layers = []
+        current = paths
+        visited = set()
+        while current.get("resume_state"):
+            state = local_path(current["resume_state"], self.root)
+            layers.append((current, state))
+            current = {}
+            experiment = state.parent.parent
+            if state.parent.name != "training_states" or not experiment.is_relative_to(self.runs):
+                break
+            parts = experiment.relative_to(self.runs).parts
+            if len(parts) != 3 or parts[1] != "experiments" or not RUN_ID.fullmatch(parts[0]):
+                break
+            if parts[0] in visited:
+                break
+            visited.add(parts[0])
+            directory, record = self._managed(parts[0])
+            if self._experiment(directory, record) != experiment:
+                break
+            recipe = directory / "recipe.yml"
+            original = observe.recipe_text(recipe) if observe.regular_file(recipe) else None
+            if not original:
+                raise ValueError("The original run recipe is unavailable.")
+            current = read_recipe(original).get("path") or {}
+
+        for layer, state in reversed(layers):
+            current = detached_paths(layer, state, current, self.root)
+        edits = []
+        for field in paths:
+            if field not in current:
+                edits.append({"path": ["path", field], "remove": True})
+            elif current[field] != paths[field]:
+                edits.append({"path": ["path", field], "value": current[field]})
+        train = config.get("train") or {}
+        if "resume_previous_lrs" in train:
+            edits.append({"path": ["train", "resume_previous_lrs"], "remove": True})
+        if train.get("restart_scheduler"):
+            edits.append({"path": ["train", "restart_scheduler"], "value": False})
+        if config.get("auto_resume"):
+            edits.append({"path": ["auto_resume"], "value": False})
+        return render(text, edits) if edits else text
+
+    def _resume_recipe(
+        self,
+        attempt: Path,
+        experiment: Path,
+        *,
+        extension: tuple[dict[str, Any], int] | None = None,
+    ) -> tuple[str, bool]:
         options = attempt / "options.yml"
         text = observe.recipe_text(options) if observe.regular_file(options) else None
         if text is None:
@@ -556,12 +717,76 @@ class RunManager:
                 if edits:
                     text = render(text, edits)
                     config = read_recipe(text)
-        pinned = latest_recipe(text, experiment, config)
+        if extension is None:
+            pinned = latest_recipe(text, experiment, config)
+        else:
+            completion, additional_iterations = extension
+            pinned = _extend_completed_recipe(
+                text, experiment, config, completion, additional_iterations
+            )
         selected = read_recipe(pinned)["path"]["resume_state"]
         same_checkpoint = selected == config["path"].get("resume_state")
         if not same_checkpoint and "resume_previous_lrs" in config["train"]:
             pinned = render(pinned, [{"path": ["train", "resume_previous_lrs"], "remove": True}])
         return pinned, same_checkpoint
+
+    def queued_resume_source(
+        self, run_id: str, *, additional_iterations: int | None = None
+    ) -> tuple[str, str | None, dict]:
+        """Snapshot a stopped run or extend a completed run from its final update."""
+        if additional_iterations is not None and (
+            type(additional_iterations) is not int or additional_iterations < 1
+        ):
+            raise ValueError("additionalIterations must be a positive integer.")
+        required_status = "stopped" if additional_iterations is None else "completed"
+        directory = self._writable(run_id)
+        with _control(self._control_path(directory)):
+            _, record = self._managed(run_id)
+            attempt = _attempt(directory, record)
+            control = self._control_path(attempt)
+            if (
+                process.lock_held(control / "active.lock")
+                or (state := _state(attempt, control))["status"] != required_status
+            ):
+                raise ValueError(
+                    f"Only a {required_status} training run can be queued for continuation."
+                )
+            if "curriculum" in record:
+                raise ValueError("Retry this curriculum phase and release its new queue entry.")
+            extension = (state, additional_iterations) if additional_iterations is not None else None
+            text, _ = self._resume_recipe(
+                attempt, self._experiment(directory, record), extension=extension
+            )
+            text = render(text, [{"path": ["manual_seed"], "value": record["seed"]}])
+            config = read_recipe(text)
+            checkpoint = {
+                "sourceAttemptId": record["attempt"],
+                "resumeStep": int(Path(config["path"]["resume_state"]).stem),
+                "resumeFiles": resume_import_plan(config, self.root),
+            }
+            return text, record.get("queueEntryId"), checkpoint
+
+    def launch_queued_continuation(self, entry: dict, text: str) -> dict[str, Any]:
+        """Publish a new attempt in the run whose checkpoint the user queued."""
+        run_id = entry["sourceRunId"]
+        directory = self._writable(run_id)
+        with _control(self._control_path(directory)):
+            _, record = self._managed(run_id)
+            if record.get("queueEntryId") == entry["id"]:
+                return self._managed_view(directory, record)
+            attempt = _attempt(directory, record)
+            control = self._control_path(attempt)
+            required = "completed" if "additionalIterations" in entry else "stopped"
+            if (attempt.name != entry["sourceAttemptId"] or process.lock_held(control / "active.lock")
+                    or _state(attempt, control)["status"] != required):
+                raise ValueError("The run changed since this checkpoint was queued. Open its current attempt to continue.")
+            config = read_recipe(text)
+            if resume_import_plan(config, self.root) != entry["resumeFiles"]:
+                raise ValueError("The queued checkpoint files changed. Queue the continuation again.")
+            record.update(queueEntryId=entry["id"], **_summary(config))
+            if "resume_previous_lrs" not in config["train"]:
+                record.pop("resumeOriginalLearningRates", None)
+            return self._launch(directory, record, text)
 
     def resume(
         self,
@@ -637,8 +862,8 @@ class RunManager:
         if "updatedAt" not in result:
             result["updatedAt"] = process.timestamp(last_write / 1_000_000_000)
         result.update(observe.report(log or console, metrics=detail or monitoring))
-        if state["status"] == "completed" and "completedIteration" in state:
-            # Completion can fall between log entries. Keep telemetry at its logged step.
+        if state["status"] not in ACTIVE and "completedIteration" in state:
+            # A stop or completion can fall between log entries. Keep telemetry at its logged step.
             result["iteration"] = state["completedIteration"]
         if detail or monitoring:
             result["canSaveCheckpoint"] = state["status"] == "running" and (control / "checkpoint-ready").is_file()
@@ -661,7 +886,7 @@ class RunManager:
             result["yaml"] = observe.recipe_text(directory / "recipe.yml")
             options = attempt / "options.yml"
             effective = observe.recipe_text(options) if observe.regular_file(options) else None
-            if self.project is not None:
+            if self.project is not None or effective != result["yaml"]:
                 result["launchedYaml"] = effective
             result["resumeWorkerOverride"] = False
             if effective and "curriculum" not in record:
@@ -839,6 +1064,18 @@ class RunManager:
             )
         directory, record = self._managed(run_id)
         return self._managed_view(directory, record, monitoring=True, cursor=cursor)
+
+    def progress(self, run_id: str) -> dict[str, str | int | None]:
+        """Read one managed counter without loading recipes or trainer logs."""
+        attempt = self.attempt_dir(run_id)
+        control = self._control_path(attempt)
+        state = _state(attempt, control)
+        if state["status"] in ACTIVE:
+            iteration = process.read_progress(control)
+        else:
+            step = state.get("completedIteration")
+            iteration = step if type(step) is int and step >= 0 else None
+        return {"attemptId": attempt.name, "iteration": iteration}
 
     def attempt_dir(self, run_id: str, attempt_id: str | None = None) -> Path:
         """Return an existing, unredirected directory for a managed attempt."""

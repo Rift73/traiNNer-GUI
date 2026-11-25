@@ -141,7 +141,88 @@ def _same(a,b):
     return a == b
 
 
-def render(text: str, edits: list[dict[str, Any]]) -> str:
+def _readable_collections(text, paths, loader):
+    """Expand compact collections using their original scalar tokens (including tags and quotes)."""
+    from .yaml_remove import _spans
+
+    root = _spans(text, loader)
+    patches = []
+
+    def block(node):
+        raw = text[node.start:node.end]
+        if not node.flow or not node.children or "\n" in raw or node.event.anchor or node.event.tag:
+            return [raw]
+        if node.mapping:
+            rows = []
+            for key, value in node.entries():
+                if not isinstance(key.event, yaml.events.ScalarEvent):
+                    return [raw]
+                label = text[key.start:key.end] + ":"
+                child = block(value)
+                if len(child) == 1 and child[0] == text[value.start:value.end]:
+                    rows.append(label + " " + child[0])
+                else:
+                    rows.append(label)
+                    rows.extend("  " + line for line in child)
+            return rows
+        if not any(child.children for child in node.children) and len(raw) <= 80:
+            return [raw]
+        rows = []
+        for child in node.children:
+            first, *rest = block(child)
+            rows.append("- " + first)
+            rows.extend("  " + line for line in rest)
+        return rows
+
+    def visit(node, path, key=None):
+        if paths is not None and not any(p[:len(path)] == path or path[:len(p)] == p for p in paths):
+            return
+        if node.flow:
+            rows = block(node)
+            if rows == [text[node.start:node.end]]:
+                return
+            start, end = node.start, node.end
+            indent = node.event.start_mark.column
+            prefix = ""
+            if key is not None and key.event.end_mark.line == node.event.start_mark.line:
+                colon = text[key.end:start]
+                if colon.strip() != ":":
+                    return
+                start = key.end + colon.index(":") + 1
+                indent = key.event.start_mark.column + 2
+                prefix = "\n" + " " * indent
+                # An end-of-line comment on a mapping value still belongs to its key.
+                line_end = text.find("\n", end)
+                line_end = len(text) if line_end < 0 else line_end
+                tail = text[end:line_end].rstrip("\r")
+                if tail.lstrip().startswith("#"):
+                    end += len(tail)
+                    prefix = tail + prefix
+            elif key is not None and indent <= key.event.start_mark.column:
+                extra = key.event.start_mark.column + 2 - indent
+                indent += extra
+                prefix = " " * extra
+            patches.append((start, end, prefix + ("\n" + " " * indent).join(rows)))
+        elif node.mapping:
+            for entry, value in node.entries():
+                visit(value, path + [getattr(entry.event, "value", None)], entry)
+        else:
+            for index, child in enumerate(node.children):
+                visit(child, path + [index])
+
+    visit(root, [])
+    if not patches:
+        return text
+    pieces = []
+    cursor = 0
+    for start, end, replacement in patches:
+        pieces.extend((text[cursor:start], replacement))
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def render(text: str, edits: list[dict[str, Any]], *, format_all: bool = False) -> str:
     crlf = "\r\n" in text and text.count("\r\n") == text.count("\n")
     original = read_recipe(text)
     if not isinstance(edits, list) or len(edits) > 128:
@@ -210,10 +291,17 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
                     candidate = text[:first.index] + _flow(wanted) + text[node.end_mark.index:]
                 break
             in_flow = bool(getattr(node, "flow_style", False))
+            owner = node
             node, parent, wanted = child, parent[key], wanted[key]
             if offset == len(path) - 1:
                 start, end = node.start_mark.index, node.end_mark.index
                 replacement = _flow(wanted, in_flow=in_flow, style=getattr(node, "style", None))
+                # A block list may align with its key. Its temporary flow spelling
+                # must be indented before the source formatter can expand it.
+                if isinstance(owner, yaml.MappingNode) and isinstance(node, yaml.SequenceNode) and not node.flow_style:
+                    key_node = next(k for k, v in owner.value if v is node)
+                    if node.start_mark.column == key_node.start_mark.column:
+                        replacement = "  " + replacement
                 # A block collection or block scalar can consume the newline
                 # ending the final item. Keep the next key on its own line.
                 old = text[start:end]
@@ -235,6 +323,12 @@ def render(text: str, edits: list[dict[str, Any]]) -> str:
         if not _same(read_recipe(candidate), desired):
             raise ValueError("This edit also affects a YAML anchor or merged field. Edit it explicitly in YAML.")
         text, original = candidate, desired
+    if (format_all or edits) and ("{" in text or "[" in text):
+        pretty = _readable_collections(text, None if format_all else [edit["path"] for edit in edits], Loader)
+        if pretty != text:
+            if not _same(read_recipe(pretty), original):
+                raise ValueError("Formatting would change a YAML value.")
+            text = pretty
     if crlf:
         return text.replace("\r\n", "\n").replace("\n", "\r\n")
     return text

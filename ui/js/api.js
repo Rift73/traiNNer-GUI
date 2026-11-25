@@ -111,9 +111,55 @@ export const PREVIEW_MAX = 1536;
 /** Longest edge used for grid thumbnails. */
 export const THUMB_SIZE = 256;
 
+/** Observe committed chart data only while the page is visible. A retained cursor
+ * makes reconnecting (including a phone waking from sleep) catch up immediately. */
+export function watchHistory(params, changed) {
+  let cursor = '';
+  let controller;
+  let timer;
+  let closed = false;
+  let retry = 1000;
+
+  async function watch() {
+    if (closed || document.hidden) return;
+    const request = new AbortController();
+    controller = request;
+    let delay = 0;
+    try {
+      const reply = await get(`/api/history/revision${qs({ ...params, cursor })}`, { signal: request.signal });
+      if (request.signal.aborted) return;
+      if (reply.cursor !== cursor) {
+        await changed(request.signal);
+        if (!request.signal.aborted) cursor = reply.cursor;
+      }
+      retry = 1000;
+    } catch {
+      if (request.signal.aborted) return;
+      delay = retry;
+      retry = Math.min(10000, retry * 2);
+    } finally {
+      if (!request.signal.aborted && !closed) timer = setTimeout(watch, delay);
+    }
+  }
+  function visibility() {
+    clearTimeout(timer);
+    controller?.abort();
+    if (!document.hidden) watch();
+  }
+  document.addEventListener('visibilitychange', visibility);
+  watch();
+  return () => {
+    closed = true;
+    clearTimeout(timer);
+    controller?.abort();
+    document.removeEventListener('visibilitychange', visibility);
+  };
+}
+
 export const api = {
   /** => {name, version, trainerRoot, stateDir} */
   status: (opts) => get('/api/status', opts),
+  gpuSensors: (opts) => get('/api/gpu-sensors', opts),
   /** The trainer machine as it is: interpreter, package versions, platform, CPU, disk. */
   environment: (opts) => get('/api/environment', opts),
 
@@ -141,6 +187,10 @@ export const api = {
   templates: (opts) => get('/api/templates', opts),
   /** => [{path, name, task, architecture, scale} | {path, name, error}] */
   recipes: (opts) => get('/api/recipes', opts),
+  vramTest: () => get('/api/vram-test'),
+  startVramTest: (yaml) => post('/api/vram-test', { yaml }),
+  cancelVramTest: (id) => post('/api/vram-test/cancel', { id }),
+  freshRecipe: (yaml) => post('/api/recipe/fresh', { yaml }),
   /** => {path, name, yaml, revision} */
   recipe: (path, opts) => get(`/api/recipe${qs({ path })}`, opts),
   /**
@@ -246,8 +296,17 @@ export const api = {
    * => list item + {metrics, log, logCursor, logReset}. Append `log` unless `logReset`.
    */
   monitor: (id, cursor, opts) => get(`/api/run/monitor${qs({ id, cursor })}`, opts),
+  /**
+   * The iteration the current attempt of a managed run has reached, from its trainer's own small signal (no
+   * log is read). => {attemptId, iteration: integer|null}. While the attempt trains: the trainer's live count,
+   * null before it publishes one or when the signal is unavailable (an older trainer). After the trainer
+   * exited: the count from its exit receipt, or null. An unknown or imported run is a 404 ("Run was not
+   * found."); an older service has no such route (404 "Unknown API endpoint.").
+   */
+  runProgress: (id, opts) => get(`/api/runs/${encodeURIComponent(id)}/progress`, opts),
   /** Starts training now. 422 carries `issues`; 409 means the trainer is occupied by the queue. */
   startRun: (yaml, requestId, opts) => post('/api/runs', compact({ yaml, requestId }), opts),
+  forceStopRun: (id, attemptId) => post('/api/runs/force-stop', { id, attemptId }),
   stopRun: (id, opts) => post('/api/runs/stop', { id }, opts),
   /**
    * Ask the trainer of a run in training to write a full checkpoint now, where the run's detail (or
@@ -267,10 +326,19 @@ export const api = {
   /**
    * Logged history of one attempt. Without `metric`: the list of series. With it: its points.
    * {metric?, source?, budget?, from?, to?} => {sources, source, series:[{key, count, first, last}],
-   *   points:[[iteration, number|null]], indexedBytes, sourceBytes, more, metric?, matchedPoints?, downsampled?}
-   * `more: true` means the log is not fully indexed yet: call again.
+   *   points:[[iteration, number|null]], indexedBytes, sourceBytes, more, metric?, matchedPoints?, downsampled?,
+   *   sourceFormat?: 'trainer-log'|'tensorboard', sourcePaths?: {native, windows?}}
+   * `more: true` means the log is not fully indexed yet: call again. `sourcePaths` is where the file of
+   * `source` is on the training PC: `native` as the service sees it, `windows` too when the service runs in WSL.
    */
   history: (id, params, opts) => get(`/api/run/history${qs({ id, ...params })}`, opts),
+  tensorboardHistory: (path, params, opts) => get(`/api/tensorboard/history${qs({ path, ...params })}`, opts),
+  /**
+   * A short text about one run for an assistant on the training PC: the run, its folder (both path forms
+   * where they exist), the telemetry file, recipe, console log and image folders. `source` is a history
+   * source of this run; without it the service names the newest. => {text}. Only read, nothing is sent on.
+   */
+  runAiContext: (id, source, opts) => get(`/api/run/ai-context${qs({ id, source })}`, opts),
   /**
    * => [{dataset, step, sampleCount, metric, better, evaluation, aggregation}] ("higher" = higher is better),
    *   newest step first. `evaluation` is the id of the recorded measurement (0 = the older per-step record);
@@ -290,6 +358,7 @@ export const api = {
    * {dataset?, attempt?, limit? (50), before?} => {evaluations:[{id, attempt, dataset, step, task, unit,
    *   hasClassCounts, metrics:{name: number}, nonfinite:{}}], next} (`next` is the id to pass as `before`)
    */
+  revealImage: (params) => post('/api/run/reveal-image', params),
   validation: (id, params, opts) => get(`/api/run/validation${qs({ id, ...params })}`, opts),
   /**
    * Per-class results of one evaluation (segmentation, classification; needs val.record_samples).
@@ -369,6 +438,21 @@ export const api = {
   queuePause: (paused, opts) => post('/api/queue/pause', { paused: Boolean(paused) }, opts),
   /** Saves a held entry that repeats run `runId` with its recorded seed. => Entry */
   queueReplay: (runId, requestId, opts) => post('/api/queue/replay', compact({ runId, requestId }), opts),
+  /**
+   * Queues a continuation of stopped managed run `runId` from its newest complete checkpoint, already
+   * released. With `extra.additionalIterations` (a positive whole number) it extends completed managed run
+   * `runId` instead: the same run continues from its final training state for that many more iterations.
+   * The new total is the iteration the run completed at plus that number. An open continuation of the same
+   * run with the same target is returned instead of a new one; another target while one is open is
+   * refused (409). => Entry + {sourceRunId, sourceAttemptId, resumeStep, additionalIterations?}
+   */
+  queueResume: (runId, requestId, extra, opts) => post('/api/queue/resume', compact({ runId, requestId, ...extra }), opts),
+  /**
+   * Puts the released entries that wait in another order. `expected`: their ids in the order the person
+   * saw; `order`: the same ids in the wanted order. 409 when the line changed meanwhile, unless `order` is
+   * already the current one. => {paused, activeId, entries}
+   */
+  queueReorder: (expected, order, opts) => post('/api/queue/reorder', { expected, order }, opts),
 
   // ───────── controlled studies (arms × seeds; every entry is created on hold) ─────────
 

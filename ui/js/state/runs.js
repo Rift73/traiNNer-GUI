@@ -157,6 +157,11 @@ export const runs = {
     refresh();
     return run;
   },
+  async forceStop(id, attemptId) {
+    const run = await api.forceStopRun(id, attemptId);
+    upsert(run);
+    return run;
+  },
   async stop(id) {
     const run = await api.stopRun(id);
     upsert(run);

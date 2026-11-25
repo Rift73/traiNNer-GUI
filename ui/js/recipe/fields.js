@@ -772,7 +772,7 @@ function pairControl(kind, env) {
 /**
  * A list of texts edited item by item (task_options.class_names, compress_algorithms): change, add,
  * move, remove. Changing or removing one item touches only that item in the YAML; adding or moving sets
- * the whole list, which the backend writes on one line. The order and repeats are the recipe's: nothing
+ * the whole list. The order and repeats are the recipe's: nothing
  * is sorted or merged, because a list of weights often runs beside this one, position by position.
  * With `kind.itemSuggestions` every item (and the add box) offers those values in a list; `itemsClosed`
  * makes them the only values taken (a schema enum). Items that are not text (a number written without
@@ -784,7 +784,7 @@ function listControl(kind, env) {
   const getChoices = () => toChoices(suggestions ?? []);
   const what = suggestions ? 'value' : 'name';
   const rows = h('ol', { class: 'fld__list' });
-  const hint = h('p', { class: 'fld__note', hidden: true }, 'Adding or moving rewrites this list on one line; comments inside it are lost.');
+  const hint = h('p', { class: 'fld__note', hidden: true }, 'Adding or moving an item replaces the list and removes comments inside it.');
   const nameOf = (i) => (env.itemLabel ? env.itemLabel(i) : `Item ${i}`);
   let refocus = null; // {act, index} of the button that was pressed, so focus survives the redraw
   let combos = []; // the item fields' lists, closed before their rows are replaced
@@ -968,7 +968,7 @@ function tableControl(kind, env) {
   const rows = h('div', { class: 'fld__tablebody' });
   const addInputs = cols.map((c, i) => h('input', { class: `input${c.type === 'string' ? '' : ' input--num'}`, id: i === 0 ? env.id : `${env.id}-${c.key}`, type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-label': `New ${c.key}`, inputmode: c.type === 'string' ? null : 'numeric' }));
   const addButton = h('button', { class: 'btn btn--sm', type: 'button' }, 'Add');
-  const hint = h('p', { class: 'fld__note', hidden: true }, 'Adding rewrites this list on one line; comments inside it are lost.');
+  const hint = h('p', { class: 'fld__note', hidden: true }, 'Adding an item replaces the list and removes comments inside it.');
   let drawn = null;
   let refocus = null;
   const values = () => {

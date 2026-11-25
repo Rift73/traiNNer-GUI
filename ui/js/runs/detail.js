@@ -11,8 +11,10 @@ import { persist } from '../store.js';
 import { runs, runStatus, isImported, runSourceLabel } from '../state/runs.js';
 import { catalog } from '../state/catalog.js';
 import { conn } from '../state/conn.js';
-import { compareHref, queueHref, runHref, curriculaHref, openAsRecipe } from '../actions.js';
-import { toast, openDialog, confirmDialog, confirmOnPhone, promptDialog, tabs, badge, emptyState, notice, loading, copyText } from '../ui.js';
+import { progress } from '../state/progress.js';
+import { queue, statusPlaceWords } from '../state/queue.js';
+import { confirmForceStop, compareHref, queueHref, runHref, curriculaHref, openAsRecipe } from '../actions.js';
+import { toast, openDialog, confirmDialog, confirmOnPhone, promptDialog, tabs, badge, emptyState, notice, loading, copyText, copyTextWhenReady, openCopyDialog } from '../ui.js';
 import { highlightedPre } from '../recipe/yaml-highlight.js';
 import { createLogView } from './log.js';
 import { mountTelemetry } from './telemetry.js';
@@ -28,8 +30,11 @@ const TABS = [
   { id: 'provenance', label: 'Provenance' },
 ];
 const FILL_TABS = new Set(['log', 'recipe']);
-/** Fields taken from a monitor answer (when present); everything else comes from the full detail. */
-const MONITOR_FIELDS = ['status', 'iteration', 'iterationsPerSecond', 'eta', 'estimatedFinishAt', 'vram', 'telemetryIteration', 'error', 'returncode', 'metrics', 'canSaveCheckpoint', 'checkpointRequest'];
+/**
+ * Fields taken from a monitor answer (when present); everything else comes from the full detail. The attempt
+ * is among them so that the trainer's own count (state/progress.js) is matched to the attempt on screen.
+ */
+const MONITOR_FIELDS = ['status', 'completionReason', 'attemptId', 'iteration', 'iterationsPerSecond', 'eta', 'estimatedFinishAt', 'vram', 'telemetryIteration', 'error', 'returncode', 'metrics', 'canSaveCheckpoint', 'checkpointRequest'];
 /** While a checkpoint asked for here is being written, the run is read this often, so its outcome shows soon. */
 const CHECKPOINT_POLL_MS = 1500;
 const FOLDERS = ['models/', 'models/resume_models/', 'training_states/'];
@@ -74,11 +79,21 @@ function resumeSettingsOf(run) {
   };
 }
 
-const hasProgress = (run) => Number.isFinite(run?.iteration) && Number.isFinite(run?.total);
 const nameOf = (run) => run?.name ?? String(run?.id ?? '');
 const setText = (node, text) => {
   if (node.textContent !== text) node.textContent = text;
 };
+
+/**
+ * The text of a counter, rewritten in place: no node is added or removed, so nothing that watches the page
+ * for redraws (the phone edition does) is woken by a count.
+ */
+export function setCount(node, text) {
+  const only = node.firstChild;
+  if (only && only === node.lastChild && only.nodeType === Node.TEXT_NODE) {
+    if (only.data !== text) only.data = text;
+  } else if (node.textContent !== text) node.textContent = text;
+}
 
 /** Put `node` at position `index` of `parent` only when it is not already there. */
 function placeAt(parent, node, index) {
@@ -95,14 +110,24 @@ function mountKeyed(slot, key, build) {
 export function progressBar(label) {
   const fill = h('div', { class: 'progress__bar' });
   const el = h('div', { class: 'progress', role: 'progressbar', 'aria-label': label, 'aria-valuemin': '0' }, fill);
-  const set = (run) => {
-    const kind = runStatus(run.status).kind;
-    el.className = `progress${kind ? ` progress--${kind}` : ''}`;
-    el.setAttribute('aria-valuemax', String(run.total));
-    el.setAttribute('aria-valuenow', String(run.iteration));
-    fill.style.width = `${run.total > 0 ? Math.max(0, Math.min(100, (run.iteration / run.total) * 100)) : 0}%`;
+  // Written only where it changed: a count that moves touches the value and the width, nothing else.
+  const put = (name, value) => {
+    if (el.getAttribute(name) !== value) el.setAttribute(name, value);
   };
-  // Callers call set() only when iteration and total are real numbers.
+  let width = '';
+  const set = (run, iteration = run.iteration) => {
+    const kind = runStatus(run.status).kind;
+    put('class', `progress${kind ? ` progress--${kind}` : ''}`);
+    put('aria-valuemax', String(run.total));
+    put('aria-valuenow', String(iteration));
+    const next = `${run.total > 0 ? Math.max(0, Math.min(100, (iteration / run.total) * 100)) : 0}%`;
+    if (next !== width) {
+      width = next;
+      fill.style.width = next;
+    }
+  };
+  // Callers call set() only when the iteration and total are real numbers. `iteration` is the one shown,
+  // which can be the trainer's own count (state/progress.js) ahead of the run summary.
   return { el, set };
 }
 
@@ -154,7 +179,13 @@ export function createRunDetail(host, { id, summary = null }) {
   let pollCtrl = null;
   let pollTimer = 0;
   let polling = false;
-  const busy = { stop: false, resume: false, checkpoint: false };
+  let sensorTimer = 0;
+  let sensorCtrl = null;
+  let adapters = [];
+  const busy = { stop: false, resume: false, checkpoint: false, queue: false, ai: false };
+  // The last refused "Add to queue" press, as {message, status of the run then}: said under the head until
+  // the next press or until the run's status changes.
+  let queueRefusal = null;
   // The newest checkpoint request this page has shown, as {id, status}: an outcome that arrives while the
   // page watches (pending, then saved or failed) is also said in a toast, since the head can be out of view.
   let seenCheckpoint = null;
@@ -169,14 +200,36 @@ export function createRunDetail(host, { id, summary = null }) {
   // save is under way it stays focusable (aria-disabled) and says so; a press then does nothing.
   const saveBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: saveCheckpoint }, 'Save checkpoint');
   const stopBtn = h('button', { class: 'btn btn--danger btn--sm', type: 'button', onclick: stopRun }, 'Stop training');
+  const forceBtn = h('button', { class: 'btn btn--danger btn--sm', type: 'button', onclick: forceStopRun }, 'Force stop');
   const resumeBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: resumeRun }, 'Resume');
   // Offered only where the service says this run can continue with another number of data loader workers.
   const workersBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: resumeWithWorkers }, 'Resume with other workers…');
   // Offered where the service sends `resumeSettings`: batch size, learning rates and (where allowed) the
   // workers in one dialog. It then stands in for the workers button, so a resume can change all of them at once.
   const settingsBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: resumeWithSettings }, 'Resume with other settings…');
+  // A stopped managed run (not a curriculum phase) can be queued for continuation: it continues
+  // from its newest saved checkpoint when the trainer is free. While the request is open it stays focusable
+  // (aria-disabled): the phone edition's question and the answer both return focus to it.
+  const queueBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: addRunToQueue }, 'Add to queue');
+  // A completed managed run (not a curriculum phase) can be extended: a dialog asks how many more iterations,
+  // and it continues from its final training state when the trainer is free.
+  const extendBtn = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: extend }, 'Extend training…');
   const replayBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: replay }, 'Replay');
   const compareLink = h('a', { class: 'btn btn--sm', href: compareHref(id) }, 'Compare with…');
+  // A short text about this run for an AI assistant on the training PC, put on the clipboard: where the
+  // run, its log, recipe, console log and images are. On every run, at the same place in the row (the
+  // buttons before it come and go with the run's state). Nothing is sent anywhere.
+  const aiBtn = h(
+    'button',
+    {
+      class: 'btn btn--sm',
+      type: 'button',
+      hidden: true,
+      onclick: copyForAi,
+      title: 'Copies a short text for an AI assistant on the training PC: where this run and its trainer log, recipe, console log and images are. It is only put on the clipboard; nothing is sent anywhere.',
+    },
+    'Copy for AI',
+  );
   // Refresh reads the detail again, and tells the parts that keep their own answers (the Files tab's ranking).
   const refreshBtn = h('button', { class: 'btn btn--quiet btn--sm', type: 'button', onclick: () => {
     fetchDetail();
@@ -187,6 +240,8 @@ export function createRunDetail(host, { id, summary = null }) {
   const failSlot = h('div');
   // One line about the checkpoint asked for with "Save checkpoint": being written, saved at an iteration, or not saved.
   const checkpointSlot = h('div', { class: 'runs__checkpoint' });
+  // A continuation of this run in the queue, or the refusal of the last "Add to queue" press.
+  const queueSlot = h('div');
   // The disk warning of a training run (watchDisk below). Declared here: the first renderHead() runs before
   // the rest of this function has been reached.
   const diskSlot = h('div');
@@ -195,6 +250,8 @@ export function createRunDetail(host, { id, summary = null }) {
   let diskBusy = false;
   let diskOff = false; // the service does not know this run: no further readings
   let diskText = '';
+  // While the run trains, its trainer's own count is followed (syncProgress); declared here for the same reason.
+  let releaseProgress = null;
   const bar = progressBar('Training progress');
   const progressText = h('span', { class: 'runs__progress-text num' });
   const progressEl = h('div', { class: 'runs__progress' }, bar.el, progressText);
@@ -203,11 +260,12 @@ export function createRunDetail(host, { id, summary = null }) {
   const head = h(
     'header',
     { class: 'runs__head' },
-    h('div', { class: 'runs__title-row' }, nameEl, badgeSlot, importedSlot, h('div', { class: 'runs__actions' }, saveBtn, stopBtn, resumeBtn, workersBtn, settingsBtn, replayBtn, compareLink, refreshBtn)),
+    h('div', { class: 'runs__title-row' }, nameEl, badgeSlot, importedSlot, h('div', { class: 'runs__actions' }, saveBtn, stopBtn, forceBtn, resumeBtn, workersBtn, settingsBtn, queueBtn, extendBtn, replayBtn, compareLink, aiBtn, refreshBtn)),
     importedNote,
     phaseSlot,
     failSlot,
     checkpointSlot,
+    queueSlot,
     diskSlot,
     progressEl,
     kv,
@@ -239,7 +297,13 @@ export function createRunDetail(host, { id, summary = null }) {
     .then(() => catalog.load?.())
     .catch(() => {}); // without the catalog, task ids are shown in plain words
   const unsubCatalog = catalog.subscribe(() => renderHead());
+  // The queue says whether a continuation of this run is waiting (the "Add to queue" button and its line).
+  const unsubQueue = queue.subscribe(() => {
+    if (!destroyed) renderHead();
+  });
+  queue.refresh();
   const onVisibility = () => {
+    syncSensors();
     if (!document.hidden && loaded && !polling) schedulePoll(0);
   };
   document.addEventListener('visibilitychange', onVisibility);
@@ -257,18 +321,23 @@ export function createRunDetail(host, { id, summary = null }) {
     // "Imported" only when the status word lacks it; where the run comes from is said once, in the note below.
     const tag = imported && !st.imported ? 'Imported' : '';
     mountKeyed(importedSlot, tag, () => (tag ? badge(tag) : null));
-    stopBtn.hidden = !(st.active && !imported);
+    forceBtn.hidden = !(st.active && !imported && run.attemptId);
+    stopBtn.hidden = !(st.active && !imported) || run.status === 'stopping';
     const resumable = st.resumable && !imported;
     const withSettings = resumable && resumeSettingsOf(run) !== null;
     resumeBtn.hidden = !resumable;
     workersBtn.hidden = !(resumable && !withSettings && run.resumeWorkerOverride === true);
     settingsBtn.hidden = !withSettings;
+    renderQueue(imported);
     renderCheckpoint(st, imported);
-    stopBtn.disabled = busy.stop;
+    stopBtn.disabled = forceBtn.disabled = busy.stop;
     resumeBtn.disabled = busy.resume;
     workersBtn.disabled = busy.resume;
     settingsBtn.disabled = busy.resume;
     refreshBtn.disabled = detailBusy;
+    aiBtn.hidden = !loaded;
+    if (busy.ai) aiBtn.setAttribute('aria-disabled', 'true');
+    else aiBtn.removeAttribute('aria-disabled');
 
     importedNote.hidden = !imported;
     if (imported) setText(importedNote, `${runSourceLabel(run)}. It can be read and compared, but not stopped or resumed.`);
@@ -288,31 +357,45 @@ export function createRunDetail(host, { id, summary = null }) {
 
     watchDisk();
 
-    progressEl.hidden = !hasProgress(run);
-    if (hasProgress(run)) {
-      bar.set(run);
-      const pct = fmt.percent(run.iteration, run.total);
-      setText(progressText, `Iteration ${fmt.int(run.iteration)} of ${fmt.int(run.total)}${pct ? ` (${pct})` : ''}`);
-    }
+    syncProgress();
+    syncSensors();
+    paintProgress();
 
     const facts = [];
     if (run.task) facts.push(['Task', catalog.taskLabel(run.task)]);
+    if (st.active && !imported) facts.push(['Speed', liveSpeedText()]);
     if (run.source === 'archive') facts.push(['Experiments folder', { mono: typeof run.sourceRoot === 'string' ? run.sourceRoot : '' }]);
+    // The rows that come from the trainer's last log sample, named in the line that says which iteration it is.
+    const sampled = [];
     // A run that is not active keeps the trainer's last numbers: its estimate is stale, its speed is the last one.
-    if (Number.isFinite(run.iterationsPerSecond)) facts.push([st.active ? 'Reported speed' : 'Last reported speed', `${fmt.num(run.iterationsPerSecond, 4)} it/s`]);
+    if (Number.isFinite(run.iterationsPerSecond)) {
+      facts.push([st.active ? 'Last logged speed' : 'Last reported speed', `${fmt.num(run.iterationsPerSecond, 4)} it/s`]);
+      sampled.push('logged speed');
+    }
     // The trainer's own estimate: the finish time the service dated it to (`estimatedFinishAt`), then the
     // time left as the trainer reported it. An older service, or an estimate from an undated log line,
     // gives no finish time: the time left is shown alone (fmt.eta).
     const eta = st.active ? fmt.eta(run.eta, run.estimatedFinishAt) : '';
-    if (eta) facts.push(['ETA', eta]);
+    if (eta) {
+      facts.push(['ETA', eta]);
+      sampled.push('ETA');
+    }
+    addSensor(facts, 'Power', 'watts', 'W');
+    addSensor(facts, 'Temperature', 'celsius', '°C');
     const vram = run.vram && typeof run.vram === 'object' ? run.vram : null;
     if (vram && (Number.isFinite(vram.peakAllocatedGB) || Number.isFinite(vram.peakReservedGB))) {
       const parts = [];
       if (Number.isFinite(vram.peakAllocatedGB)) parts.push(`${fmt.num(vram.peakAllocatedGB, 3)} GB allocated`);
       if (Number.isFinite(vram.peakReservedGB)) parts.push(`${fmt.num(vram.peakReservedGB, 3)} GB reserved`);
       facts.push(['Peak memory', parts.join(', ')]);
+      sampled.push('memory peaks');
     }
-    if (Number.isFinite(run.telemetryIteration)) facts.push(['Speed and memory as of', `iteration ${fmt.int(run.telemetryIteration)}`]);
+    addSensor(facts, 'VRAM', 'usedBytes', 'GB', 2 ** 30);
+    // The counter above can run ahead of this sample, so the line names the rows that are as old as it.
+    if (Number.isFinite(run.telemetryIteration) && sampled.length) {
+      const words = sampled.length > 1 ? `${sampled.slice(0, -1).join(', ')} and ${sampled[sampled.length - 1]}` : sampled[0];
+      facts.push([`${words.charAt(0).toUpperCase()}${words.slice(1)} as of`, `iteration ${fmt.int(run.telemetryIteration)}`]);
+    }
     const started = fmt.dateTime(run.startedAt);
     if (started) facts.push(['Started', started]);
     const updated = fmt.dateTime(run.updatedAt);
@@ -320,6 +403,7 @@ export function createRunDetail(host, { id, summary = null }) {
     // fmt.ago falls back to the date itself for a time ahead of the browser clock: do not print it twice.
     if (updated) facts.push(['Last update', ago && ago !== updated ? `${updated} (${ago})` : updated]);
     if (Number.isFinite(run.seed)) facts.push(['Seed', String(run.seed)]);
+    if (run.status === 'stopped' && run.completionReason === 'forceStopped') facts.push(['Stop reason', 'Force stopped']);
     if (Number.isFinite(run.returncode)) facts.push(['Exit code', String(run.returncode)]);
     if (run.queueEntryId) facts.push(['Queue entry', { href: queueHref(run.queueEntryId), text: 'Open its queue entry' }]);
 
@@ -357,6 +441,86 @@ export function createRunDetail(host, { id, summary = null }) {
     });
   }
 
+  /** The iteration shown: the trainer's own count where it has one (state/progress.js), else the summary's. */
+  function shown() {
+    return progress.iterationOf(run);
+  }
+
+  function addSensor(facts, label, field, unit, divisor = 1) {
+    const values = adapters.filter((gpu) => Number.isFinite(gpu[field])).map((gpu) => {
+      const prefix = adapters.length > 1 ? `GPU ${gpu.index}: ` : '';
+      return `${prefix}${fmt.num(gpu[field] / divisor, 3)} ${unit}`;
+    });
+    if (values.length) facts.push([label, values.join(', ')]);
+  }
+
+  function syncSensors() {
+    if (destroyed || document.hidden || head.hidden || !runStatus(run.status).active || isImported(run)) {
+      clearTimeout(sensorTimer);
+      sensorTimer = 0;
+      sensorCtrl?.abort();
+      sensorCtrl = null;
+      adapters = [];
+      return;
+    }
+    if (!sensorTimer && !sensorCtrl) readSensors();
+  }
+
+  async function readSensors() {
+    sensorTimer = 0;
+    const ctrl = new AbortController();
+    sensorCtrl = ctrl;
+    let delay = 5000;
+    try {
+      const sample = await api.gpuSensors({ signal: ctrl.signal });
+      if (ctrl.signal.aborted) return;
+      adapters = sample.adapters;
+      delay = sample.nextPollMs;
+    } catch {
+      if (ctrl.signal.aborted) return;
+      adapters = [];
+    } finally {
+      if (sensorCtrl === ctrl) {
+        sensorCtrl = null;
+        sensorTimer = setTimeout(readSensors, delay);
+        renderHead();
+      }
+    }
+  }
+
+  function liveSpeedText() {
+    const rate = progress.speedOf(run);
+    return rate === null ? 'Waiting for samples…' : `${fmt.num(rate, 4)} iter/s`;
+  }
+
+  // Keep the counter, bar and live speed current without rebuilding the run header.
+  function paintProgress() {
+    if (destroyed) return;
+    const liveSpeed = kvRows.get('Speed');
+    if (liveSpeed) setCount(liveSpeed.dd, liveSpeedText());
+    const it = shown();
+    const has = Number.isFinite(it) && Number.isFinite(run.total);
+    progressEl.hidden = !has;
+    if (has) {
+      bar.set(run, it);
+      const pct = fmt.percent(it, run.total);
+      setCount(progressText, `Iteration ${fmt.int(it)} of ${fmt.int(run.total)}${pct ? ` (${pct})` : ''}`);
+    }
+  }
+
+  // Followed from the first time the run is seen training until this page goes away: a run that ends keeps
+  // its follower, so the counter ends on the trainer's final count and not on an older log line.
+  function syncProgress() {
+    // A hidden head is the "Run not found" page: that run is not followed again.
+    if (destroyed || head.hidden || releaseProgress || !runStatus(run.status).active) return;
+    releaseProgress = progress.follow(id, paintProgress);
+  }
+
+  function releaseFollow() {
+    releaseProgress?.();
+    releaseProgress = null;
+  }
+
   function showError(message) {
     const retry = () => h('button', { class: 'btn btn--sm', type: 'button', onclick: () => fetchDetail() }, 'Try again');
     mountKeyed(errorSlot, message ? `err:${message}` : '', () => (message ? notice('err', `This run could not be refreshed: ${message}`, retry()) : null));
@@ -364,8 +528,10 @@ export function createRunDetail(host, { id, summary = null }) {
 
   function showNotFound() {
     stopPolling();
+    releaseFollow();
     diskOff = true;
     head.hidden = true;
+    syncSensors();
     strip.el.hidden = true;
     panelHost.hidden = true;
     bodyLoading.hidden = true;
@@ -484,6 +650,7 @@ export function createRunDetail(host, { id, summary = null }) {
     if (!res || typeof res !== 'object') return;
     const { log, logCursor, logReset, ...fields } = res;
     const prevStatus = run.status;
+    const attemptChanged = fields.attemptId && fields.attemptId !== run.attemptId;
     // Only the fields that move are taken from a monitor answer, and only when present: for imported runs
     // it leaves out task and total, and dates the log alone (not the recipe), so its updatedAt is not used.
     // A status change reads the full detail again, which replaces everything.
@@ -499,7 +666,7 @@ export function createRunDetail(host, { id, summary = null }) {
     runs.upsert({ id, ...patch });
     renderHead();
     updateParts();
-    if (fields.status !== undefined && fields.status !== prevStatus) fetchDetail();
+    if (attemptChanged || (fields.status !== undefined && fields.status !== prevStatus)) fetchDetail();
   }
 
   // ── tabs ──
@@ -611,6 +778,7 @@ export function createRunDetail(host, { id, summary = null }) {
       return {
         update: (r) => t.setRun(r),
         setShown: (on) => t.setShown(on),
+        source: () => t.source(),
         destroy: () => {
           partGone = true;
           timing?.destroy();
@@ -783,6 +951,13 @@ export function createRunDetail(host, { id, summary = null }) {
   }
 
   // ── actions ──
+
+  async function forceStopRun() {
+    const attempt = run.attemptId;
+    const name = nameOf(run);
+    if (!attempt || !(await confirmForceStop(name)) || destroyed) return;
+    act('stop', () => runs.forceStop(id, attempt), `Force stop requested for ${name}.`, 'Force stop was refused', forceBtn);
+  }
 
   async function stopRun() {
     const name = nameOf(run);
@@ -1070,10 +1245,148 @@ export function createRunDetail(host, { id, summary = null }) {
     }
   }
 
+  /**
+   * "Add to queue" and its line. Offered once the detail is read (a curriculum phase is known only then)
+   * for a stopped run started here, while no continuation of it is open in the queue. "Extend training…"
+   * likewise for a completed run started here.
+   */
+  function renderQueue(imported) {
+    const continuation = queue.continuationOf(id);
+    const offer = loaded && String(run.status).toLowerCase() === 'stopped' && !imported && !run.curriculum && !continuation;
+    queueBtn.hidden = !offer;
+    const name = nameOf(run);
+    const words = `Add to queue: continue ${name} from its newest saved checkpoint`;
+    if (queueBtn.getAttribute('aria-label') !== words) {
+      queueBtn.setAttribute('aria-label', words);
+      queueBtn.setAttribute('title', words);
+    }
+    extendBtn.hidden = !(loaded && String(run.status).toLowerCase() === 'completed' && !imported && !run.curriculum && !continuation);
+    const extendWords = `Extend training: continue ${name} for more iterations`;
+    if (extendBtn.getAttribute('aria-label') !== extendWords) {
+      extendBtn.setAttribute('aria-label', extendWords);
+      extendBtn.setAttribute('title', extendWords);
+    }
+    if (busy.queue) queueBtn.setAttribute('aria-disabled', 'true');
+    else queueBtn.removeAttribute('aria-disabled');
+
+    if (continuation || (queueRefusal && queueRefusal.status !== run.status)) queueRefusal = null;
+    // Its links keep focus: the line is rebuilt on a later render once focus has left it.
+    if (queueSlot.contains(document.activeElement)) return;
+    const place = continuation ? statusPlaceWords(continuation) : '';
+    const paused = Boolean(continuation && continuation.status === 'pending' && queue.get().paused);
+    // A continuation that extends a completed run says how many more iterations it trains.
+    const more = continuation && continuation.additionalIterations !== undefined && continuation.additionalIterations !== null && Number(continuation.additionalIterations) > 0 ? Number(continuation.additionalIterations) : null;
+    const key = continuation
+      ? JSON.stringify(['entry', continuation.id, place, paused, continuation.runId ?? '', more ?? ''])
+      : queueRefusal
+        ? JSON.stringify(['err', name, queueRefusal.message])
+        : '';
+    mountKeyed(queueSlot, key, () => {
+      if (continuation) {
+        return notice(
+          '',
+          h(
+            'span',
+            null,
+            `A continuation of this run is in the queue: ${place}${more !== null ? `, ${fmt.int(more)} more iteration${more === 1 ? '' : 's'}` : ''}.${paused ? ' The queue is paused.' : ''} `,
+            h('a', { href: queueHref(continuation.id), dataset: { continuesRun: id } }, 'Open its queue entry'),
+            continuation.runId && continuation.runId !== id ? [' ', h('a', { href: runHref(continuation.runId) }, 'Open the continuation')] : null,
+          ),
+        );
+      }
+      return queueRefusal ? notice('err', `${name} was not added to the queue: ${queueRefusal.message}`) : null;
+    });
+  }
+
+  /** Queue a continuation of this run; the toast comes from addContinuation (once). */
+  async function addRunToQueue() {
+    if (busy.queue) return;
+    const held = document.activeElement === queueBtn;
+    queueRefusal = null;
+    busy.queue = true;
+    renderHead();
+    let result = null;
+    try {
+      const mod = await import('./queue.js');
+      result = await mod.addContinuation({ runId: id, name: nameOf(run) });
+    } catch (error) {
+      // The queue view's module could not be loaded: nothing was asked of the service.
+      toast(`${nameOf(run)} was not added to the queue: ${error.message}`, { kind: 'err' });
+      result = { ok: false, message: error.message };
+    } finally {
+      busy.queue = false;
+      if (!destroyed) {
+        if (result && !result.ok) queueRefusal = { message: result.message, status: run.status };
+        renderHead();
+        // On success the button gives way to the line about the queued continuation: focus goes to its link.
+        const lost = !document.activeElement || document.activeElement === document.body || queueBtn.hidden;
+        if (held && lost && !document.querySelector('dialog[open]')) {
+          const target = !queueBtn.hidden ? queueBtn : queueSlot.querySelector('a');
+          target?.focus({ preventScroll: true });
+        }
+        if (result) fetchDetail();
+      }
+    }
+  }
+
   function replay() {
     import('./queue.js')
       .then((mod) => mod.openReplayDialog(run))
       .catch((error) => toast(`Replay could not be opened: ${error.message}`, { kind: 'err' }));
+  }
+
+  /** "Extend training…": the dialog asks how many more iterations and adds the continuation (its toast says the outcome). */
+  function extend() {
+    import('./queue.js')
+      .then((mod) => mod.openExtendDialog({ runId: id, name: nameOf(run), run }))
+      .catch((error) => toast(`Extend training could not be opened: ${error.message}`, { kind: 'err' }));
+  }
+
+  /**
+   * "Copy for AI": the service writes the text (GET /api/run/ai-context), this puts it on the clipboard.
+   * The write has to begin inside the press (copyTextWhenReady), so nothing is awaited before it.
+   */
+  function copyForAi() {
+    if (busy.ai) return;
+    busy.ai = true;
+    renderHead();
+    // The log picked in this run's Telemetry tab, when the tab was opened and a log was picked there.
+    // Without a pick the context names the current run and its newest log.
+    const chosen = panels.get('telemetry')?.part?.source?.() ?? null;
+    let logLeft = false;
+    const read = async () => {
+      let answer;
+      try {
+        answer = await api.runAiContext(chosen?.runId ?? id, chosen?.source ?? null);
+      } catch (error) {
+        // The picked log is no longer part of the run: the newest one, where Telemetry goes as well.
+        if (!chosen || error?.status !== 404) throw error;
+        logLeft = true;
+        answer = await api.runAiContext(id, null);
+      }
+      if (typeof answer?.text !== 'string' || !answer.text.trim()) throw new Error('the service sent no text.');
+      return answer.text;
+    };
+    copyTextWhenReady(read())
+      .then(({ ok, text }) => {
+        if (destroyed) return;
+        const log = logLeft
+          ? ' The log picked in Telemetry is no longer part of this run, so the text names the newest one.'
+          : chosen
+            ? ` It names the log picked in Telemetry, ${chosen.source}.`
+            : '';
+        const said = `Copied for AI: a short text that says where ${nameOf(run)} and its files are on the training PC.${log}`;
+        const done = () => toast(said, { kind: 'ok', timeout: log ? 9000 : 6000 });
+        if (ok) done();
+        else openCopyDialog({ title: 'Copy for AI', text, lead: `The browser did not let this page write to the clipboard. This is the text for the assistant.${log}`, onCopied: done });
+      })
+      .catch((error) => {
+        if (!destroyed) toast(`Nothing was copied for AI: ${error?.message ?? error}`, { kind: 'err' });
+      })
+      .finally(() => {
+        busy.ai = false;
+        if (!destroyed) renderHead();
+      });
   }
 
   // ── recipe ──
@@ -1081,7 +1394,7 @@ export function createRunDetail(host, { id, summary = null }) {
   function recipePart(panel) {
     const empty = h('p', { class: 'runs__pad muted' }, 'The service has no saved recipe for this run.');
     const copyBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: copy }, 'Copy');
-    const openBtn = h('button', { class: 'btn btn--sm btn--primary', type: 'button', onclick: open }, 'Open as recipe');
+    const openBtn = h('button', { class: 'btn btn--sm btn--primary', type: 'button', onclick: open, title: 'Edit a new recipe that starts at iteration 0' }, 'Open as recipe');
     const replayRecipeBtn = h('button', { class: 'btn btn--sm', type: 'button', onclick: replay }, 'Replay');
     // The recipe alone is "Copy"; the run file adds the seed, how the run started and where its inputs
     // were, for repeating it or fine-tuning from it on another machine.
@@ -1110,17 +1423,24 @@ export function createRunDetail(host, { id, summary = null }) {
       toast(ok ? 'Copied the recipe.' : 'The recipe was not copied: the browser refused access to the clipboard.', { kind: ok ? 'ok' : 'err' });
     }
 
-    function open() {
-      const name = nameOf(run);
-      openAsRecipe({ yaml: yaml ?? '', name: run.name ?? '', label: `run ${name}` });
+    async function open() {
+      openBtn.disabled = true;
+      try {
+        const fresh = await api.freshRecipe(yaml);
+        if (!destroyed) await openAsRecipe({ yaml: fresh.yaml, name: run.name ?? '', label: `run ${nameOf(run)}` });
+      } catch (error) {
+        if (!destroyed) toast(`Could not open a fresh recipe: ${error.message}`, { kind: 'err' });
+      } finally {
+        openBtn.disabled = false;
+      }
     }
 
     return {
       update(r) {
-        const next = typeof r.yaml === 'string' ? r.yaml : '';
+        const next = r.launchedYaml ?? r.yaml ?? '';
         empty.hidden = Boolean(next);
         block.hidden = !next;
-        setText(hint, isImported(r) ? 'The recipe found beside this experiment, read-only.' : 'The recipe this run was launched with, read-only.');
+        setText(hint, isImported(r) ? 'The recipe found beside this experiment, read-only.' : 'The recipe used for this attempt, read-only.');
         // A run file is made from an attempt whose trainer has exited.
         runFileBtn.hidden = Boolean(runStatus(r.status).active);
         if (next === yaml) return; // unchanged: keep the node, so a text selection in it survives
@@ -1141,17 +1461,20 @@ export function createRunDetail(host, { id, summary = null }) {
     /** The list poll saw this run: a status change while the monitor was idle triggers a poll now. */
     onSummary(next) {
       if (destroyed || !loaded || polling) return;
-      if (next && next.status !== run.status) schedulePoll(0);
+      if (next && (next.status !== run.status || (next.attemptId && next.attemptId !== run.attemptId))) schedulePoll(0);
     },
     tick() {
       if (loaded) renderHead();
     },
     destroy() {
       destroyed = true;
+      syncSensors();
       stopPolling();
+      releaseFollow();
       detailCtrl?.abort();
       document.removeEventListener('visibilitychange', onVisibility);
       unsubCatalog();
+      unsubQueue();
       for (const { part } of panels.values()) {
         try {
           part?.destroy?.();

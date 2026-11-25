@@ -11,7 +11,7 @@
 // mountScores(host, {run, galleryHas(step), onShowImages(step)}) -> {setRun(run), galleryChanged(), destroy()}
 
 import { h, mount, fmt, uid } from '../dom.js';
-import { api } from '../api.js';
+import { api, watchHistory } from '../api.js';
 import { notice, emptyState } from '../ui.js';
 import { runStatus } from '../state/runs.js';
 import { go, compareHref } from '../actions.js';
@@ -19,7 +19,6 @@ import { createChart } from '../components/chart.js';
 import { mountClassReport } from './classes.js';
 
 const PAGE = 100;
-const REFRESH_MS = 10000;
 /** Panel width (CSS px) from which two metric charts sit side by side. */
 const TWO_COLUMNS = 1100;
 /** Plot height divided by column width. */
@@ -57,7 +56,8 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
   let destroyed = false;
   const st = { phase: 'idle', error: '', rows: [], ids: new Set(), next: null, more: false, moreError: '', dataset: null };
   let listAbort = null;
-  let timer = 0;
+  let stopWatching;
+  let watchingActive = false;
   let charts = [];
   let chartKey = '';
   const showButtons = new Map(); // evaluation id -> button
@@ -89,6 +89,12 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
   function accept(page, { prepend = false } = {}) {
     const list = Array.isArray(page?.evaluations) ? page.evaluations.filter((r) => r && Number.isInteger(r.id)) : [];
     const fresh = list.filter((r) => !st.ids.has(r.id));
+    if (prepend && fresh.length) {
+      // A repeat validation can replace the score for the same dataset and step.
+      const key = (r) => JSON.stringify([r.attempt, r.dataset, r.step]);
+      const replacements = new Set(fresh.map(key));
+      st.rows = st.rows.filter((r) => !replacements.has(key(r)));
+    }
     for (const r of fresh) st.ids.add(r.id);
     st.rows = prepend ? [...fresh, ...st.rows] : [...st.rows, ...fresh];
     st.rows.sort((x, y) => y.id - x.id);
@@ -120,25 +126,32 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
     schedule();
   }
 
-  /** While the run trains: new rows every 10 s, added on top; nothing focused is rebuilt. */
-  async function poll() {
-    timer = 0;
-    if (destroyed || !current || !runStatus(current.status).active || st.phase !== 'ready') return;
-    try {
-      const page = await api.validation(current.id, { limit: 50 });
-      if (destroyed) return;
-      if (accept(page, { prepend: true })) renderAll();
-      else if (!st.rows.length) loadOther({ quiet: true });
-    } catch {
-      // A missed refresh is retried at the next tick; the rows shown stay as they are.
-    }
-    schedule();
-  }
-
   function schedule() {
-    clearTimeout(timer);
-    timer = 0;
-    if (!destroyed && current && runStatus(current.status).active) timer = setTimeout(poll, REFRESH_MS);
+    if (destroyed || !current || st.phase !== 'ready') return;
+    const active = runStatus(current.status).active;
+    if (stopWatching ? active === watchingActive : !active) return;
+    // Read once more when training finishes, then release the subscription.
+    stopWatching?.();
+    watchingActive = active;
+    const id = current.id;
+    stopWatching = watchHistory({ kind: 'scores', id }, async (signal) => {
+      // A sleeping phone can miss multiple pages. Stop at the first row we already hold.
+      let before;
+      const rows = [];
+      do {
+        const page = await api.validation(id, { limit: PAGE, before }, { signal });
+        if (signal.aborted || destroyed || current?.id !== id) return;
+        const overlaps = page.evaluations.some((r) => st.ids.has(r.id));
+        rows.push(...page.evaluations);
+        before = overlaps ? null : page.next;
+      } while (before);
+      if (accept({ evaluations: rows }, { prepend: true })) renderAll();
+      else if (!st.rows.length) loadOther({ quiet: true });
+      if (!active) {
+        stopWatching?.();
+        stopWatching = null;
+      }
+    });
   }
 
   async function loadEarlier() {
@@ -454,14 +467,13 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
     chartCols = cols;
     chartHeight = height;
     chartsEl.dataset.cols = String(cols);
-    chartKey = ''; // createChart takes its height once: rebuild at the new size
     renderCharts();
   }
 
   function renderCharts() {
     const rows = shownRows();
     const metrics = metricsOf(rows);
-    const key = JSON.stringify([st.dataset, metrics, chartHeight]);
+    const key = JSON.stringify([st.dataset, metrics]);
     if (key !== chartKey) {
       chartKey = key;
       for (const c of charts) c.chart.destroy();
@@ -473,7 +485,7 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
         return { metric, chart: createChart(box, { title: metric, height: chartHeight, scaleToggle: false, smoothing: false }) };
       });
     }
-    for (const { metric, chart } of charts) chart.update({ series: seriesFor(rows, metric), xLabel: 'Iteration' });
+    for (const { metric, chart } of charts) chart.update({ series: seriesFor(rows, metric), xLabel: 'Iteration', plotHeight: chartHeight });
     chartsEl.hidden = !charts.length;
   }
 
@@ -572,13 +584,15 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
       const before = current?.id;
       current = next;
       if (next.id !== before) {
+        stopWatching?.();
+        stopWatching = null;
         closeClasses();
         chartKey = '';
         table.dataset.key = '';
         otherAbort?.abort();
         Object.assign(other, { id: null, phase: 'idle', error: '', series: [], cut: 0, perImage: null });
         load();
-      } else if (!timer && runStatus(next.status).active && st.phase === 'ready') schedule();
+      } else if (st.phase === 'ready') schedule();
     },
     /** The gallery loaded: show or hide "Show images" per row without rebuilding the table. */
     galleryChanged() {
@@ -586,7 +600,7 @@ export function mountScores(host, { run, galleryHas = () => false, onShowImages 
     },
     destroy() {
       destroyed = true;
-      clearTimeout(timer);
+      stopWatching?.();
       chartObserver.disconnect();
       listAbort?.abort();
       otherAbort?.abort();

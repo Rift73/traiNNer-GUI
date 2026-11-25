@@ -1,0 +1,13 @@
+# traiNNer-GUI 0.1.0 Preview 3
+
+[Download the Windows x64 ZIP](https://github.com/Rift73/traiNNer-GUI/releases/download/v0.1.0-preview.3/traiNNer-GUI-Windows-x64.zip), extract it, and open **traiNNer-GUI.exe**. If you use a Windows shortcut, point it at the extracted Preview 3 EXE.
+
+- **Automatic updates.** Preview 3 checks GitHub for newer previews and stable versions. The managed backend switches on a later idle launch once training and queued work have finished.
+- **Queue and resume.** Drag waiting runs into order, pause the queue with a checkpoint, add a stopped run back to the queue, or extend a completed run by a chosen number of iterations. Continuations keep the run ID and checkpoint history. **Open as recipe** starts a fresh run. **Force stop** ends an unresponsive managed attempt.
+- **Live monitoring.** Follow individual iterations, **Speed**, and validation scores on desktop or phone. **Power**, **Temperature**, and **VRAM** refresh every five seconds alongside **Speed**. On Windows, **VRAM** uses the same dedicated-memory counter as Task Manager. Charts update as scores arrive and catch up when you return to the tab. Compare full TensorBoard run folders, set X and Y ranges, and see resume markers across training attempts. **Copy for AI** shares a run summary and log paths.
+- **Validation images.** Scroll to load more images. In the comparison viewer, **Open in Explorer** selects the file shown as Image A or Image B on the Windows training PC.
+- **Recipe tools.** **VRAM test** measures 20 optimizer updates without creating a run or queue entry. Structured edits produce readable block YAML, including loss stacks.
+- **Perceptual losses.** Added differentiable Butteraugli, SSIMULACRA2, frame-independent VMAF, VIF, ADM and chroma wavelet losses. VOSR downloads and verifies its supported RTX 5090 TensorRT engines and plugin on first use. [Loss options](https://github.com/Rift73/traiNNer-GUI/blob/v0.1.0-preview.3/docs/source/loss_reference.md)
+- **Faster DUAL validation.** On the tested RTX 5090 DUAL Light recipe, a warmed validation pass over all 209 Urban100 and Manga109 images took about 8 seconds, down from 61 seconds. The restored tensors and exported PNGs matched in the paired check.
+
+[Workbench guide](https://github.com/Rift73/traiNNer-GUI/blob/v0.1.0-preview.3/docs/source/workbench.md) · [Windows setup and updates](https://github.com/Rift73/traiNNer-GUI/blob/v0.1.0-preview.3/scripts/windows/README.md)

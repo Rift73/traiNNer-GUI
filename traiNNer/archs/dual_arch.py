@@ -92,10 +92,12 @@ from __future__ import annotations
 
 import math
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache, partial
+from importlib import import_module
+from types import ModuleType
 from typing import Any, Literal
 
 import torch
@@ -273,6 +275,14 @@ class TokenNorm(nn.Module):
         self.norm = nn.LayerNorm(channels, eps=eps)
 
     def forward(self, x: Tensor) -> Tensor:
+        if (
+            not self.training and x.size(1) == 128 and self.norm.weight.dtype == torch.float32
+            and self.norm.bias.dtype == torch.float32 and _cuda_eval_supported(x)
+            and self.norm.weight.is_contiguous() and self.norm.bias.is_contiguous()
+        ):
+            kernels = _validation_module("dual_validation_ops")
+            if kernels is not None:
+                return kernels.token_norm(x, self.norm.weight, self.norm.bias, self.norm.eps)
         precision = calculation_dtype(x.dtype)
         with torch.autocast(device_type=x.device.type, enabled=False):
             result = F.layer_norm(
@@ -728,6 +738,41 @@ def na_geometry(
         )
 
 
+@lru_cache(maxsize=2)
+def _validation_module(name: str) -> ModuleType | None:
+    """A standalone copy of dual_arch.py keeps its PyTorch inference paths."""
+    if not __package__:
+        return None
+    try:
+        return import_module(f".{name}", __package__)
+    except ModuleNotFoundError as error:
+        if error.name != f"{__package__}.{name}":
+            raise
+        return None
+
+
+def _cuda_eval_supported(projected: Tensor) -> bool:
+    return (
+        _HAS_DIRECT_ATTENTION
+        and torch.version.cuda is not None
+        and projected.device.type == "cuda"
+        and projected.dtype in (torch.float16, torch.bfloat16)
+        and not torch.is_grad_enabled()
+        and not torch.compiler.is_compiling()
+        and not torch.onnx.is_in_onnx_export()
+        and not torch.are_deterministic_algorithms_enabled()
+        and torch.cuda.get_device_capability(projected.device)[0] >= 8
+    )
+
+
+def _packed_eval_supported(projected: Tensor) -> bool:
+    return (
+        _cuda_eval_supported(projected)
+        and torch.backends.cuda.mem_efficient_sdp_enabled()
+        and _validation_module("dual_validation_attention") is not None
+    )
+
+
 class _SpatialAttention(_WindowAttention):
     """Spatial attention with shared projections and two routing modes.
 
@@ -1008,6 +1053,8 @@ class _SpatialAttention(_WindowAttention):
         batch, channels, height, width = x.shape
         dim = channels // self.heads
         query, key, value = self._project_qkv(x)
+        if not self.training and _packed_eval_supported(query):
+            return _validation_module("dual_validation_attention").spatial(self, (height, width), query, key, value, context=True)
         query = query * dim**-0.5
         output = x.new_empty((batch, channels, height, width), dtype=query.dtype)
         tile, chunk_size = 16, 4
@@ -1044,10 +1091,12 @@ class _SpatialAttention(_WindowAttention):
             raise ValueError("local_na requires RPB bias and dot-product attention")
         batch, channels, height, width = x.shape
         heads, dim, tile, window = self.heads, channels // self.heads, 8, self.window
+        query, key, value = self._project_qkv(x)
+        if not self.training and _packed_eval_supported(query):
+            return _validation_module("dual_validation_attention").spatial(self, (height, width), query, key, value, context=False)
         geometry = na_geometry(
             (height, width), (height, width), window, tile, 1, x.device
         )
-        query, key, value = self._project_qkv(x)
         query = query * (dim**-0.5)
         dtype = query.dtype
         span = 2 * window - 1
@@ -1341,7 +1390,7 @@ def unpack_grandchildren(x: Tensor) -> Tensor:
     return F.pixel_shuffle(raw.reshape(b, c, h, w), 4)
 
 
-def pack_qk(q: Tensor, k: Tensor, *, na: bool = False) -> tuple:
+def pack_qk(q: Tensor, k: Tensor, *, na: bool = False, inference: bool = False) -> tuple:
     """Pack fine queries with half-resolution keys for attend_packed.
 
     With na=True (DUAL's retrieval_na default) and a coarse grid above 48 on
@@ -1351,7 +1400,8 @@ def pack_qk(q: Tensor, k: Tensor, *, na: bool = False) -> tuple:
     """
     if na and max(k.shape[-2:]) > 48:
         batch, heads = q.shape[0], q.shape[1] // 32
-        geometry = na_geometry(
+        # Packed inference derives its donors directly from image coordinates.
+        geometry = None if inference and _packed_eval_supported(q) else na_geometry(
             tuple(q.shape[-2:]), tuple(k.shape[-2:]), 48, 8, 2, q.device
         )
         query, key = (t.reshape(batch * heads, 32, -1).transpose(1, 2) for t in (q, k))
@@ -1386,6 +1436,8 @@ def attend_packed(
     uses masked SDPA with the default backend order.
     """
     layout, classes, batch = packed
+    if layout is None:
+        return _validation_module("dual_validation_attention").retrieval(*classes, v, log_tau, *batch)
     if isinstance(layout, NAGeometry):
         query, key = classes
         (images, channels, height, width), key_shape = batch
@@ -1755,6 +1807,13 @@ class RegionalChannelAttention(nn.Module):
                         stacklevel=2,
                     )
             return self._mix_na(q, k, v)
+        if (
+            not self.training and _cuda_eval_supported(q)
+            and q.stride() == k.stride() == v.stride()
+        ):
+            kernels = _validation_module("dual_validation_ops")
+            if kernels is not None:
+                return kernels.mix(self, q, k, v)
         result = None
         for sy, sx in ((0, 0), (0, 16), (16, 0), (16, 16)):
             out = self._class_core(q, k, v, sy, sx)
@@ -1866,6 +1925,8 @@ class EDBBReparamConv3x3(nn.Module):
     a static deployment convolution without changing the training instance.
     """
 
+    _validation_kernel: tuple[Tensor, Tensor | None] | None = None
+
     def __init__(self, original: nn.Conv2d) -> None:
         super().__init__()
         if not (
@@ -1925,6 +1986,8 @@ class EDBBReparamConv3x3(nn.Module):
 
     def equivalent_kernel(self, dtype: torch.dtype) -> tuple[Tensor, Tensor | None]:
         """Compose EVERY branch using ordinary autograd, never feature maps."""
+        if not self.training and self._validation_kernel is not None and self._validation_kernel[0].dtype == dtype:
+            return self._validation_kernel
         kernel, bias = self.direct.equivalent_kernel(dtype)
         point, point_bias = self.pointwise.equivalent_kernel(dtype)
         point = point + self.identity_weight.to(dtype).unsqueeze(-1)
@@ -2032,7 +2095,8 @@ class DynamicRouter(nn.Module):
 
 
 def _premixed_conv3x3(
-    x: Tensor, weight0: Tensor, bias0: Tensor, experts: Tensor, coefficients: Tensor
+    x: Tensor, weight0: Tensor, bias0: Tensor, experts: Tensor, coefficients: Tensor,
+    *, inference: bool = False,
 ) -> Tensor:
     """One differentiable mixed kernel per sample, including batch > 1.
 
@@ -2055,6 +2119,10 @@ def _premixed_conv3x3(
             )
             bias = torch.cat((bias0.to(dtype), bias0.new_zeros(count * channels, dtype=dtype)))
         convolved = F.conv2d(x, weight.to(experts.dtype), bias.to(experts.dtype), padding=1)
+        if inference and count == 3 and _cuda_eval_supported(convolved):
+            kernels = _validation_module("dual_validation_ops")
+            if kernels is not None:
+                return kernels.reduce_experts(convolved, coefficients, x)
         with torch.autocast(device_type=x.device.type, enabled=False):
             parts = convolved.to(dtype).unflatten(1, (count + 1, channels))
             output = parts[:, 0] + (
@@ -2120,7 +2188,7 @@ class PremixedDynamicGroupConv3x3(nn.Module):
         dtype = torch.float64 if self.experts.dtype == torch.float64 else torch.float32
         with torch.autocast(device_type=x.device.type, enabled=False):
             weight, bias = self.base.equivalent_kernel(dtype)
-        return _premixed_conv3x3(x, weight, bias, self.experts, self.coefficients(x))
+        return _premixed_conv3x3(x, weight, bias, self.experts, self.coefficients(x), inference=not self.training)
 
     @torch.no_grad()
     def folded(self) -> PremixedDeployedDynamicConv3x3:
@@ -2143,7 +2211,7 @@ class PremixedDeployedDynamicConv3x3(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return _premixed_conv3x3(
-            x, self.base.weight, self.base.bias, self.experts, self.coefficients(x)
+            x, self.base.weight, self.base.bias, self.experts, self.coefficients(x), inference=not self.training
         )
 
 
@@ -2475,7 +2543,7 @@ class DUAL(nn.Module):
         u = self.xr.norm_u(pad_even(h))
         q = self.xr.query(torch.cat((self.xr.norm_f(pad_even(fine)), u), 1))
         k = self.xr.key(self.xr.norm_f(coarse))
-        packed = pack_qk(q, k, na=self.retrieval_na)
+        packed = pack_qk(q, k, na=self.retrieval_na, inference=not self.training)
         o = attend_packed(
             packed,
             pack_children(self.xr.value(u)),
@@ -2508,6 +2576,20 @@ class DUAL(nn.Module):
             out + F.interpolate(shifted, scale_factor=self.scale, mode="nearest") + mean
         )
         return out[:, :, : original_h * self.scale, : original_w * self.scale]
+
+    @contextmanager
+    def validation_session(self):
+        """Reuse folded EDBB weights while this validation dataset has a frozen network."""
+        folds = [layer for layer in self.modules() if isinstance(layer, EDBBReparamConv3x3)]
+        try:
+            with torch.no_grad(), torch.autocast(device_type=self.mean.device.type, enabled=False):
+                for layer in folds:
+                    dtype = calculation_dtype(layer.direct.expand.weight.dtype)
+                    layer._validation_kernel = layer.equivalent_kernel(dtype)
+            yield
+        finally:
+            for layer in folds:
+                layer._validation_kernel = None
 
     def prepare_for_compile(
         self,

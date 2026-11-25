@@ -10,6 +10,14 @@ import { catalog, folderWords } from './state/catalog.js';
 import { badge, confirmDialog, openDialog, promptDialog, toast, countIssues, issueList } from './ui.js';
 import { renderResume, resumeSentence } from './recipe/resume.js';
 
+export function confirmForceStop(name) {
+  return confirmDialog({
+    title: `Force stop ${name}?`,
+    body: 'The trainer and its workers will exit immediately. Any checkpoint being written may be incomplete. You can resume from the last complete training state.',
+    confirmLabel: 'Force stop', cancelLabel: 'Go back', danger: true,
+  });
+}
+
 export function go(hash) {
   if (location.hash !== hash) location.hash = hash;
 }
@@ -252,7 +260,7 @@ export async function addToQueue() {
     'div',
     { class: 'stack' },
     h('p', null, `The queue keeps a copy of the recipe text as it is now${recipe.isDirty() ? ' (it has unsaved changes)' : ''}. Later edits here do not change the queued copy.`),
-    h('p', null, 'An entry on hold never starts by itself. A released entry starts when the trainer is free, after the entries released before it.'),
+    h('p', null, 'An entry on hold never starts by itself. A released entry starts when the trainer is free, after the released entries ahead of it in line.'),
     reviewBlock(s),
     hasErrors
       ? h(

@@ -202,6 +202,12 @@ def build_dataloader(
             worker_context = "spawn"
     dataloader_args["pin_memory"] = bool(num_gpu) and dataset_opt.pin_memory
     prefetch_mode = dataset_opt.prefetch_mode
+    if (
+        dataset_opt.phase == "val" and num_gpu and workers is None
+        and prefetch_mode is None and dataset_opt.type.lower() == "pairedimagedataset"
+    ):
+        # Decode the next full-resolution pair while the current image is on the GPU.
+        return PrefetchDataLoader(num_prefetch_queue=1, multiprocessing_context=worker_context, **dataloader_args)
     if prefetch_mode == "cpu":  # CPUPrefetcher
         num_prefetch_queue = dataset_opt.num_prefetch_queue
         logger = get_root_logger()

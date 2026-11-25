@@ -37,7 +37,7 @@ namespace json = winrt::Windows::Data::Json;
 constexpr wchar_t exe_name[] = L"traiNNer-GUI.exe";
 constexpr wchar_t source_name[] = L"trainner-gui-source.tar.gz";
 constexpr wchar_t zip_name[] = L"traiNNer-GUI-Windows-x64.zip";
-constexpr wchar_t latest_path[] = L"/repos/Rift73/traiNNer-GUI/releases/latest";
+constexpr unsigned releases_per_page = 30;
 constexpr wchar_t download_prefix[] = L"/Rift73/traiNNer-GUI/releases/download/";
 constexpr wchar_t worker_flag[] = L"--trainner-update-worker";
 constexpr wchar_t forwarded_flag[] = L"--trainner-update-forwarded";
@@ -113,6 +113,32 @@ struct Asset {
     std::string digest;
 };
 
+struct UpdateBaseline {
+    Version version;
+    bool include_version;
+
+    // A bare version represents an installed release and excludes the same tag.
+    UpdateBaseline(const Version& version, bool include_version = false)
+        : version(version), include_version(include_version) {}
+
+    bool accepts(const Version& candidate) const {
+        return include_version ? !(candidate < version) : version < candidate;
+    }
+
+    void exclude_seen(const Version& seen) {
+        if (seen < version) return;
+        version = seen;
+        include_version = false;
+    }
+};
+
+UpdateBaseline update_baseline(const Version& own, const std::optional<Release>& current) {
+    // A manually opened newer package can adopt its own tag through the verified cache.
+    if (!current) return {own, false};
+    if (current->version < own) return {own, true};
+    return {current->version, false};
+}
+
 [[noreturn]] void win_error(const char* message) {
     throw std::runtime_error(std::string(message) + " (Windows " + std::to_string(GetLastError()) + ").");
 }
@@ -180,8 +206,15 @@ bool recent(const path& marker, std::chrono::seconds duration) {
     return age >= decltype(age)::zero() && age < duration;
 }
 
-bool discovery_due(const path& root) {
-    return !recent(root / L"checked", discovery_interval) && !recent(root / L"check-attempt", retry_interval);
+path discovery_stamp(const path& root, const char* name, const UpdateBaseline& baseline) {
+    // An older install's check must not delay discovery of the manually opened tag.
+    if (baseline.include_version) return root / (std::string(name) + "-" + TRAINNER_GUI_RELEASE_TAG);
+    return root / name;
+}
+
+bool discovery_due(const path& root, const UpdateBaseline& baseline) {
+    return !recent(discovery_stamp(root, "checked", baseline), discovery_interval)
+        && !recent(discovery_stamp(root, "check-attempt", baseline), retry_interval);
 }
 
 void log(const path& root, const std::string& message) {
@@ -330,31 +363,62 @@ std::uint64_t read_body(const Response& response, std::uint64_t limit, Consume c
     }
 }
 
-std::optional<Asset> latest_asset(HINTERNET session, const Version& baseline) {
-    const auto response = get(session, L"api.github.com", latest_path, L"Accept: application/vnd.github+json");
-    std::string body;
-    read_body(response, 2 * 1024 * 1024, [&](const char* data, DWORD count) { body.append(data, count); });
+struct ListedAsset {
+    std::string tag;
+    Version version;
+    json::JsonObject asset;
+};
 
-    const auto release = json::JsonObject::Parse(wide(body));
-    auto tag = utf8(std::wstring(release.GetNamedString(L"tag_name")));
-    const auto version = parse_version(tag);
-    if (!version || !(baseline < *version) || release.GetNamedBoolean(L"draft", true)) return {};
-    for (const auto& item : release.GetNamedArray(L"assets")) {
-        const auto asset = item.GetObject();
-        if (asset.GetNamedString(L"name") != zip_name || asset.GetNamedString(L"state") != L"uploaded")
-            continue;
-        const auto size = asset.GetNamedNumber(L"size");
-        const auto id = asset.GetNamedNumber(L"id");
-        auto digest = utf8(std::wstring(asset.GetNamedString(L"digest", L"")));
-        if (!std::isfinite(size) || size <= 0 || size > max_zip_size || size != std::floor(size)
-            || !std::isfinite(id) || id <= 0 || id >= 9007199254740992.0 || id != std::floor(id)
-            || digest.size() != 71 || digest.compare(0, 7, "sha256:") != 0
-            || digest.find_first_not_of("0123456789abcdef", 7) != std::string::npos)
-            throw std::runtime_error("GitHub did not provide valid Windows asset size and SHA-256 metadata.");
-        return Asset{{std::move(tag), *version, static_cast<std::uint64_t>(id)},
-                     static_cast<std::uint64_t>(size), digest.substr(7)};
+void consider_releases(const json::JsonArray& releases, const UpdateBaseline& baseline,
+                       std::optional<ListedAsset>& best) {
+    for (const auto& entry : releases) {
+        const auto release = entry.GetObject();
+        if (release.GetNamedBoolean(L"draft", true)) continue;
+        auto tag = utf8(std::wstring(release.GetNamedString(L"tag_name")));
+        const auto version = parse_version(tag);
+        if (!version || !baseline.accepts(*version) || (best && !(best->version < *version))) continue;
+        if (baseline.version.stable && !version->stable) continue;
+        if (version->stable && release.GetNamedBoolean(L"prerelease", true)) continue;
+        for (const auto& item : release.GetNamedArray(L"assets")) {
+            const auto asset = item.GetObject();
+            if (asset.GetNamedString(L"name") == zip_name && asset.GetNamedString(L"state") == L"uploaded") {
+                best = ListedAsset{std::move(tag), *version, asset};
+                break;
+            }
+        }
     }
-    return {};
+}
+
+Asset asset_metadata(const ListedAsset& item) {
+    const auto size = item.asset.GetNamedNumber(L"size");
+    const auto id = item.asset.GetNamedNumber(L"id");
+    const auto digest = utf8(std::wstring(item.asset.GetNamedString(L"digest", L"")));
+    if (!std::isfinite(size) || size <= 0 || size > max_zip_size || size != std::floor(size)
+        || !std::isfinite(id) || id <= 0 || id >= 9007199254740992.0 || id != std::floor(id)
+        || digest.size() != 71 || digest.compare(0, 7, "sha256:") != 0
+        || digest.find_first_not_of("0123456789abcdef", 7) != std::string::npos)
+        throw std::runtime_error("GitHub did not provide valid Windows asset size and SHA-256 metadata.");
+    return {{item.tag, item.version, static_cast<std::uint64_t>(id)},
+            static_cast<std::uint64_t>(size), digest.substr(7)};
+}
+
+std::optional<Asset> latest_asset(HINTERNET session, const UpdateBaseline& baseline) {
+    std::optional<ListedAsset> best;
+    const auto started = std::chrono::steady_clock::now();
+    for (unsigned page = 1;; ++page) {
+        if (std::chrono::steady_clock::now() - started > 2min)
+            throw std::runtime_error("Checking the GitHub release list timed out.");
+        const auto target = L"/repos/Rift73/traiNNer-GUI/releases?per_page="
+            + std::to_wstring(releases_per_page) + L"&page=" + std::to_wstring(page);
+        const auto response = get(session, L"api.github.com", target, L"Accept: application/vnd.github+json");
+        std::string body;
+        read_body(response, 8 * 1024 * 1024, [&](const char* data, DWORD count) { body.append(data, count); });
+        const auto releases = json::JsonArray::Parse(wide(body));
+        consider_releases(releases, baseline, best);
+        if (releases.Size() < releases_per_page) break;
+    }
+    if (!best) return {};
+    return asset_metadata(*best);
 }
 
 std::wstring redirect_location(const Response& response) {
@@ -500,8 +564,8 @@ void prepare(const path& root, const Release& release) {
 }
 
 bool needs_preparation(const std::optional<Release>& candidate, const std::optional<Release>& pending,
-                       const Version& baseline) {
-    return candidate && baseline < candidate->version && (!pending || pending->version < candidate->version);
+                       const UpdateBaseline& baseline) {
+    return candidate && baseline.accepts(candidate->version) && (!pending || pending->version < candidate->version);
 }
 
 void background(const path& profile, const path& root, const Version& own_version) {
@@ -511,25 +575,26 @@ void background(const path& profile, const path& root, const Version& own_versio
     if (!lock) return;
     ensure_directory(root / L"versions");
 
-    auto baseline = own_version;
     const auto current = selection(root, L"current");
     const auto pending = selection(root, L"pending");
     const auto candidate = selection(root, L"candidate");
-    if (current) baseline = std::max(baseline, current->version);
+    const auto baseline = update_baseline(own_version, current);
     if (needs_preparation(candidate, pending, baseline)) prepare(root, *candidate);
-    if (!discovery_due(root)) return;
-    if (pending) baseline = std::max(baseline, pending->version);
-    if (candidate) baseline = std::max(baseline, candidate->version);
+    if (!discovery_due(root, baseline)) return;
+    auto available = baseline;
+    if (pending) available.exclude_seen(pending->version);
+    if (candidate) available.exclude_seen(candidate->version);
 
-    host::atomic_text(root / L"check-attempt", "\n");
+    host::atomic_text(discovery_stamp(root, "check-attempt", baseline), "\n");
     winrt::init_apartment();
     const Internet session(WinHttpOpen(L"traiNNer-GUI Windows updater/1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0), WinHttpCloseHandle);
     if (!session || !WinHttpSetTimeouts(session.get(), 5000, 10000, 10000, 15000))
         win_error("Could not initialize GitHub release discovery");
-    const auto asset = latest_asset(session.get(), baseline);
+    const auto asset = latest_asset(session.get(), available);
+    const auto checked = discovery_stamp(root, "checked", baseline);
     if (!asset) {
-        host::atomic_text(root / L"checked", "\n");
+        host::atomic_text(checked, "\n");
         return;
     }
     const auto zip = root / L"release.zip.partial";
@@ -541,7 +606,7 @@ void background(const path& profile, const path& root, const Version& own_versio
         }
     }
     host::atomic_text(root / L"candidate", asset->release.record());
-    host::atomic_text(root / L"checked", "\n");
+    host::atomic_text(checked, "\n");
     std::error_code ignored;
     std::filesystem::remove(zip, ignored);
     prepare(root, asset->release);
@@ -551,7 +616,7 @@ std::optional<Release> activate(const path& root, const Version& own_version,
                                 std::optional<Release> current) {
     auto pending = selection(root, L"pending");
     auto newer = [&] {
-        return pending && own_version < pending->version && (!current || current->version < pending->version);
+        return pending && update_baseline(own_version, current).accepts(pending->version);
     };
     if (!newer()) return current;
     const auto lock = update_lock(root);
@@ -597,13 +662,18 @@ bool local_profile(const path& profile) {
         && GetDriveTypeW(profile.root_path().c_str()) == DRIVE_FIXED;
 }
 
-void schedule(const path& root, const Version& baseline) {
+void schedule(const path& root, const UpdateBaseline& baseline, const Release* active) {
     const auto candidate = selection(root, L"candidate");
     const auto pending = selection(root, L"pending");
-    if (!discovery_due(root)
+    if (!discovery_due(root, baseline)
         && (!needs_preparation(candidate, pending, baseline)
             || recent(staging_stamp(root, *candidate), retry_interval)))
         return;
+    if (active) {
+        // The shortcut can outlive several releases. Use the installed updater.
+        start_process(active->folder(root) / exe_name, {worker_flag});
+        return;
+    }
     std::wstring exe(32768, L'\0');
     const auto length = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
     if (!length || length >= exe.size()) win_error("Could not locate the current launcher");
@@ -612,6 +682,17 @@ void schedule(const path& root, const Version& baseline) {
 }
 
 } // namespace
+
+void check_managed_source(const path& profile_folder, const std::string& payload) {
+    const auto root = profile_folder / L"updates";
+    const auto current = selection(root, L"current");
+    if (!current) return;
+    const auto own_version = parse_version(TRAINNER_GUI_RELEASE_TAG);
+    const auto source = open_file(current->folder(root) / source_name, FILE_SHARE_READ);
+    if (!own_version || !(current->version < *own_version) || !source || host::sha256(source.get()) != payload)
+        throw host::Exit(busy, "The installed Windows release does not match the selected managed backend "
+                               "or is already as new as this update.");
+}
 
 std::optional<int> dispatch(const path& exe_folder, const path& profile_folder,
                             std::vector<std::wstring>& args, bool packaged) {
@@ -653,16 +734,19 @@ std::optional<int> dispatch(const path& exe_folder, const path& profile_folder,
         return arg == L"--configure" || arg == L"--help" || arg == L"-h" || arg == L"--phone-status";
     });
     auto current = selection(root, L"current");
-    if (ordinary) {
+    if (ordinary)
         current = activate(root, *own_version, std::move(current));
+    // An equal tag can now be the committed result of adopting a downloaded package.
+    const auto* active = current && !(current->version < *own_version) ? &*current : nullptr;
+    if (ordinary) {
         try {
-            schedule(root, current ? std::max(*own_version, current->version) : *own_version);
+            schedule(root, update_baseline(*own_version, current), active);
         } catch (const std::exception& error) {
             log(root, error.what());
         }
     }
-    if (!current || !(*own_version < current->version)) return {};
-    const auto folder = current->folder(root);
+    if (!active) return {};
+    const auto folder = active->folder(root);
     if (host::same_text(exe_folder.lexically_normal().native(), folder.lexically_normal().native()))
         return {};
     auto forwarded = args;

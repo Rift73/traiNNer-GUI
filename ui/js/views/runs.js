@@ -12,9 +12,11 @@
 
 import { h, mount as mountNodes, fmt } from '../dom.js';
 import { runs, runStatus, isImported, runSourceLabel } from '../state/runs.js';
+import { queue, isContinuation } from '../state/queue.js';
+import { progress } from '../state/progress.js';
 import { runHref, compareHref, queueHref, go } from '../actions.js';
 import { badge, emptyState, notice, loading } from '../ui.js';
-import { createRunDetail, progressBar } from '../runs/detail.js';
+import { createRunDetail, progressBar, setCount } from '../runs/detail.js';
 import { mountArchives } from '../runs/archives.js';
 
 let view = null;
@@ -50,7 +52,6 @@ export function parseRoute(param) {
   return { kind: 'run', id: p };
 }
 
-const hasProgress = (run) => Number.isFinite(run?.iteration) && Number.isFinite(run?.total);
 const setText = (node, text) => {
   if (node.textContent !== text) node.textContent = text;
 };
@@ -194,8 +195,21 @@ function createView(el, initialParam) {
         if (left && left !== id) go(compareHref(left, id));
       },
     }, 'Compare');
-    const li = h('li', { class: 'runs__item' }, link, compareBtn);
-    return { li, link, name, status, tag, source, progressText, bar, telemetry, updated, compareBtn };
+    const earlier = h('details', { class: 'runs__earlier', hidden: true }, h('summary', null, 'Earlier attempts'));
+    const li = h('li', { class: 'runs__item' }, link, compareBtn, earlier);
+    return { li, link, name, status, tag, source, progressText, bar, telemetry, updated, compareBtn, earlier };
+  }
+
+  // The row's counter and bar alone: each count the trainer reports repaints only these.
+  function paintRowProgress(row, run) {
+    const it = progress.iterationOf(run);
+    const prog = Number.isFinite(it) && Number.isFinite(run.total);
+    row.progressText.hidden = !prog;
+    row.bar.el.hidden = !prog;
+    if (prog) {
+      setCount(row.progressText, `${fmt.int(it)} of ${fmt.int(run.total)}`);
+      row.bar.set(run, it);
+    }
   }
 
   function updateRow(row, run) {
@@ -204,17 +218,22 @@ function createView(el, initialParam) {
     setText(row.name, label);
     row.link.title = label;
     const st = runStatus(run.status);
-    mountKeyed(row.status, `${st.label}|${st.kind}`, () => badge(st.label, st.kind));
+    const waiting = queue.continuationOf(id);
+    const labelStatus = !st.active && waiting?.status === 'pending' ? 'Queued'
+      : !st.active && waiting?.status === 'held' ? 'On hold' : st.label;
+    mountKeyed(row.status, `${labelStatus}|${st.kind}`, () => badge(labelStatus, labelStatus === st.label ? st.kind : ''));
     // The tag only when the status word does not already say "Imported".
     const imported = isImported(run) && !st.imported;
     mountKeyed(row.tag, imported ? 'imported' : '', () => (imported ? badge('Imported') : null));
-    const prog = hasProgress(run);
-    row.progressText.hidden = !prog;
-    row.bar.el.hidden = !prog;
-    if (prog) {
-      setText(row.progressText, `${fmt.int(run.iteration)} of ${fmt.int(run.total)}`);
-      row.bar.set(run);
+    // Followed from the first time the row shows the run training until the row goes away: a run that ends
+    // keeps its follower, so the counter ends on the trainer's final count and not on an older log line.
+    if (st.active && !row.release) {
+      row.release = progress.follow(id, () => {
+        const now = runs.byId(id);
+        if (now && rows.get(id) === row) paintRowProgress(row, now);
+      });
     }
+    paintRowProgress(row, run);
     // Speed and the trainer's estimate only while the run is active: afterwards they are the last, stale values.
     const tele = [];
     if (st.active && Number.isFinite(run.iterationsPerSecond)) tele.push(`${fmt.num(run.iterationsPerSecond, 3)} it/s`);
@@ -234,14 +253,48 @@ function createView(el, initialParam) {
     else row.link.removeAttribute('aria-current');
     const canCompare = open !== null && String(open) !== id;
     row.compareBtn.hidden = !canCompare;
-    if (canCompare) row.compareBtn.setAttribute('aria-label', `Compare ${label} with ${String(open).startsWith('job:') ? 'the chosen evaluation' : 'the open run'}`);
+    if (canCompare) {
+      const other = String(open).startsWith('job:') ? 'the chosen evaluation'
+        : String(open).startsWith('tb:') ? 'the chosen TensorBoard log' : 'the open run';
+      row.compareBtn.setAttribute('aria-label', `Compare ${label} with ${other}`);
+    }
+  }
+
+  // Older releases put a continuation in a second run folder. Fold only the recorded
+  // source attempt. An independently resumed source or a replay remains a separate row.
+  function groupEarlierAttempts(list) {
+    const byId = new Map(list.map((r) => [r.id, r]));
+    const previous = new Map();
+    const ancestors = new Set();
+    for (const entry of queue.get().entries) {
+      if (!isContinuation(entry) || entry.runId === entry.sourceRunId || !byId.has(entry.runId)) continue;
+      const parent = byId.get(entry.sourceRunId);
+      if (!parent || parent.attemptId !== entry.sourceAttemptId || runStatus(parent.status).active) continue;
+      previous.set(entry.runId, parent);
+      ancestors.add(parent.id);
+    }
+    const earlierByRun = new Map();
+    const visible = list.filter((r) => !ancestors.has(r.id));
+    for (const run of visible) {
+      const chain = [];
+      const seen = new Set([run.id]);
+      let parent = previous.get(run.id);
+      while (parent && !seen.has(parent.id)) {
+        seen.add(parent.id);
+        chain.push(parent);
+        parent = previous.get(parent.id);
+      }
+      if (chain.length) earlierByRun.set(run.id, chain);
+    }
+    return { visible, earlierByRun };
   }
 
   function renderList() {
     if (destroyed) return;
     const s = runs.get();
     const loaded = s.phase === 'ready' || (s.phase === 'error' && s.list.length > 0);
-    const ordered = orderRuns(s.list);
+    const { visible, earlierByRun } = groupEarlierAttempts(s.list);
+    const ordered = orderRuns(visible);
     const shown = filter === 'active' ? ordered.filter((r) => runStatus(r.status).active) : ordered;
     if (s.phase === 'error') {
       mountKeyed(listStatus, `error:${s.error}`, () =>
@@ -259,6 +312,7 @@ function createView(el, initialParam) {
     const keep = new Set(shown.map((r) => String(r.id)));
     for (const [id, row] of rows) {
       if (!keep.has(id)) {
+        row.release?.();
         row.li.remove();
         rows.delete(id);
       }
@@ -271,6 +325,15 @@ function createView(el, initialParam) {
         rows.set(id, row);
       }
       updateRow(row, run);
+      const earlier = earlierByRun.get(id) ?? [];
+      row.earlier.hidden = !earlier.length;
+      const key = JSON.stringify(earlier.map((r) => [r.id, r.iteration, r.status]));
+      if (row.earlier.dataset.key !== key) {
+        row.earlier.dataset.key = key;
+        row.earlier.replaceChildren(h('summary', null, 'Earlier attempts'), ...earlier.map((r) =>
+          h('a', { href: runHref(r.id) }, Number.isFinite(r.iteration)
+            ? `${runStatus(r.status).label} at iteration ${fmt.int(r.iteration)}` : runStatus(r.status).label)));
+      }
       placeAt(listEl, row.li, index);
     });
     if (route.kind === 'auto') resolveAuto();
@@ -417,7 +480,7 @@ function createView(el, initialParam) {
       return;
     }
     const byId = (id) => list.find((r) => String(r.id) === String(id));
-    const ordered = orderRuns(list);
+    const ordered = orderRuns(groupEarlierAttempts(list).visible);
     const target = byId(s.selectedId) ?? ordered.find((r) => runStatus(r.status).active) ?? ordered[0];
     openRun(String(target.id));
     refreshRowMarks();
@@ -485,6 +548,7 @@ function createView(el, initialParam) {
   }
 
   const unsubscribe = runs.subscribe(renderList);
+  const unsubscribeQueue = queue.subscribe(renderList);
   // Relative times ("updated 5 s ago") age between polls; re-render them on a slow tick.
   const agoTimer = setInterval(() => {
     refreshRowMarks();
@@ -501,6 +565,8 @@ function createView(el, initialParam) {
     destroy() {
       destroyed = true;
       unsubscribe();
+      unsubscribeQueue();
+      for (const row of rows.values()) row.release?.();
       clearInterval(agoTimer);
       releaseWatch();
       closeMain();

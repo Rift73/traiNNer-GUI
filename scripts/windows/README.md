@@ -22,9 +22,11 @@ Connect Tailscale on the PC and phone with the same account. Choose **Open on ph
 
 ## Updates
 
-Keep launching the EXE from the folder you extracted. The packaged launcher checks the [latest GitHub release](https://github.com/Rift73/traiNNer-GUI/releases/latest) in the background. An offline launch opens the installed version.
+Starting with Preview 3, keep opening the same EXE. On launch it checks for updates in the background, up to once every four hours after a successful check. A preview can update to a newer preview or a stable release. A stable version receives stable releases. The launcher verifies the Windows ZIP before preparing it. An offline launch opens the installed version.
 
-On a managed install, an update prepares the new trainer alongside the current one. Switching versions waits for training and queued work to finish. Matching Python dependencies are reused. Your Windows workspace keeps the same project UUID, recipes, checkpoints and logs. Refresh a connected phone after the switch to load the updated UI.
+For prerelease discovery, point shortcuts that target Preview 2 at the Preview 3 executable. Opening a newer release manually can prepare its verified package in the background when an older release is installed. Open it again after preparation to switch when the managed workspace is idle.
+
+On a managed install, an update prepares the new trainer alongside the current one. Switching versions waits until a later launch with no active training or unfinished queue entries. An entry on hold also defers the switch. Matching Python dependencies are reused. Your Windows workspace keeps the same project UUID, recipes, checkpoints and logs. Refresh a connected phone after the switch to load the updated UI.
 
 If you chose **Use an existing WSL checkout**, the launcher can update independently. Update that checkout through your normal Git workflow.
 
@@ -56,6 +58,6 @@ In PowerShell, run a GUI executable through **Start-Process -Wait** when an inst
 
 Run **Build-Desktop.ps1 -Package -Destination <Windows release directory>** with the existing Windows C++ Build Tools, clang-cl, CMake and Ninja. Use Python 3 in the source checkout's WSL distribution, or Python 3.12 through the Windows Python launcher for a Windows checkout. The build invokes **scripts/package-windows.py** to produce the source archive, embeds its hash into the x64 launcher, and assembles **traiNNer-GUI-Windows-x64.zip**.
 
-For a new public version, pass its exact GitHub tag to the package build, for example `-Package -ReleaseTag v0.1.1`. Upload **traiNNer-GUI-Windows-x64.zip** to that release and mark it **Latest** for automatic delivery. Use a newer tag for each future update.
+For a new public version, pass its exact GitHub tag to the package build, for example `-Package -ReleaseTag v0.1.1`. Attach **traiNNer-GUI-Windows-x64.zip** to the published release. Preview 3 and later also discover releases marked **Pre-release**. Use a higher version tag for every update, including a new preview number for preview builds.
 
 Running **Build-Desktop.ps1** without **-Package** builds the developer executable for an existing checkout. Use **-BuildDirectory** and **-Destination** to keep scratch builds outside the checkout.

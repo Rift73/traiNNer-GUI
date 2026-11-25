@@ -40,7 +40,7 @@ def _verified_cache(path: Path, expected: str) -> bool:
     return True
 
 
-def _ensure_weights(path: Path, url: str, expected: str) -> Path:
+def ensure_asset(path: Path, url: str, expected: str) -> Path:
     if _verified_cache(path, expected):
         return path
 
@@ -81,8 +81,8 @@ def _ensure_weights(path: Path, url: str, expected: str) -> Path:
 
 
 def ensure_rn50() -> Path:
-    return _ensure_weights(rn50_cache_path(), _RN50_URL, RN50_SHA256)
+    return ensure_asset(rn50_cache_path(), _RN50_URL, RN50_SHA256)
 
 
 def ensure_neuflow() -> Path:
-    return _ensure_weights(neuflow_cache_path(), _NEUFLOW_URL, NEUFLOW_SHA256)
+    return ensure_asset(neuflow_cache_path(), _NEUFLOW_URL, NEUFLOW_SHA256)

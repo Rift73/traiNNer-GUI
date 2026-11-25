@@ -565,6 +565,9 @@ void apply_update(const Profile& profile, const fs::path& folder, bool stage_onl
     lock_settings(profile, snapshot_lock);
     const auto selected = load_settings(profile);
     const auto expected = selected ? read_text(profile.config()) : string{};
+    // Applying the same payload again can finish a previously interrupted Windows commit.
+    if (selected && selected->managed && selected->root != managed_root && selected->payload != payload_hash)
+        updates::check_managed_source(profile.folder, selected->payload);
     snapshot_lock.reset();
     if (!selected) return;  // No workspace has been configured yet.
     if (!selected->managed) {

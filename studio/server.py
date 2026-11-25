@@ -7,6 +7,7 @@ import signal
 import logging
 import mimetypes
 import os
+import re
 import shutil
 from contextlib import ExitStack
 from functools import cached_property, partial
@@ -25,6 +26,7 @@ from .yaml_edit import render
 LOG = logging.getLogger("trainner-gui")
 MAX_BODY = 6 * 1024 * 1024
 PHONE_ACCESS_ROUTE = "/api/phone-access"
+_RUN_PROGRESS_ROUTE = re.compile(r"/api/runs/([^/]+)/progress")
 
 
 def is_phone_access_route(route: str) -> bool:
@@ -59,6 +61,8 @@ class Services:
         self.library = RecipeLibrary(self.root, self.state, project=self.workspace.project)
         self.ui = self.root / "ui"
         self.queue_wake = None
+        from .vram_test import VramTest
+        self.vram_test = VramTest(self)
 
     @cached_property
     def runs(self):
@@ -105,6 +109,11 @@ class Services:
                                        input_precondition=body.get("inputPrecondition"))
         elif route == "/api/queue/pause":
             result = self.queue.set_paused(required(body,"paused",bool))
+        elif route == "/api/queue/reorder":
+            result = self.queue.reorder(required(body, "expected", list), required(body, "order", list))
+        elif route == "/api/queue/resume":
+            extra = required(body, "additionalIterations", int) if "additionalIterations" in body else None
+            result = self.queue.resume(required(body, "runId"), body.get("requestId"), additional_iterations=extra)
         elif route == "/api/queue/replay":
             result = self.queue.replay(required(body,"runId"), body.get("requestId"))
         elif route.removeprefix("/api/queue/") in actions:
@@ -169,6 +178,12 @@ class Services:
             return self.runs.provenance(required(query,"id"))
         if route == "/api/archives":
             return self.runs.archives.list_archives()
+        if route == "/api/vram-test":
+            return self.vram_test.status()
+        if route == "/api/gpu-sensors":
+            from .gpu_sensors import readings
+
+            return readings()
         if route == "/api/status":
             return self.status()
         if route == "/api/queue":
@@ -191,6 +206,8 @@ class Services:
             return self.library.schema()
         if route == "/api/runs":
             return self.runs.list_runs()
+        if progress := _RUN_PROGRESS_ROUTE.fullmatch(route):
+            return self.runs.progress(progress[1])
         if route == "/api/run/monitor":
             return self.runs.monitor(required(query,"id"),query.get("cursor"))
         if route == "/api/run/timing":
@@ -200,10 +217,66 @@ class Services:
                           source=query.get("source"), against_source=query.get("againstSource"),
                           from_step=int(query["from"]) if query.get("from") is not None else None,
                           to_step=int(query["to"]) if query.get("to") is not None else None)
-        if route == "/api/run/history":
+        if route == "/api/run/ai-context":
+            from .ai_context import ai_context
+
+            return ai_context(self.runs, self.queue, required(query, "id"), query.get("source"))
+        if route == "/api/history/revision":
+            from .history import history_revision
+            from .paths import local_path
+
+            kind = required(query, "kind")
+            if kind == "tensorboard":
+                root = local_path(required(query, "path"), self.root).resolve(strict=True)
+                if not root.is_dir() and not (root.is_file() and root.name.startswith("events.out.tfevents.")):
+                    raise ValueError("Choose a TensorBoard run folder or event file.")
+            elif kind in ("scores", "training", "comparison"):
+                root = self.runs.experiment_dir(required(query, "id"))
+            else:
+                raise ValueError("Unknown chart history.")
+            return history_revision(root, kind, query.get("cursor"))
+        if route in ("/api/run/history", "/api/tensorboard/history"):
             from .history import history
             def integer(name, default=None):
                 return int(query[name]) if name in query else default
+            if route == "/api/tensorboard/history":
+                from .paths import local_path
+                from .tensorboard_history import combined_history, folder_writers
+
+                path = local_path(required(query, "path"), self.root)
+
+                if path.is_file() and path.name.startswith("events.out.tfevents.") and not path.is_symlink():
+                    # The original file endpoint remains available to existing clients.
+                    return history(path.parent.resolve(), self.state, f"TensorBoard/experiment/{path.name}",
+                                   query.get("metric"), integer("budget", 1000), integer("from"), integer("to"))
+                folder = path.resolve(strict=True)
+                return combined_history(folder_writers(folder), folder, self.state, query.get("source"),
+                                        query.get("metric"), integer("budget", 1000), integer("from"), integer("to"))
+            if query.get("scope") == "comparison":
+                from .lineage_history import comparison_writers, training_history
+                from .tensorboard_history import combined_history
+
+                run_id = required(query, "id")
+                writers, resumes, partial = comparison_writers(self.runs, self.queue, run_id)
+                if writers:
+                    from .runs import RUN_ID
+
+                    validation = None
+                    if not query.get("source") and RUN_ID.fullmatch(run_id):
+                        validation = self.runs.experiment_dir(run_id), self.runs.attempt_dir(run_id).name
+                    result = combined_history(writers, f"run:{run_id}", self.state, query.get("source"),
+                                              query.get("metric"), integer("budget", 1000), integer("from"), integer("to"),
+                                              validation=validation)
+                    if not query.get("source"):
+                        result.update(resumeSteps=resumes, partialHistory=partial)
+                    return result
+                return training_history(self.runs, self.queue, self.state, run_id, query.get("metric"),
+                                        integer("budget", 1000), integer("from"), integer("to"))
+            if query.get("scope") == "training" and not query.get("source"):
+                from .lineage_history import training_history
+
+                return training_history(self.runs, self.queue, self.state, required(query, "id"),
+                                        query.get("metric"), integer("budget", 1000), integer("from"), integer("to"))
             return history(self.runs.experiment_dir(required(query, "id")), self.state,
                            query.get("source"), query.get("metric"), integer("budget", 1000),
                            integer("from"), integer("to"))
@@ -238,6 +311,10 @@ class Services:
         raise FileNotFoundError("Unknown API endpoint.")
 
     def post(self, route, body):
+        if route == "/api/run/reveal-image":
+            from .gallery import reveal_image
+
+            return reveal_image(self.runs.experiment_dir(required(body, "id")), body)
         with studio_admission(self.root):
             return self._post(route, body)
 
@@ -246,6 +323,19 @@ class Services:
             from . import tailnet
 
             return tailnet.request_phone_access(self.root, self.state, required(body, "action"))
+        if route == "/api/vram-test/cancel":
+            return self.vram_test.cancel(required(body, "id"))
+        if route == "/api/vram-test":
+            text = required(body, "yaml")
+            check = preflight(text, self.library)
+            if not check["ok"]:
+                raise RecipeRejected(check["issues"])
+            config = check["config"]
+            if config.get("num_gpu") == 0:
+                raise ValueError("VRAM test requires a CUDA training recipe.")
+            return self.vram_test.start(launch_text(text, config, self.root), config.get("name"))
+        if route == "/api/recipe/fresh":
+            return {"yaml": self.runs.fresh_recipe(required(body, "yaml"))}
         if route == "/api/catalog/refresh":
             return self.library.refresh_catalog()
         if route == "/api/reproduction/export":
@@ -341,7 +431,8 @@ class Services:
                 return {**result, "sourceRunId": record["id"], "sourceRecipe": record["sourceRecipe"]}
             return import_toml(required(body, "toml"), self.library, source_root=body.get("sourceRoot"))
         if route == "/api/render":
-            return {"yaml":render(required(body,"yaml"), required(body,"edits",list))}
+            edits = required(body, "edits", list)
+            return {"yaml": render(required(body, "yaml"), edits, format_all=not edits)}
         if route == "/api/recipes":
             return self.library.save(required(body,"name"), required(body,"yaml"),body.get("revision"))
         if route == "/api/data/scan":
@@ -365,6 +456,8 @@ class Services:
             if previous is not None and not isinstance(previous, str):
                 raise ValueError("previousRequestId must be a checkpoint request ID or null.")
             return self.runs.request_checkpoint(required(body, "id"), required(body, "attemptId"), previous)
+        if route == "/api/runs/force-stop":
+            return self.runs.stop(required(body, "id"), force_attempt=required(body, "attemptId"))
         if route == "/api/runs/stop":
             return self.runs.stop(required(body,"id"))
         if route == "/api/runs/resume":
@@ -473,7 +566,11 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self):
         request = urlsplit(self.path)
         route = unquote(request.path)
-        self._cache_control = "no-store" if is_phone_access_route(route) else "no-cache"
+        self._cache_control = (
+            "no-store"
+            if is_phone_access_route(route) or _RUN_PROGRESS_ROUTE.fullmatch(route)
+            else "no-cache"
+        )
         self._authorize()
         query = {k:v[-1] for k,v in parse_qs(request.query, max_num_fields=32).items()}
         if self.command == "POST":
@@ -602,6 +699,7 @@ def serve(root: Path, state: Path, port: int, desktop_fd: int | None = None) -> 
             service.callback(forget, state)
             dispatch = service.enter_context(QueueDispatcher(state, lambda: services.queue))
             services.queue_wake = dispatch.wake
+            service.callback(services.vram_test.close)
             if desktop_fd is None:
                 from .tailnet import auto_start
                 auto_start(root, state)

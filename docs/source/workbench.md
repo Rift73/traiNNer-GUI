@@ -31,6 +31,8 @@ When evaluating a model that predicts only Y or UV, choose where the other plane
 
 The normal trainer CLI, YAML recipes and existing checkpoints remain available. Training assets and output files are local to this machine. With a Windows project selected, editable recipes and run outputs live on that drive. For traditional checkouts, the workbench stores recipes and managed run outputs with its service state under `$XDG_STATE_HOME/traiNNer-GUI` (by default `~/.local/state/traiNNer-GUI`) in a subdirectory for this checkout. To use a different location, supply `--state-dir` before the command. To recover a Windows project after reinstalling the backend, select the same folder in Windows setup and open its run in **Runs**. Resume from a complete numbered checkpoint. Keep referenced datasets and pretrained files available at the paths in the recipe. Stop training before moving a project or opening it through another backend. The training queue and analysis history belong to the Linux service. Closing the browser leaves training under its supervisor. Use Run controls to stop a training job.
 
+In an active run, **Speed**, **Power**, **Temperature**, and **VRAM** refresh every five seconds. On Windows, **VRAM** shows the dedicated GPU memory in Task Manager. **Peak memory** shows the trainer’s peak allocations and reservations.
+
 ### Save or adjust an active experiment
 
 In **Runs**, open a managed training run and choose **Save checkpoint**. Training continues. Wait for the saved iteration before using the numbered checkpoint. Repeated requests while a save is pending share that checkpoint.
@@ -40,6 +42,10 @@ To change batch size or learning rate, stop the run and choose **Resume with oth
 ### Train RDUAL on video episodes
 
 Choose the RDUAL starter recipe or open an existing RDUAL YAML. In **Datasets**, select the video folder, or choose specific episodes if the folder also contains extras. Use the MKV files directly, including on a Windows drive. Set the descale size and kernel for the source, check the video indexes, then prepare any missing or outdated indexes. Each episode gets a small JSON file in the adjacent `index` folder. For a fresh model or DUAL Light warm start, select a local NeuFlow v2 file under **Pretrained weights**, or leave the field empty to let the trainer locate and, if needed, download the default weights at startup. An RDUAL checkpoint with trained flow supplies its own weights. See the [RDUAL training guide](../RDUAL.md).
+
+## Pausing training in the queue
+
+Choose **Pause the queue** to save the active queued run at the next safe training update and keep its place. Once the checkpoint is saved and the trainer exits, the GPU is free. Choose **Resume the queue** to continue that run from the saved iteration, with the remaining entries in their original order.
 
 ## Train on a remote Linux server
 

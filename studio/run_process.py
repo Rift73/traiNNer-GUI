@@ -10,12 +10,17 @@ from __future__ import annotations
 import fcntl
 import itertools
 import json
+import logging
+import mmap
 import os
 import signal
+import stat
+import struct
 import subprocess
 import sys
 import time
 import traceback
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Thread
@@ -23,7 +28,12 @@ from typing import Any
 
 from .recipes import atomic_text
 from .run_checkpoints import stage_import, verify_phase_output
-from .workspace import PROJECT_DIR_ENV, PROJECT_ID_ENV, WindowsProject
+from .workspace import PROJECT_DIR_ENV, PROJECT_ID_ENV, WindowsProject, require_ext4
+
+LOG = logging.getLogger(__name__)
+PROGRESS_ENV = "TRAINNER_STUDIO_PROGRESS"
+_PROGRESS_FILE = "progress.bin"
+_PROGRESS = struct.Struct("<q")
 
 
 def timestamp(value: float | None = None) -> str:
@@ -55,6 +65,52 @@ def lock_held(path: Path) -> bool:
     except FileNotFoundError:
         pass
     return False
+
+
+def _remove_progress(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        LOG.warning("Could not remove the live iteration counter at %s. %s", path, error)
+
+
+def _create_progress(control: Path) -> Path | None:
+    path = control / _PROGRESS_FILE
+    created = False
+    try:
+        require_ext4(control)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        created = True
+        try:
+            if os.write(fd, _PROGRESS.pack(-1)) != _PROGRESS.size:
+                raise OSError("Incomplete live iteration counter initialization.")
+        finally:
+            os.close(fd)
+    except (OSError, ValueError) as error:
+        if created:
+            _remove_progress(path)
+        LOG.warning("Live iteration is unavailable for attempt %s. %s", control.name, error)
+        return None
+    return path
+
+
+def read_progress(control: Path) -> int | None:
+    """Sample the current attempt's fixed-size counter without retaining a mapping."""
+    try:
+        fd = os.open(control / _PROGRESS_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != _PROGRESS.size:
+                return None
+            # The writer never truncates this inode. If the supervisor unlinks it
+            # during this read, the open descriptor still refers to the same bytes.
+            with mmap.mmap(fd, _PROGRESS.size, access=mmap.ACCESS_READ) as counter:
+                (iteration,) = _PROGRESS.unpack(counter)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return None
+    return iteration if iteration >= 0 else None
 
 
 def cli_trainer_running() -> bool:
@@ -150,27 +206,35 @@ def launch(
 
 
 def _run_trainer(
-    control: Path, leases: tuple[int, ...], command: dict[str, Any]
-) -> tuple[int, bool]:
+    control: Path, leases: tuple[int, ...], command: dict[str, Any], progress: Path | None
+) -> tuple[int, str | None]:
     # Ensure waitid can pin the child's identity until its group is drained.
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    env = os.environ.copy()
+    env.pop(PROGRESS_ENV, None)
+    if progress is not None:
+        env[PROGRESS_ENV] = str(progress)
     trainer = subprocess.Popen(
         command["argv"],
         cwd=command["cwd"],
+        env=env,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         pass_fds=leases,
     )
     (control / "launched").touch()
 
-    sent = False
+    stop_signal = None
     while (
         os.waitid(os.P_PID, trainer.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
     ):
-        if not sent and (control / "stop").is_file():
-            # A direct child cannot have its PID recycled before we reap it.
+        if stop_signal != "forceStopped" and (control / "force-stop").is_file():
+            # The unreaped leader pins this attempt's private process group, including loaders.
+            os.killpg(trainer.pid, signal.SIGKILL)
+            stop_signal = "forceStopped"
+        elif stop_signal is None and (control / "stop").is_file():
             os.kill(trainer.pid, signal.SIGINT)
-            sent = True
+            stop_signal = "interrupted"
         time.sleep(0.25)
 
     # The trainer has now exited. Clean up only its private group, with its
@@ -180,7 +244,7 @@ def _run_trainer(
         os.killpg(trainer.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    return trainer.wait(), sent
+    return trainer.wait(), stop_signal
 
 
 def _supervise(
@@ -191,7 +255,7 @@ def _supervise(
     project = None
     if control != attempt:
         project = WindowsProject(Path(os.environ[PROJECT_DIR_ENV]), os.environ[PROJECT_ID_ENV])
-    with (control / "supervisor.lock").open("ab") as owner:
+    with (control / "supervisor.lock").open("ab") as owner, ExitStack() as cleanup:
         fcntl.flock(owner, fcntl.LOCK_EX)
         started_ns = time.time_ns()
         result: dict[str, Any] = {}
@@ -221,7 +285,10 @@ def _supervise(
                 capture_attempt(Path(command["cwd"]), state, attempt)
                 if project is not None:
                     project.require_directory(experiment)
-                code, stop_sent = _run_trainer(control, leases, command)
+                progress = _create_progress(control)
+                if progress is not None:
+                    cleanup.callback(_remove_progress, progress)
+                code, stop_signal = _run_trainer(control, leases, command, progress)
                 result["returncode"] = code
                 if code == 0:
                     outcome = read_record(attempt / "outcome.json")
@@ -230,7 +297,7 @@ def _supervise(
                         # Compatibility with an older trainer finishing during an upgrade.
                         ended = any("End of training. Time consumed:" in line
                                     for line in tail(engine_log(experiment, since=started_ns)))
-                        if not ended and not stop_sent:
+                        if not ended and stop_signal is None:
                             raise ValueError("Trainer exited without completion or interruption evidence.")
                         result["status"] = "completed" if ended else "stopped"
                     else:
@@ -254,7 +321,9 @@ def _supervise(
                         verify_phase_output(
                             experiment, (attempt / "options.yml").read_text(encoding="utf-8"), phase["targetStep"]
                         )
-                elif stop_sent and code in (130, -signal.SIGINT):
+                elif stop_signal == "forceStopped" and code == -signal.SIGKILL:
+                    result.update(status="stopped", completionReason="forceStopped")
+                elif stop_signal and code in (130, -signal.SIGINT):
                     result["status"] = "stopped"
                 else:
                     result.update(
@@ -265,6 +334,8 @@ def _supervise(
             result.update(status="failed", error=str(error))
         if project is not None:
             project.require_directory(attempt)
+        if result.get("status") == "stopped" and "returncode" not in result and (control / "force-stop").is_file():
+            result["completionReason"] = "forceStopped"
         write_record(attempt / "result.json", {**result, "updatedAt": timestamp()})
 
 

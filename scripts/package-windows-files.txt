@@ -734,6 +734,7 @@ studio/STUDIES.md
 studio/SUPERVISED_SPLIT.md
 studio/__init__.py
 studio/__main__.py
+studio/ai_context.py
 studio/alignment.py
 studio/analysis_jobs.py
 studio/catalog_refresh.py
@@ -754,8 +755,11 @@ studio/evaluate.py
 studio/external_runs.py
 studio/files.py
 studio/gallery.py
+studio/gpu_memory.js
+studio/gpu_sensors.py
 studio/history.py
 studio/image_difference.py
+studio/lineage_history.py
 studio/loss_report.py
 studio/native.py
 studio/neosr.py
@@ -798,6 +802,7 @@ studio/validation_summary.py
 studio/video_indexing.py
 studio/video_sources.py
 studio/video_split.py
+studio/vram_test.py
 studio/weight_convert.py
 studio/weight_drift.py
 studio/weights.py
@@ -837,6 +842,9 @@ traiNNer/archs/drft_tensorrt_rewrite.py
 traiNNer/archs/drt_arch.py
 traiNNer/archs/dual_arch.py
 traiNNer/archs/dual_discriminator_arch.py
+traiNNer/archs/dual_validation_attention.py
+traiNNer/archs/dual_validation_mma.py
+traiNNer/archs/dual_validation_ops.py
 traiNNer/archs/dunet_arch.py
 traiNNer/archs/dwt_arch.py
 traiNNer/archs/efrlfn_arch.py
@@ -978,6 +986,23 @@ traiNNer/data/webp_reconstruct.py
 traiNNer/evaluation.py
 traiNNer/losses/SPARK_LICENSE.txt
 traiNNer/losses/__init__.py
+traiNNer/losses/_butteraugli/LICENSE
+traiNNer/losses/_butteraugli/LICENSE.libjxl
+traiNNer/losses/_butteraugli/THIRD_PARTY_NOTICES.md
+traiNNer/losses/_butteraugli/__init__.py
+traiNNer/losses/_butteraugli/metric.py
+traiNNer/losses/_butteraugli/stencil_cuda.py
+traiNNer/losses/_ssimulacra2.py
+traiNNer/losses/_vmaf/LICENSE
+traiNNer/losses/_vmaf/LICENSE.Netflix
+traiNNer/losses/_vmaf/__init__.py
+traiNNer/losses/_vmaf/adm.py
+traiNNer/losses/_vmaf/filter_cuda.py
+traiNNer/losses/_vmaf/svm_predict.py
+traiNNer/losses/_vmaf/utils.py
+traiNNer/losses/_vmaf/vif.py
+traiNNer/losses/_vmaf/vmaf_v0.6.1.json
+traiNNer/losses/_vosr_assets.py
 traiNNer/losses/adists_loss.py
 traiNNer/losses/aesop_loss.py
 traiNNer/losses/basic_loss.py
@@ -1002,6 +1027,7 @@ traiNNer/losses/neosr_image_loss.py
 traiNNer/losses/perceptual_anime_loss.py
 traiNNer/losses/perceptual_fp16_loss.py
 traiNNer/losses/perceptual_loss.py
+traiNNer/losses/quality_loss.py
 traiNNer/losses/sobel_edge_loss.py
 traiNNer/losses/spark_loss.py
 traiNNer/losses/structure_texture_loss.py
@@ -1016,6 +1042,7 @@ traiNNer/metrics/metric_util.py
 traiNNer/metrics/neosr_pixels.py
 traiNNer/metrics/psnr_ssim.py
 traiNNer/metrics/session.py
+traiNNer/metrics/ssim_cuda.py
 traiNNer/metrics/topiq.py
 traiNNer/models/__init__.py
 traiNNer/models/ae_model.py
@@ -1226,6 +1253,7 @@ ui/js/recipe/schema.js
 ui/js/recipe/sections.js
 ui/js/recipe/source-pane.js
 ui/js/recipe/video-prep.js
+ui/js/recipe/vram-test.js
 ui/js/recipe/yaml-highlight.js
 ui/js/runs/analysis.js
 ui/js/runs/archives.js
@@ -1261,6 +1289,7 @@ ui/js/runs/videoindex.js
 ui/js/state/catalog.js
 ui/js/state/conn.js
 ui/js/state/data.js
+ui/js/state/progress.js
 ui/js/state/queue.js
 ui/js/state/recipe.js
 ui/js/state/runs.js

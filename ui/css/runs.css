@@ -319,14 +319,37 @@
 
 .runs__tele-status {
   flex: 1 1 240px;
+  min-width: 0;
+  overflow-wrap: anywhere; /* it names the log, and a TensorBoard event file has a long name */
   font-size: var(--text-sm);
 }
 
 .runs__tele-source {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--s2);
+  min-width: 0;
   font-size: var(--text-sm);
+}
+
+/* A long log name (a TensorBoard event file) shrinks the list or breaks; the copy buttons keep their width. */
+.runs__tele-source > .select {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.runs__tele-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runs__tele-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
 }
 
 .runs__tele {
@@ -440,6 +463,25 @@
   flex-wrap: wrap;
   font-size: var(--text-sm);
 }
+
+.chart__bounds:not([hidden]) {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+}
+.chart__bound-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  gap: var(--s2);
+}
+.chart__bound-fields label {
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--text-sm);
+}
+.chart__bound-fields input { min-width: 0; width: 100%; }
+.chart__range-error { color: var(--err); margin: 0; }
 
 .chart__smooth {
   margin-left: var(--s3);
@@ -1194,3 +1236,11 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.runs__item:has(> .runs__earlier:not([hidden])) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.runs__earlier { grid-column: 1 / -1; padding: 0 var(--s3) var(--s2); }
+.runs__earlier summary { cursor: pointer; }
+.runs__earlier a { display: block; padding: 0.35rem 0; }

@@ -110,10 +110,10 @@ export function folderOfPath(path) {
 // ───────── dialog ─────────
 
 /**
- * @param {{title?: string, mode?: 'folder'|'file', start?: string, extensions?: string[]|null, confirmLabel?: string}} options
+ * @param {{title?: string, mode?: 'folder'|'file', start?: string, extensions?: string[]|null, showFilesInitially?: boolean, confirmLabel?: string}} options
  * @returns {Promise<string|null>} absolute path on the trainer machine, or null when cancelled
  */
-export function pickPath({ title, mode = 'folder', start = '', extensions = null, confirmLabel, multiple = false, selected = [] } = {}) {
+export function pickPath({ title, mode = 'folder', start = '', extensions = null, confirmLabel, showFilesInitially = false, multiple = false, selected = [] } = {}) {
   const fileMode = mode === 'file';
   /** Several files ticked in one visit (file mode only); every other mode is untouched by it. */
   const multi = fileMode && multiple === true;
@@ -231,6 +231,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   };
   const hidden = toggle('Show hidden', () => listing && load(listing.path));
   const showFiles = fileMode ? null : toggle('Show files', () => listing && load(listing.path, { keepActive: true }));
+  if (showFiles) showFiles.input.checked = showFilesInitially;
 
   const noteBox = h('div', { class: 'picker__note' });
   const errorBox = h('p', { class: 'picker__error', role: 'alert' });
@@ -327,7 +328,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   // ── what Confirm would return ──
   function chosenPath() {
     if (!listing) return null;
-    if (fileMode) return active?.kind === 'file' ? joinPath(listing.path, active.name) : null;
+    if (fileMode) return active?.kind === 'file' && selectable(active) ? joinPath(listing.path, active.name) : null;
     return active?.kind === 'folder' ? joinPath(listing.path, active.name) : listing.path;
   }
 
@@ -633,7 +634,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
 
   // ── several files ──
   const pathOf = (entry) => joinPath(listing?.path ?? '', entry.name);
-  const pickable = (entry) => multi && entry?.kind === 'file' && matchesExtensions(entry.name, extensions);
+  const pickable = (entry) => multi && entry?.kind === 'file' && selectable(entry);
   const shownPickable = () => (listing?.entries ?? []).filter(pickable);
 
   function paintPicked(entry) {
@@ -693,7 +694,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
   function appendRows(entries) {
     const frag = document.createDocumentFragment();
     for (const entry of entries) {
-      const dim = entry.kind === 'file' && (!fileMode || !matchesExtensions(entry.name, extensions));
+      const dim = entry.kind === 'file' && (!selectable(entry) || !matchesExtensions(entry.name, extensions));
       const tick = pickable(entry);
       const row = h(
         'div',
@@ -747,7 +748,7 @@ export function pickPath({ title, mode = 'folder', start = '', extensions = null
     if (entry.kind === 'folder') openPath(joinPath(listing.path, entry.name), { walk: false });
     // Several files: Enter on a file ticks it; only the button at the foot hands the set back.
     else if (multi) toggleEntry(entry);
-    else if (fileMode) dialogHandle.close(joinPath(listing.path, entry.name));
+    else if (fileMode && selectable(entry)) dialogHandle.close(joinPath(listing.path, entry.name));
   }
 
   /**

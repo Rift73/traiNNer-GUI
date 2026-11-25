@@ -2,15 +2,18 @@
 // person picks, beside the latest values the service read (`run.metrics`). Indexing of a long log is
 // incremental on the service: while `more` is true this module asks again and shows how far it got.
 // Background refreshes update nodes in place; the series picker is never rebuilt.
+// Beside the log's name: "Copy log path", the place of that file on the training PC as the service gave it
+// (`sourcePaths` of the same answer; a Windows and a WSL form when the service runs in WSL). The page
+// never builds a path itself.
 
 import { h, fmt, uid } from '../dom.js';
-import { api } from '../api.js';
+import { api, watchHistory } from '../api.js';
 import { runStatus } from '../state/runs.js';
-import { emptyState, notice, loading } from '../ui.js';
+import { emptyState, notice, loading, toast, copyText, openCopyDialog } from '../ui.js';
 import { createChart } from '../components/chart.js';
 import { SERIES_GROUPS, groupOfKey, groupHistorySeries, defaultHistorySelection, historyPoints, bytesProgress } from './metrics.js';
 
-const REFRESH_MS = 10000;
+const RETRY_MS = 10000;
 const BUDGET = 1000;
 const MAX_ROUNDS = 4000; // each call indexes at most 4 MiB more; this bounds one discovery at about 16 GB
 
@@ -23,10 +26,19 @@ function placeAt(parent, node, index) {
   if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] ?? null);
 }
 
+/** `sourcePaths` of a history answer as {native, windows?}, or null when the service sent no usable path. */
+function readPaths(value) {
+  const text = (v) => (typeof v === 'string' && v.trim() ? v : null);
+  const native = text(value?.native);
+  if (!native) return null;
+  return { native, windows: text(value?.windows) };
+}
+
 /**
  * @param {HTMLElement} host
  * @param {{run: object}} options
- * @returns {{setRun(run: object): void, setShown(shown: boolean): void, destroy(): void}}
+ * @returns {{setRun(run: object): void, setShown(shown: boolean): void, source(): {runId:string, source:string}|null, destroy(): void}}
+ *   `source()` is the log the person chose here, or null for the full history.
  */
 export function mountTelemetry(host, { run: initialRun }) {
   let run = initialRun;
@@ -37,10 +49,18 @@ export function mountTelemetry(host, { run: initialRun }) {
   let timer = 0;
   let cycling = false;
   let firstDone = false;
+  let stopWatching;
+  let changedDuringRead = false;
 
   let sources = [];
-  let chosenSource = null; // null = the newest log (the service's default)
+  let chosenSource = null; // null follows the checkpoint lineage
+  let resumeSteps = [];
+  let partialHistory = false;
   let activeSource = null;
+  // Where the file of `activeSource` is on the training PC, from the same answer. `pathsOld` from the
+  // moment another log is picked until its answer is in: a path of the log before is never copied.
+  let paths = null;
+  let pathsOld = false;
   let seriesList = [];
   let selected = null; // Set of keys once decided
   const data = new Map(); // key -> {points, shown, matched, downsampled, error}
@@ -53,7 +73,12 @@ export function mountTelemetry(host, { run: initialRun }) {
   const errorSlot = h('div');
   const sourceId = uid('runs-source');
   const sourceSelect = h('select', { class: 'select', id: sourceId, onchange: () => pickSource(sourceSelect.value) });
-  const sourceRow = h('div', { class: 'runs__tele-source', hidden: true }, h('label', { for: sourceId }, 'Trainer log'), sourceSelect);
+  // A run with one log has nothing to pick: its name stands where the list would be.
+  const sourceName = h('span', { class: 'mono runs__tele-name', hidden: true });
+  const copyWindows = h('button', { class: 'btn btn--sm', type: 'button', hidden: true, onclick: () => copyPath('windows') });
+  const copyNative = h('button', { class: 'btn btn--sm', type: 'button', onclick: () => copyPath('native') });
+  const copyGroup = h('div', { class: 'runs__tele-copy', role: 'group', 'aria-label': 'Copy log path', hidden: true }, copyWindows, copyNative);
+  const sourceRow = h('div', { class: 'runs__tele-source', hidden: true }, h('label', { for: sourceId }, 'Training history'), sourceSelect, sourceName, copyGroup);
   const pickerEl = h('div', { class: 'runs__picker' });
   const picker = h(
     'aside',
@@ -103,6 +128,18 @@ export function mountTelemetry(host, { run: initialRun }) {
 
   const isActive = () => runStatus(run.status).active;
 
+  function watchRun() {
+    if (!shown || !isActive()) {
+      stopWatching?.();
+      stopWatching = null;
+    } else if (!stopWatching) {
+      stopWatching = watchHistory({ kind: 'comparison', id }, () => {
+        if (cycling) changedDuringRead = true;
+        else schedule(0);
+      });
+    }
+  }
+
   function stopTimer() {
     clearTimeout(timer);
     timer = 0;
@@ -120,6 +157,7 @@ export function mountTelemetry(host, { run: initialRun }) {
     controller = new AbortController();
     const { signal } = controller;
     cycling = true;
+    changedDuringRead = false;
     let again = false;
     try {
       await discover(signal);
@@ -130,7 +168,7 @@ export function mountTelemetry(host, { run: initialRun }) {
     } catch (error) {
       if (error?.name === 'AbortError' || destroyed) return;
       if (error.status === 404 && chosenSource) {
-        // The chosen log no longer belongs to this run: fall back to the newest one.
+        // The chosen log no longer belongs to this run: return to full history.
         chosenSource = null;
         data.clear();
         loadError = '';
@@ -138,6 +176,8 @@ export function mountTelemetry(host, { run: initialRun }) {
       } else if (error.status === 404) {
         // No experiment folder yet (a launch that failed early, or one still starting): nothing logged.
         sources = [];
+        activeSource = null;
+        paths = null;
         seriesList = [];
         noLogs = true;
         noLogsReason = error.message;
@@ -155,16 +195,22 @@ export function mountTelemetry(host, { run: initialRun }) {
           // A series ticked while this round ran has no points yet: fetch it now.
           const missing = !loadError && !noLogs && selected && [...selected].some((k) => !data.has(k));
           // Keep up with a run that is still writing its log; a finished log does not change.
-          if (missing) schedule(0);
-          else if (isActive()) schedule(REFRESH_MS);
+          if (missing || changedDuringRead) schedule(0);
+          else if (loadError && isActive()) schedule(RETRY_MS);
         }
       }
     }
   }
 
+  function requestHistory(params, signal) {
+    const owner = chosenSource?.runId ?? id;
+    const scope = chosenSource ? { source: chosenSource.source } : { scope: 'training' };
+    return api.history(owner, { ...scope, ...params }, { signal });
+  }
+
   async function discover(signal) {
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
-      const res = await api.history(id, chosenSource ? { source: chosenSource } : {}, { signal });
+      const res = await requestHistory({}, signal);
       if (signal.aborted || destroyed) return;
       applyDiscovery(res);
       if (!res || !res.more) return;
@@ -173,9 +219,13 @@ export function mountTelemetry(host, { run: initialRun }) {
   }
 
   function applyDiscovery(res) {
-    sources = Array.isArray(res?.sources) ? res.sources.filter((s) => typeof s === 'string') : [];
+    if (!chosenSource) sources = res?.attemptSources ?? [];
+    resumeSteps = res?.resumeSteps ?? [];
+    partialHistory = Boolean(res?.partialHistory);
     activeSource = typeof res?.source === 'string' ? res.source : null;
-    seriesList = Array.isArray(res?.series) ? res.series.filter((s) => s && typeof s.key === 'string') : [];
+    paths = activeSource ? readPaths(res?.sourcePaths) : null;
+    pathsOld = false;
+    seriesList =Array.isArray(res?.series) ? res.series.filter((s) => s && typeof s.key === 'string') : [];
     noLogs = !sources.length && !seriesList.length;
     noLogsReason = '';
     const keys = new Set(seriesList.map((s) => s.key));
@@ -205,7 +255,7 @@ export function mountTelemetry(host, { run: initialRun }) {
       return;
     }
     try {
-      const res = await api.history(id, { metric: key, budget: BUDGET, ...(chosenSource ? { source: chosenSource } : {}) }, { signal });
+      const res = await requestHistory({ metric: key, budget: BUDGET, ...charts.get(groupOfKey(key))?.chart.iterationRange() }, signal);
       if (signal.aborted || destroyed || !selected?.has(key)) return;
       const points = historyPoints(res?.points);
       data.set(key, {
@@ -224,10 +274,26 @@ export function mountTelemetry(host, { run: initialRun }) {
   }
 
   function pickSource(value) {
-    // The first option is the newest log; picking it means "follow the newest", like no choice.
-    chosenSource = value && value !== sources[0] ? value : null;
+    controller?.abort();
+    chosenSource = value ? sources.find((item) => sourceKey(item) === value) ?? null : null;
     data.clear();
+    pathsOld = true;
+    renderSource();
     schedule(0);
+  }
+
+  /** Copy where the shown log is, in one of the forms the service gave. Starts inside the press (the iPhone asks for that). */
+  function copyPath(form) {
+    const text = pathsOld ? null : paths?.[form];
+    if (!text) return;
+    const both = Boolean(paths.windows);
+    const what = both ? (form === 'windows' ? 'Windows path' : 'WSL path') : 'path';
+    const said = `Copied the ${what} of ${activeSource}.`;
+    copyText(text).then((ok) => {
+      if (destroyed) return;
+      if (ok) toast(said, { kind: 'ok' });
+      else openCopyDialog({ title: both ? `Copy the ${what} of the log` : 'Copy the log path', text, onCopied: () => toast(said, { kind: 'ok' }) });
+    });
   }
 
   function toggleKey(key, on) {
@@ -286,20 +352,53 @@ export function mountTelemetry(host, { run: initialRun }) {
   function statusText() {
     if (!firstDone || noLogs) return '';
     const n = seriesList.length;
-    const from = activeSource ? ` from ${activeSource}` : '';
-    return `${fmt.plural(n, 'series', 'series')} logged${from}.${isActive() ? ' Refreshed every 10 s while the run is active.' : ''}`;
+    const from = activeSource ? ` from ${activeSource}` : ' across the full training history';
+    const markers = resumeSteps.length ? ` Dashed lines mark resumes at ${resumeSteps.map((step) => fmt.int(step)).join(', ')}.` : '';
+    const coverage = partialHistory ? ' Some earlier history could not be linked.' : '';
+    return `${fmt.plural(n, 'series', 'series')} logged${from}.${markers}${coverage}${isActive() ? ' Refreshed every 10 s while the run is active.' : ''}`;
+  }
+
+  function sourceKey(item) {
+    return `${item.runId}/${item.source}`;
   }
 
   function renderSource() {
-    sourceRow.hidden = sources.length < 2;
+    const many = sources.length > 1;
+    sourceRow.hidden = !sources.length;
     if (sourceRow.hidden) return;
-    const wanted = sources.join('\n');
-    if (sourceSelect.dataset.list !== wanted) {
-      sourceSelect.dataset.list = wanted;
-      sourceSelect.replaceChildren(...sources.map((s, i) => h('option', { value: s }, i === 0 ? `${s} (newest attempt)` : s)));
-    }
-    const value = chosenSource ?? sources[0];
-    if (sourceSelect.value !== value && document.activeElement !== sourceSelect) sourceSelect.value = value;
+    sourceSelect.hidden = !many;
+    sourceName.hidden = many;
+    if (many) {
+      const wanted = JSON.stringify(sources);
+      if (sourceSelect.dataset.list !== wanted) {
+        sourceSelect.dataset.list = wanted;
+        const logs = sources.filter((item) => !item.source.startsWith('TensorBoard/'));
+        const events = sources.filter((item) => item.source.startsWith('TensorBoard/'));
+        sourceSelect.replaceChildren(h('option', { value: '' }, 'Full training history'), ...[...logs, ...events].map((item) => {
+          const index = logs.indexOf(item);
+          const label = index < 0 ? item.source : `Attempt ${logs.length - index} · ${item.source}`;
+          return h('option', { value: sourceKey(item) }, label);
+        }));
+      }
+      sourceSelect.value = chosenSource ? sourceKey(chosenSource) : '';
+    } else setText(sourceName, sources[0].source);
+
+    // One button per form of the path the service gave. With both, each says which it copies; the path
+    // itself is the button's description (its tooltip).
+    copyGroup.hidden = !paths;
+    if (!paths) return;
+    const both = Boolean(paths.windows);
+    copyWindows.hidden = !both;
+    setText(copyWindows, 'Copy Windows path');
+    setText(copyNative, both ? 'Copy WSL path' : 'Copy log path');
+    const describe = (button, text) => {
+      const title = pathsOld ? 'Reading the log you picked…' : text;
+      if (button.getAttribute('title') !== title) button.setAttribute('title', title);
+      if (pathsOld) button.setAttribute('aria-disabled', 'true');
+      else button.removeAttribute('aria-disabled');
+    };
+    describe(copyWindows, `For an assistant or program that runs on Windows: ${paths.windows ?? ''}`);
+    describe(copyNative, both ? `For an assistant or program that runs inside WSL: ${paths.native}` : `Where this log is on the training PC: ${paths.native}`);
   }
 
   function renderPicker() {
@@ -368,7 +467,7 @@ export function mountTelemetry(host, { run: initialRun }) {
       let entry = charts.get(group.id);
       if (!entry) {
         const section = h('section', { class: 'runs__chart' }, h('h3', { class: 'runs__section-title' }, group.title));
-        const chart = createChart(section, { title: group.title, height: 220 });
+        const chart = createChart(section, { title: group.title, height: 220, onXRangeChange: cycle });
         const notes = h('ul', { class: 'runs__chart-notes' });
         section.appendChild(notes);
         entry = { section, chart, notes };
@@ -377,7 +476,7 @@ export function mountTelemetry(host, { run: initialRun }) {
       placeAt(chartsEl, entry.section, index);
       index += 1;
       const series = groupKeys.sort().map((key) => ({ name: key, points: data.get(key)?.points ?? [] }));
-      entry.chart.update({ series, xLabel: 'Iteration' });
+      entry.chart.update({ series, xLabel: 'Iteration', markers: resumeSteps });
       const notes = [];
       for (const key of groupKeys) {
         const d = data.get(key);
@@ -431,21 +530,27 @@ export function mountTelemetry(host, { run: initialRun }) {
   return {
     setRun(next) {
       const wasActive = isActive();
+      const newAttempt = next.attemptId && next.attemptId !== run.attemptId;
       run = next;
       renderLatest();
       // A run that just became active (resumed) starts refreshing again; one that ended gets a last read.
-      if (shown && !cycling && (isActive() !== wasActive || (isActive() && !timer))) schedule(0);
+      if (newAttempt) firstDone = false;
+      watchRun();
+      if (shown && !cycling && (!firstDone || isActive() !== wasActive)) schedule(0);
     },
     setShown(on) {
       shown = on;
+      watchRun();
       if (!on) {
         stopTimer();
         return;
       }
       if (!cycling && (!firstDone || isActive())) schedule(0);
     },
+    source: () => chosenSource,
     destroy() {
       destroyed = true;
+      stopWatching?.();
       stopTimer();
       controller?.abort();
       document.removeEventListener('visibilitychange', onVisibility);

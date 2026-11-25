@@ -170,13 +170,16 @@ def validation_inference_context(model: SRModel, current_iter: int | None) -> It
                 inference_net.eval()
             model._validation_prepared_key = prepared_key
             model._validation_inference_net = inference_net
-            if current_iter is not None and model.opt.is_train and model.opt.val and model.opt.val.record_samples:
-                from traiNNer.training.checkpoint_association import observe_inference
+            session = getattr(inference_net, "validation_session", None)
+            prepared = session() if session and current_iter is not None and model.opt.is_train else nullcontext()
+            with prepared:
+                if current_iter is not None and model.opt.is_train and model.opt.val and model.opt.val.record_samples:
+                    from traiNNer.training.checkpoint_association import observe_inference
 
-                with observe_inference(model, inference_net, current_iter):
+                    with observe_inference(model, inference_net, current_iter):
+                        yield
+                else:
                     yield
-            else:
-                yield
         finally:
             model._validation_inference_net = None
             model.is_train = previous_is_train

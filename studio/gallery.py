@@ -19,6 +19,41 @@ _FILE = "validation-images.sqlite3"
 _OLD_NAME = re.compile(r"^(.+)_([0-9]{6,})\.png$")
 
 
+def explorer_executable():
+    if os.environ.get("WSL_DISTRO_NAME"):
+        path = Path("/mnt/c/Windows/explorer.exe")
+        if path.is_file():
+            return path
+    return None
+
+
+def reveal_image(root: Path, query: dict):
+    import subprocess
+    from .paths import clipboard_paths
+
+    explorer = explorer_executable()
+    if explorer is None:
+        raise ValueError("Windows Explorer is unavailable on this training host.")
+    if "role" in query:
+        _, path, _ = _recorded_source(root, query)
+    else:
+        key = query.get("path")
+        if not isinstance(key, str):
+            raise ValueError("Select a validation image.")
+        path = image_path(root, key)
+        if query.get("version") and artifact_version(path.stat()) != query["version"]:
+            raise FileExistsError("This image changed after validation.")
+    target = clipboard_paths(path).get("windows")
+    if not target:
+        raise ValueError("This file has no Windows Explorer path.")
+    # Explorer delegates to the desktop shell and can return 1 on success.
+    result = subprocess.run([str(explorer), "/select,", target], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    if result.returncode not in (0, 1):
+        raise RuntimeError("Windows Explorer could not open the image location.")
+    return {"windows": target}
+
+
 def _index(root):
     path = root / _FILE
     if path.is_file() and path.resolve() == path:
@@ -166,7 +201,7 @@ def images(root: Path, run_id: str, query: dict, *, offline: bool = False) -> di
             row.update(version=current, versionOrigin="onRead",
                        url=_url(run_id, row["path"], offline=offline, version=current))
     return {"images":page, "next":_encode(rows[limit-1]) if len(rows)>limit else None,
-            "provenance":provenance}
+            "provenance":provenance,"canReveal":not offline and explorer_executable() is not None}
 
 
 def linked_outputs(root: Path, source: str, offline: bool, dataset: str, step: int,
@@ -192,7 +227,7 @@ def linked_outputs(root: Path, source: str, offline: bool, dataset: str, step: i
         return {r["image"]: _url(source, r["output"], offline=offline,version=r["version"]) for r in rows}
 
 
-def source_preview(root: Path, query: dict):
+def _recorded_source(root: Path, query: dict):
     role = query.get("role")
     if role not in ("lq","gt"):
         raise ValueError("Select the validation input or ground truth.")
@@ -214,11 +249,15 @@ def source_preview(root: Path, query: dict):
         raise FileNotFoundError("The selected validation source was not recorded.")
     storage = Path(source["database"]) / "data.mdb" if "database" in source else Path(source["path"])
     info = storage.stat()
-    from .paths import artifact_version
     version = artifact_version(info)
     if (info.st_size != source["size"] or str(info.st_mtime_ns) != source["mtimeNs"]
             or (source.get("version") and source["version"] != version)):
         raise FileExistsError("This source changed after validation.")
+    return source, storage, version
+
+
+def source_preview(root: Path, query: dict):
+    source, storage, version = _recorded_source(root, query)
     size = int(query.get("maxSize",1536))
     if "database" not in source:
         return preview(storage, size, version=version)

@@ -14,7 +14,7 @@ Train models locally from your browser. Edit YAML recipes, inspect datasets, and
 2. Choose **Set up dedicated Ubuntu** for a new installation. Setup offers to install WSL 2 if needed. If prompted, restart Windows and reopen the EXE. If you already have a working trainer in WSL, choose **Use an existing WSL checkout**.
 3. Choose a local NTFS project folder. For a first run with bundled data, open **TabularRegression / Tabular_MLP** and select **Start training**.
 
-Keep using the same EXE. It downloads updates in the background and applies them on an idle launch. If you connected your own WSL checkout, you manage its code updates. The browser runs on Windows and training runs in Linux. The managed CUDA runtime requires an NVIDIA Ampere or newer GPU and a compatible Windows driver. CPU recipes can run without an NVIDIA GPU.
+Starting with Preview 3, keep opening the same EXE to receive newer previews and stable releases automatically. It downloads updates in the background and applies them on an idle launch. If you connected your own WSL checkout, you manage its code updates. The browser runs on Windows and training runs in Linux. The managed CUDA runtime requires an NVIDIA Ampere or newer GPU and a compatible Windows driver. CPU recipes can run without an NVIDIA GPU.
 
 To use your phone, connect Tailscale on both devices, select **Open on phone** in the desktop workbench, and scan the QR code.
 

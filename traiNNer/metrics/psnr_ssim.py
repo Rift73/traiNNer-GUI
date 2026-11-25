@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import cv2
 import numpy as np
 import torch
@@ -157,6 +159,17 @@ def calculate_ssim(
     return np.array(ssims).mean()
 
 
+@lru_cache(maxsize=1)
+def _cuda_ssim():
+    try:
+        from traiNNer.metrics.ssim_cuda import gaussian_ssim
+    except ModuleNotFoundError as error:
+        if error.name not in {"triton", "triton.language"}:
+            raise
+        return None
+    return gaussian_ssim
+
+
 @METRIC_REGISTRY.register()
 def calculate_ssim_pt(
     img: Tensor, img2: Tensor, crop_border: int, test_y_channel: bool = False,
@@ -199,6 +212,18 @@ def calculate_ssim_pt(
         result = streamed_ssim(img, img2)
         if result is not None:
             return result
+
+    if (
+        torch.version.cuda is not None and img.is_cuda and img.device == img2.device
+        and not (torch.is_grad_enabled() and (img.requires_grad or img2.requires_grad))
+        and not torch.compiler.is_compiling() and not torch.onnx.is_in_onnx_export()
+        and min(img.shape[-2:]) >= 11 and img.size(2) <= 65535
+        and 0 < img.size(0) * img.size(1) <= 65535
+        and torch.cuda.get_device_capability(img.device)[0] >= 8
+    ):
+        kernel = _cuda_ssim()
+        if kernel is not None:
+            return kernel(img, img2)
 
     img = img.to(torch.float64)
     img2 = img2.to(torch.float64)

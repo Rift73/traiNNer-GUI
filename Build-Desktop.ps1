@@ -3,7 +3,7 @@ param (
     [string]$BuildDirectory = (Join-Path $env:LOCALAPPDATA 'traiNNer-GUI\build\launcher'),
     [string]$Destination = $PSScriptRoot,
     [ValidatePattern('^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.([1-9][0-9]*))?$')]
-    [string]$ReleaseTag = 'v0.1.0-preview.2',
+    [string]$ReleaseTag = 'v0.1.0-preview.3',
     [switch]$Package
 )
 $ErrorActionPreference = 'Stop'

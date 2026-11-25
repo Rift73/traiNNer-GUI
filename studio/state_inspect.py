@@ -2,9 +2,35 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import zipfile
 from pathlib import Path
+
+
+def _scheduler_clock(saved: object) -> dict:
+    """Keep only scheduler metadata needed to check hard limits."""
+    if not isinstance(saved, dict):
+        return {}
+    clock: dict = {
+        key: value
+        for key in ("last_epoch", "total_steps")
+        if type(value := saved.get(key)) is int
+    }
+    periods = saved.get("cumulative_period")
+    if isinstance(periods, list) and periods and all(
+        type(period) is int or (type(period) is float and math.isfinite(period))
+        for period in periods
+    ):
+        # The cosine scheduler accepts any clock at or below a cumulative period.
+        clock["period_limit"] = math.floor(max(periods))
+    milestones = saved.get("_milestones")
+    if isinstance(milestones, list) and all(type(step) is int for step in milestones):
+        clock["milestones"] = milestones
+    children = saved.get("_schedulers")
+    if isinstance(children, list):
+        clock["children"] = [_scheduler_clock(child) for child in children]
+    return clock
 
 
 def describe(path: Path) -> dict:
@@ -34,6 +60,7 @@ def describe(path: Path) -> dict:
     return {"iteration": state["iter"], "epoch": state.get("epoch"),
             "optimizerCount": len(state["optimizers"]), "optimizers": optimizers,
             "schedulerCount": len(state["schedulers"]), "schedulerSpecs": state.get("scheduler_specs"),
+            "schedulerClocks": [_scheduler_clock(scheduler) for scheduler in state["schedulers"]],
             "geometry": cursor.get("geometry"), "nextBatch": cursor.get("next_batch"),
             "randomStreams": bool(streams), "seed":streams.get("seed"),
             "workerAugmentation":streams.get("worker_augmentation"), "pairedTraining": streams.get("paired_training"),

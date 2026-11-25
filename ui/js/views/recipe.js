@@ -4,10 +4,11 @@
 
 import { h, mount as setChildren, clamp, fmt, uid } from '../dom.js';
 import { persist } from '../store.js';
+import { api } from '../api.js';
 import { recipe } from '../state/recipe.js';
 import { catalog } from '../state/catalog.js';
 import { NO_SCALE_TASKS } from '../state/data.js';
-import { badge, confirmDialog, countIssues, notice } from '../ui.js';
+import { badge, confirmDialog, countIssues, notice, toast } from '../ui.js';
 import { addToQueue, saveRecipe, startTraining } from '../actions.js';
 import { resumeFacts } from '../recipe/resume.js';
 
@@ -152,6 +153,21 @@ export function mount(el) {
     else partCleanups.push(source.module.mountSourcePane(sourceHost));
   }
 
+  async function detachCheckpoint() {
+    const before = recipe.get().yaml;
+    try {
+      const fresh = await api.freshRecipe(before);
+      if (disposed || recipe.get().yaml !== before || recipe.get().pending) {
+        toast('The recipe changed. Choose Make fresh recipe again to use the latest edits.');
+        return;
+      }
+      recipe.setYaml(fresh.yaml, { immediate: true });
+      toast('Recipe ready for a new run from iteration 0. Your other edits are preserved.', { kind: 'ok' });
+    } catch (error) {
+      toast(`Could not detach the checkpoint: ${error.message}`, { kind: 'err' });
+    }
+  }
+
   function renderBar(body = root.querySelector('.recipe__body')) {
     if (!barEl) return;
     const s = recipe.get();
@@ -174,6 +190,13 @@ export function mount(el) {
       const at = Number.isInteger(resume.iteration) ? `iteration ${fmt.int(resume.iteration)}` : 'a saved training state';
       const about = resumeFacts(resume).map(([label, value]) => `${label}: ${value}`).join('\n');
       facts.push(h('span', { class: 'recipe__fact', title: about || null }, h('span', { class: 'muted' }, 'Continues from '), at));
+    }
+
+    if (s.configCurrent && (s.config?.path?.resume_state || s.config?.auto_resume)) {
+      facts.push(h('button', {
+        class: 'btn btn--sm', type: 'button', onclick: detachCheckpoint, disabled: Boolean(s.pending),
+        title: 'Remove resume state and restore the original starting weights. Keep edits to this recipe.',
+      }, 'Make fresh recipe'));
     }
 
     // The last verdict stays up while a re-check runs; a small spinner beside it says it is being refreshed.
@@ -244,6 +267,10 @@ export function mount(el) {
           },
           'Choose another',
         ),
+        h('button', { class: 'btn', type: 'button', disabled: s.pending > 0, onclick: async () => {
+          const { openVramTest } = await import('../recipe/vram-test.js');
+          openVramTest();
+        } }, 'VRAM test'),
         h('button', { class: 'btn', type: 'button', disabled: s.saving, onclick: () => saveRecipe() }, s.saving ? 'Saving…' : 'Save recipe'),
         h(
           'button',

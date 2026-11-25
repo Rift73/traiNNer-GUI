@@ -1,5 +1,22 @@
 # Loss reference
 
+## Perceptual quality losses for restoration
+
+Select a loss under **Recipe → Losses** or use its type in `train.losses`. These objectives accept aligned SDR sRGB crops in RGB channel order, with values in [0, 1]. The trainer applies `loss_weight` once. All six work offline.
+
+| Recipe type | What it measures |
+| --- | --- |
+| `butteraugliloss` | JPEG XL Butteraugli at 80 nits. The default `pooling: p3` emphasizes visible local errors while spreading the gradient over the crop. Choose `pooling: max` for the reference worst-pixel score. |
+| `ssimulacra2loss` | Color structure, added edges and missing detail across up to six scales. The loss is `(100 − score) / 100`. An exact match gives zero. Each side must have at least 8 pixels. |
+| `vmafloss` | Frame-independent VMAF v0.6.1 on BT.709 luma. Defaults to `neg: true` to limit rewards for artificial sharpening. Set `neg: false` for the standard model. Uses the unclipped score and zero motion for independent crops. |
+| `vifloss` | Four-scale luma information fidelity, available independently of VMAF. |
+| `admloss` | Four-scale luma detail preservation with contrast masking, available independently of VMAF. |
+| `chromawaveletloss` | Two scales of horizontal, vertical and diagonal chroma detail. Useful for colored fringes and bleeding at edges. A uniform color offset produces no detail error. |
+
+VMAF, VIF and ADM require at least 32 pixels on each side. VMAF can score a matching still image around 97.4, so the training objective can read about 0.026 at identity. VIF and ADM already contribute to VMAF. Pair a luma objective with an RGB reconstruction term to supervise color. For recurrent recipes these scores apply to each frame independently. Weights depend on the existing stack and the magnitude of its gradients.
+
+The Butteraugli and SSIMULACRA2 implementations follow JPEG XL. The packaged VMAF model is Netflix v0.6.1, with differentiable feature extraction adapted from VMAF-torch. [JPEG XL](https://github.com/libjxl/libjxl), [SSIMULACRA2](https://github.com/cloudinary/ssimulacra2), [VMAF](https://github.com/Netflix/vmaf), [VMAF-torch](https://github.com/alvitrioliks/VMAF-torch).
+
 ## Loss scheduling
 
 Add `start_iter`, `ramp_iters`, or `end_iter` to a loss entry to schedule it.
@@ -55,6 +72,8 @@ single training process because candidate rejection is local to each rank.
 
 ## vosrloss
 
+Matching engines and the plugin download automatically when VOSR is first used on a supported system. [Runtime requirements and cache](../VOSR_loss.md)
+
 VOSR 2 restores the degraded LR with external fixed-window TensorRT engines.
 The raw distance is balanced against the raw GAN term using detached running
 means. `loss_weight` controls relative loss magnitude, not equal gradient norm.
@@ -64,8 +83,6 @@ Requires `gan_type: vanilla`, `lsgan` or `wgan_softplus` and HR patches at most
 ```yaml
 type: vosrloss
 loss_weight: 0.1
-engine_dir: /path/to/vosr2-512-engines
-plugin: /path/to/vosr2_qkv.so
 criterion: charbonnier
 lanes: 2
 still_frames: 2

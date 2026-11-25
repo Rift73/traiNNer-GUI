@@ -304,6 +304,95 @@ export async function copyText(text) {
   }
 }
 
+/**
+ * Copy a text that is still being fetched. Call it inside the press that asked for the copy: Safari (the
+ * iPhone) lets a page write to the clipboard only when the write starts within the press, so the write
+ * starts at once and takes its text from the promise. Elsewhere the text is written once it is there.
+ * @param {Promise<string>} pending the text on its way
+ * @returns {Promise<{ok: boolean, text: string}>} `ok: false` when the browser refused; rejects as `pending` does
+ */
+export async function copyTextWhenReady(pending) {
+  let wrote = null;
+  if (typeof navigator.clipboard?.write === 'function' && typeof window.ClipboardItem === 'function') {
+    const blob = pending.then((text) => new Blob([text], { type: 'text/plain' }));
+    blob.catch(() => {}); // a failed request is reported by the caller, from `pending`
+    try {
+      wrote = navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]).then(
+        () => true,
+        () => false,
+      );
+    } catch {
+      wrote = null; // a browser whose clipboard items take no promise
+    }
+  }
+  const text = await pending;
+  if (wrote && (await wrote)) return { ok: true, text };
+  return { ok: await copyText(text), text };
+}
+
+/**
+ * The text itself, to copy by hand: shown when the browser refused the clipboard. The text is selected,
+ * and "Copy" tries once more (a press of its own, which is what some browsers ask for).
+ * @param {{title: string, text: string, lead?: string, onCopied?: () => void}} options
+ * @returns {{dialog: HTMLDialogElement, close: (result?: any) => void, closed: Promise<any>}}
+ */
+export function openCopyDialog({ title, text, lead = 'The browser did not let this page write to the clipboard.', onCopied = null }) {
+  const areaId = uid('copy');
+  const lines = text.split('\n').length;
+  const area = h('textarea', {
+    class: 'textarea mono',
+    id: areaId,
+    readonly: true,
+    rows: String(Math.min(14, Math.max(2, lines + 1))),
+    spellcheck: 'false',
+    wrap: lines > 1 ? 'off' : 'soft',
+    'aria-describedby': `${areaId}-help`,
+    value: text,
+  });
+  const select = () => {
+    area.focus({ preventScroll: true });
+    area.setSelectionRange(0, text.length);
+  };
+  const said = h('p', { class: 'field__help', role: 'status' });
+  const view = openDialog({
+    title,
+    body: [
+      h('p', { class: 'dialog__lead' }, lead),
+      h(
+        'div',
+        { class: 'field' },
+        h('label', { class: 'field__label', for: areaId }, 'Text to copy'),
+        area,
+        h('p', { class: 'field__help', id: `${areaId}-help` }, 'It is selected: copy it from here (Ctrl+C, or touch the selection and choose Copy), or press Copy.'),
+        said,
+      ),
+    ],
+    foot: (close) => [
+      h('button', { class: 'btn', type: 'button', onclick: () => close(false) }, 'Close'),
+      h(
+        'button',
+        {
+          class: 'btn btn--primary',
+          type: 'button',
+          onclick: async () => {
+            if (await copyText(text)) {
+              close(true);
+              onCopied?.();
+              return;
+            }
+            select();
+            said.textContent = 'Still refused. Copy the selected text by hand.';
+          },
+        },
+        'Copy',
+      ),
+    ],
+  });
+  view.dialog.style.width = 'min(640px, 94vw)';
+  select();
+  return view;
+}
+
 /** Count issues by level. */
 export function countIssues(issues) {
   let errors = 0;

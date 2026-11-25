@@ -468,13 +468,13 @@ class VosrTargetOptions(StrictStruct):
     """VOSR 2.0 restorations of the degraded LR as the HR target (on-the-fly degradations only)."""
 
     engine_dir: Annotated[
-        str,
-        Meta(description="Folder with VOSR 2.0's 512 px FP8 TensorRT stage engines."),
-    ]
+        str | None,
+        Meta(description="Optional local VOSR engine folder. Downloaded automatically by default."),
+    ] = None
     plugin: Annotated[
-        str,
-        Meta(description="The vosr2_qkv TensorRT plugin library."),
-    ]
+        str | None,
+        Meta(description="Optional local VOSR plugin. Downloaded automatically by default."),
+    ] = None
     lanes: Annotated[
         int,
         Meta(description="VOSR windows run side by side."),

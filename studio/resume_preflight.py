@@ -10,11 +10,17 @@ from functools import lru_cache
 from pathlib import Path
 
 from trainner_config.resume import recipe_learning_rate, resume_recipe
+from trainner_config.schedules import COMPOSITES
 
 from .paths import artifact_version
 from .run_checkpoints import import_sources
 
 
+_HARD_LIMITS = {
+    "onecyclelr": "total_steps",
+    "cosineannealingrestartlr": "period_limit",
+}
+_COMPOSITE_TYPES = {name.casefold() for name in COMPOSITES}
 _probe_lock = threading.Lock()
 
 
@@ -45,6 +51,120 @@ def state_metadata(state: Path):
     with _probe_lock:
         saved, warning = _probe(state, version)
     return saved, warning, version
+
+
+def _has_hard_limit(spec: dict | None) -> bool:
+    if spec is None:
+        return False
+    kind = spec["type"].casefold()
+    return kind in _HARD_LIMITS or (
+        kind in _COMPOSITE_TYPES and any(_has_hard_limit(child) for child in spec["schedulers"])
+    )
+
+
+def _extension_limit(
+    spec: dict, clock: dict, updates: int, path: str, *, enters_phase: bool = False
+) -> tuple[int, str] | None:
+    """Return the first hard limit crossed, in updates relative to this scheduler."""
+    kind = spec["type"].casefold()
+    missing = f"Cannot verify {path}. Select a checkpoint with its saved scheduler clock and limits."
+    if kind in _HARD_LIMITS:
+        limit = clock.get(_HARD_LIMITS[kind])
+        step = -1 if enters_phase else clock.get("last_epoch")
+        if limit is None or step is None:
+            raise ValueError(missing)
+        remaining = max(0, limit - step)
+        if updates > remaining:
+            position = "phase starts at step 0" if enters_phase else f"saved step {step:,}"
+            return remaining, f"{path} ({spec['type']}, {position}, limit {limit:,})"
+        return None
+
+    children = spec["schedulers"]
+    child_clocks = clock.get("children")
+    if child_clocks is None or len(child_clocks) != len(children):
+        raise ValueError(missing)
+    milestones = []
+    parent_step = 0
+    if kind == "sequentiallr":
+        milestones = clock.get("milestones")
+        parent_step = clock.get("last_epoch")
+        if milestones is None or len(milestones) != len(children) - 1 or parent_step is None:
+            raise ValueError(missing)
+
+    limits = []
+    for index, (child, child_clock) in enumerate(zip(children, child_clocks, strict=True)):
+        if not _has_hard_limit(child):
+            continue
+        # Relative parent calls are one-based. A sequential milestone belongs to
+        # the incoming child and sets its clock to zero. Chained children run every call.
+        phase_start = milestones[index - 1] - parent_step if milestones and index else 0
+        first = max(1, phase_start)
+        last = min(updates, milestones[index] - parent_step - 1) if index < len(milestones) else updates
+        if first <= last and (exceeded := _extension_limit(
+            child, child_clock, last - first + 1, f"{path}.schedulers[{index}]",
+            enters_phase=first == phase_start,
+        )):
+            remaining, scheduler = exceeded
+            limits.append((first - 1 + remaining, scheduler))
+    return min(limits, default=None)
+
+
+def validate_extension_scheduler_horizons(
+    train: dict, state: Path, additional_iterations: int
+) -> None:
+    """Validate a full-state extension against the original attempt's scheduler limits.
+
+    The caller supplies the resolved numbered state and a positive update count.
+    Each optimizer's scheduler can advance at most once per accepted update.
+    """
+    per_role = train.get("schedulers")
+    shared = train.get("scheduler")
+    declared = {None: shared} if per_role is None else per_role
+    hard = {role: spec for role, spec in declared.items() if _has_hard_limit(spec)}
+    if not hard:
+        return
+
+    saved, _, _ = state_metadata(state)
+    missing = (
+        f"Cannot verify hard LR scheduler limits in {state.name}. "
+        "Select a complete checkpoint with matching scheduler metadata."
+    )
+    if saved is None:
+        raise ValueError(missing)
+    clocks = saved["schedulerClocks"]
+    bindings = saved["schedulerSpecs"]
+    if bindings is None and per_role is None:
+        # Older checkpoints used one shared schedule for every optimizer.
+        bindings = [{"target": index + 1, "type": shared["type"]} for index in range(len(clocks))]
+    if not clocks or bindings is None or len(clocks) != len(bindings):
+        raise ValueError(missing)
+    by_target = {
+        binding["target"]: (binding["type"], clock)
+        for binding, clock in zip(bindings, clocks, strict=True)
+    }
+    if per_role is None:
+        if len(by_target) != saved["optimizerCount"]:
+            raise ValueError(missing)
+        hard = dict.fromkeys(by_target, shared)
+
+    limits = []
+    for role, spec in hard.items():
+        path = f"train.scheduler (optimizer {role})" if per_role is None else f"train.schedulers.{role}"
+        saved_kind, clock = by_target.get(role, ("", {}))
+        if saved_kind.casefold() != spec["type"].casefold():
+            raise ValueError(f"{missing} No matching schedule for {path}.")
+        if exceeded := _extension_limit(spec, clock, additional_iterations, path):
+            limits.append(exceeded)
+    if limits:
+        remaining, scheduler = min(limits)
+        remedy = (
+            f"Request at most {remaining:,} additional updates with the saved schedule."
+            if remaining else "Start a new run from weights to use a new schedule."
+        )
+        raise ValueError(
+            f"{scheduler} can exceed its hard limit within {additional_iterations:,} additional updates "
+            f"if its optimizer steps on every update. {remedy}"
+        )
 
 
 def inspect_resume(config: dict, opt, root: Path) -> tuple[dict, list[dict]]:

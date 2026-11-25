@@ -98,6 +98,31 @@ def _with_paths(text: str, paths: dict[str, Path], config: dict[str, Any]) -> st
     return render(text, edits)
 
 
+def detached_paths(paths: dict, state: Path, original: dict, root: Path) -> dict:
+    """Restore only weight bindings supplied by this numbered checkpoint."""
+    result = {**paths, "resume_state": None}
+    models = state.parent.parent / "models"
+    for role in ("g", "g_ema", "d", "ae", "ae_ema"):
+        field = f"pretrain_network_{role}"
+        if not paths.get(field):
+            continue
+        weight = local_path(paths[field], root)
+        if not (weight.parent in (models, models / "resume_models")
+                and weight.stem == f"net_{role}_{state.stem}"
+                and weight.suffix in (".pth", ".safetensors")):
+            continue
+        fields = [field]
+        strict = f"strict_load_{role}"
+        if role in ("g", "d") and paths.get(strict) is True:
+            fields.append(strict)
+        for key in fields:
+            if key in original:
+                result[key] = original[key]
+            else:
+                result.pop(key, None)
+    return result
+
+
 def latest_recipe(text: str, experiment: Path, config: dict[str, Any]) -> str:
     states = experiment / "training_states"
     candidates = (
@@ -226,9 +251,7 @@ def _rdual_import_inputs(
     return {field.removeprefix("path."): path.resolve() for field, path in inputs.items()}
 
 
-def prepare_import(
-    text: str, config: dict[str, Any], root: Path, experiment: Path
-) -> tuple[str, list[dict[str, Any]]]:
+def resume_import_plan(config: dict[str, Any], root: Path) -> list[dict[str, Any]]:
     paths = import_sources(config, root)
     extras = {}
     if (opt := rdual_options(config)) is not None:
@@ -240,7 +263,13 @@ def prepare_import(
             # fallbacks keep their private copy in the imported experiment.
             if not resolve_neuflow_weights(opt, root, local_path).official:
                 extras["neuflow_weights"] = inputs["neuflow_weights"]
-    plan = _import_plan({**extras, **paths}, paths, None)
+    return _import_plan({**extras, **paths}, paths, None)
+
+
+def prepare_import(
+    text: str, config: dict[str, Any], root: Path, experiment: Path
+) -> tuple[str, list[dict[str, Any]]]:
+    plan = resume_import_plan(config, root)
     installed = {item["option"]: experiment / item["path"] for item in plan}
     return _with_paths(text, installed, config), plan
 

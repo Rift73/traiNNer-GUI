@@ -334,6 +334,12 @@ textarea {
   min-width: 0;
 }
 
+/* The count at the end of a training run's sentence changes with every iteration: digits of one width keep
+   the button after it where it is. */
+.next__count {
+  font-variant-numeric: tabular-nums;
+}
+
 .next[data-tone="err"] {
   background: var(--err-wash);
 }
@@ -1059,6 +1065,13 @@ button.issue:hover {
 .dialog__body--flush {
   padding: 0;
   display: block;
+}
+
+/* A sentence that can hold a long file name (the text shown to copy by hand): it breaks inside the name
+   and does not widen the dialog's column. */
+.dialog__lead {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .dialog__foot {

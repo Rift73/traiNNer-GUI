@@ -41,6 +41,7 @@ import torch
 from rich.traceback import install
 from torch.utils.data import DataLoader
 if TYPE_CHECKING:
+    from studio.vram_test import VramMeasurement
     from torch.utils.tensorboard.writer import SummaryWriter
     from traiNNer.models.realesrgan_model import DegradeAheadPrefetcher
 from traiNNer.data.base_dataset import BaseDataset
@@ -248,6 +249,42 @@ def _create_prefetcher(
     return prefetcher
 
 
+def _open_iteration_progress(
+    rank: int, iteration: int, total_iters: int, logger: logging.Logger
+) -> memoryview | None:
+    """Attach rank zero to the optional progress word created by Studio."""
+    if rank != 0 or not (path := os.environ.get("TRAINNER_STUDIO_PROGRESS")):
+        return None
+
+    import mmap
+    import stat
+
+    try:
+        if (
+            sys.platform != "linux"
+            or sys.byteorder != "little"
+            or sys.maxsize < 2**63 - 1
+        ):
+            raise ValueError("the Studio progress word requires 64-bit little-endian Linux")
+        if not osp.isabs(path) or not 0 <= iteration <= total_iters < 2**63:
+            raise ValueError("invalid progress path or iteration range")
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != 8:
+                raise ValueError("expected an existing 8-byte regular file")
+            mapped = mmap.mmap(fd, 8, access=mmap.ACCESS_WRITE)
+        finally:
+            os.close(fd)
+        # A native aligned int64 store is visible to the reader without flushing.
+        progress = memoryview(mapped).cast("q")
+        progress[0] = iteration
+    except (OSError, ValueError) as error:
+        logger.warning("Studio iteration progress is unavailable: %s", error)
+        return None
+    return progress
+
+
 def train_pipeline(root_path: str) -> None:
     """Run training in-process and report poisoned CUDA failures without GPU cleanup."""
     try:
@@ -277,7 +314,7 @@ def train_pipeline(root_path: str) -> None:
         raise SystemExit(CUDA_FAILURE_EXIT_CODE) from error
 
 
-def _train_pipeline(root_path: str) -> None:
+def _train_pipeline(root_path: str, *, probe: "VramMeasurement | None" = None) -> None:
     """Initialize, run accepted-update scheduling, then follow the exit policy.
 
     A microbatch is not an iteration: only accepted accumulation boundaries
@@ -324,8 +361,10 @@ def _train_pipeline(root_path: str) -> None:
     assert opt.path.experiments_root is not None
     assert opt.path.log is not None
 
-    recovery = TrainingRecovery.from_environment(opt)
-    retention = CheckpointRetention.from_options(opt)
+    if probe is not None:
+        probe.configure(opt)
+    recovery = TrainingRecovery.from_environment(opt) if probe is None else None
+    retention = CheckpointRetention.from_options(opt) if probe is None else None
     checkpoint_layout = None
     if recovery is not None:
         checkpoint_layout = recovery.layout
@@ -338,9 +377,8 @@ def _train_pipeline(root_path: str) -> None:
 
     # load resume states if necessary
     resume_state = load_resume_state(opt, recovery)
-    logger = _initialize_experiment_logging(
-        opt, args, resuming=resume_state is not None
-    )
+    logger = (get_root_logger() if probe is not None else
+              _initialize_experiment_logging(opt, args, resuming=resume_state is not None))
 
     if retention is not None:
         logger.info(
@@ -364,11 +402,11 @@ def _train_pipeline(root_path: str) -> None:
         )
 
     # initialize wandb and tb loggers
-    tb_logger = init_tb_loggers(opt)
+    tb_logger = init_tb_loggers(opt) if probe is None else None
 
     # create train and validation dataloaders
     val_enabled = False
-    if opt.val:
+    if opt.val and probe is None:
         val_enabled = opt.val.val_enabled
 
     train_loader, train_sampler, val_loaders, _, total_iters = (
@@ -410,7 +448,8 @@ def _train_pipeline(root_path: str) -> None:
 
     # create model
     model = build_model(opt)
-    model.validate_validation_datasets(val_loaders)
+    if probe is None:
+        model.validate_validation_datasets(val_loaders)
 
     if torch.is_anomaly_enabled():
         logger.warning(
@@ -505,6 +544,9 @@ def _train_pipeline(root_path: str) -> None:
 
     if current_iter > total_iters:
         raise ValueError(f"Checkpoint iteration {current_iter} exceeds the requested total of {total_iters}.")
+    if probe is not None:
+        # Bound this invocation only. The recipe's schedule and phase boundaries keep their horizon.
+        total_iters = current_iter + probe.iterations
     if (attempt := os.environ.get("TRAINNER_STUDIO_ATTEMPT")) and opt.rank == 0:
         from pathlib import Path
         from studio.provenance import write_effective
@@ -609,12 +651,16 @@ def _train_pipeline(root_path: str) -> None:
         del pending_streams
 
     checkpoint_requests = CheckpointRequests.from_environment(model, opt.rank, logger)
+    iteration_progress = _open_iteration_progress(
+        opt.rank, current_iter, total_iters, logger
+    )
+    published_iter = current_iter
     try:
         epoch = start_epoch
         batch_size = geometry["batch_size"] if geometry is not None else 0
         next_sample = start_sample
         next_batch = start_sample // batch_size if batch_size else 0
-        stop = interrupt_received or early_stopped
+        stop = interrupt_received or (early_stopped and probe is None)
         while current_iter < total_iters and not stop:
             # Set the offset before constructing the iterator or resetting prefetch.
             train_sampler.set_epoch(epoch, start_sample=next_sample)
@@ -668,11 +714,12 @@ def _train_pipeline(root_path: str) -> None:
                         f"{cuda_memory_diagnostics()} "
                         "The original allocator error is preserved below."
                     ) from error
-                model.finalize_compile_cache()
+                if probe is None:
+                    model.finalize_compile_cache()
                 if model.reset_accumulation_requested:
                     current_accum_iter = 0
                 final_managed_checkpoint = managed_run and current_iter == total_iters and apply_gradient
-                checkpoint_due = apply_gradient and (
+                checkpoint_due = probe is None and apply_gradient and (
                     current_iter % opt.logger.save_checkpoint_freq == 0 or final_managed_checkpoint
                 )
                 validation_due = apply_gradient and validation_interval and current_iter % validation_interval == 0
@@ -704,6 +751,17 @@ def _train_pipeline(root_path: str) -> None:
                         current_iter, warmup_iter=opt.train.warmup_iter
                     )
                     last_completed_iter = current_iter
+                if iteration_progress is not None and apply_gradient:
+                    completed_iter = (
+                        current_iter
+                        if settled
+                        else model.confirmed_training_iteration(current_iter)
+                    )
+                    if completed_iter > published_iter:
+                        iteration_progress[0] = completed_iter
+                        published_iter = completed_iter
+                if probe is not None and accepted_gradient:
+                    probe.update(current_iter - initial_iter)
                 # Deferred accounting can reject the logical label while still
                 # training on this batch. Its one-batch window is finished
                 # once the pending device outcomes have settled.
@@ -780,21 +838,30 @@ def _train_pipeline(root_path: str) -> None:
         # Resolve pending update failures under the same recovery policy.
         model.settle_training_updates()
     except PersistentNonfiniteError as e:
+        if probe is not None:
+            raise
         logger.error("%s", e)
         nonfinite_failure = e
         crashed = True
         interrupt_received = True
     except Exception as e:
-        if fatal_cuda_reason(e) is not None:
+        if probe is not None or fatal_cuda_reason(e) is not None:
             raise  # The outer CPU-only handler records this without saving.
         logger.exception(e)
         crashed = True
         interrupt_received = True
     finally:
+        if iteration_progress is not None:
+            iteration_progress.release()
         if checkpoint_requests is not None and checkpoint_requests.poll(force=True):
             checkpoint_requests.finish(error="Training ended before the checkpoint request could be saved.")
         if prefetcher is not None:
             prefetcher.close()
+
+    if probe is not None:
+        if interrupt_received or current_iter - initial_iter != probe.iterations:
+            raise RuntimeError("VRAM test ended before all 20 updates completed.")
+        return
 
     if nonfinite_failure is not None:
         logger.error(

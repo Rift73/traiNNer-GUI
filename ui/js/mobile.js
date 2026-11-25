@@ -44,8 +44,8 @@ function placeOf(hash) {
   } else if (first === 'compare') {
     place.part = 'compare';
     place.level = 'item';
-    // The first side is the run the comparison was asked from (a job has no page of its own to go back to).
-    place.back = second && !second.startsWith('job:') ? { href: `#/runs/${second}`, label: 'Run' } : { href: '#/runs', label: 'Runs' };
+    // Only a managed run has a run page to go back to.
+    place.back = second && !/^(job|tb)(:|%3a)/i.test(second) ? { href: `#/runs/${second}`, label: 'Run' } : { href: '#/runs', label: 'Runs' };
   } else {
     place.part = 'run';
     place.level = 'item';

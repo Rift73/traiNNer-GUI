@@ -246,20 +246,34 @@ class Vosr2Window:
 
     def __init__(
         self,
-        engine_dir: str | Path,
-        plugin: str | Path,
+        engine_dir: str | Path | None = None,
+        plugin: str | Path | None = None,
         lanes: int = 2,
         seed: int = 42,
         device: str = "cuda:0",
     ) -> None:
-        ctypes.CDLL(str(Path(plugin).resolve()), mode=getattr(ctypes, "RTLD_GLOBAL", 0))
+        from ._vosr_assets import ManagedVosrAssets
+
         self.device = torch.device(device)
+        managed = (
+            ManagedVosrAssets(self.device, trt.__version__)
+            if engine_dir is None or plugin is None else None
+        )
+        if plugin is None:
+            self._plugin = managed.load_plugin()
+        else:
+            self._plugin = ctypes.CDLL(str(Path(plugin).expanduser().resolve()), mode=ctypes.RTLD_GLOBAL)
         self.runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
         self.engines = {}
         for name in STAGES:
-            engine = self.runtime.deserialize_cuda_engine(
-                (Path(engine_dir) / f"{name}.plan").read_bytes()
-            )
+            filename = f"{name}.plan"
+            if engine_dir is None:
+                plan = managed.unpack(filename)
+            else:
+                plan = (Path(engine_dir).expanduser() / filename).read_bytes()
+            with torch.cuda.device(self.device):
+                engine = self.runtime.deserialize_cuda_engine(plan)
+            del plan
             if engine is None:
                 raise RuntimeError(
                     f"cannot load {name}.plan (other TensorRT version or GPU?)"

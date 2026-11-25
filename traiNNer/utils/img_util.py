@@ -251,6 +251,17 @@ def tensor2img(
     out_type: np.dtype = np.uint8,  # type: ignore
     min_max: tuple[int, int] = (0, 1),
 ) -> np.ndarray:
+    if (
+        tensor.is_cuda and tensor.ndim == 4 and tensor.size(0) == 1
+        and tensor.size(1) in (1, 3) and out_type == np.uint8 and min_max == (0, 1)
+    ):
+        # Transfer the final PNG bytes. Keep the float32, ties-to-even rounding
+        # and single-channel shape of the NumPy conversion below.
+        pixels = tensor[0].detach().float().clamp(0, 1).mul_(255).round_().nan_to_num_(nan=0).to(torch.uint8)
+        hwc = pixels[0] if pixels.size(0) == 1 else pixels.permute(1, 2, 0)
+        image = hwc.contiguous().cpu().numpy()
+        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if to_bgr else image
+
     # A caller can retain the CPU tensor for training or another observation.
     # Clamp a private conversion buffer even when dtype and device already match.
     _tensor = tensor.squeeze(0).detach().to(device="cpu", dtype=torch.float32, copy=True)

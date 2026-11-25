@@ -6,6 +6,7 @@ import { conn } from './state/conn.js';
 import { recipe } from './state/recipe.js';
 import { data, AUDIT_TASKS } from './state/data.js';
 import { runs, runStatus } from './state/runs.js';
+import { progress } from './state/progress.js';
 import { queue } from './state/queue.js';
 import { catalog } from './state/catalog.js';
 import { videoPrep, counts as videoCounts, jobActive, exampleUnchosen, VIDEO_DATASET } from './state/video-prep.js';
@@ -121,8 +122,9 @@ function runsStation() {
   const active = runs.active();
   if (active.length === 1) {
     const run = active[0];
-    const progress = Number.isFinite(run.iteration) && Number.isFinite(run.total) ? `, ${fmt.int(run.iteration)} of ${fmt.int(run.total)}` : '';
-    return { state: 'run', text: `${runStatus(run.status).label}${progress}${released ? `, ${released} queued` : ''}` };
+    const it = progress.iterationOf(run);
+    const count = Number.isFinite(it) && Number.isFinite(run.total) ? `, ${fmt.int(it)} of ${fmt.int(run.total)}` : '';
+    return { state: 'run', text: `${runStatus(run.status).label}${count}${released ? `, ${released} queued` : ''}` };
   }
   if (active.length > 1) return { state: 'run', text: `${active.length} runs active${released ? `, ${released} queued` : ''}` };
   if (released) {
@@ -247,14 +249,18 @@ function renderTheme() {
   themeButton.setAttribute('aria-pressed', String(document.documentElement.dataset.theme === 'dark'));
 }
 
+// One station's state and text; a count the trainer reports repaints the Runs station alone.
+function paintStation(id) {
+  const { state, text } = STATION_STATE[id]();
+  const { link, stateText } = stationEls[id];
+  const title = STATE_WORD[state] ? `${VIEWS[id].title}: ${STATE_WORD[state]}` : VIEWS[id].title;
+  if (link.dataset.state !== state) link.dataset.state = state;
+  if (stateText.textContent !== text) stateText.textContent = text;
+  if (link.title !== title) link.title = title;
+}
+
 function renderRail() {
-  for (const id of ORDER) {
-    const { state, text } = STATION_STATE[id]();
-    const { link, stateText } = stationEls[id];
-    link.dataset.state = state;
-    if (stateText.textContent !== text) stateText.textContent = text;
-    link.title = STATE_WORD[state] ? `${VIEWS[id].title}: ${STATE_WORD[state]}` : VIEWS[id].title;
-  }
+  for (const id of ORDER) paintStation(id);
   const c = conn.get();
   connEl.dataset.state = c.state;
   if (c.state === 'online') {
@@ -282,10 +288,11 @@ function nextStep() {
   const active = runs.active();
   if (active.length) {
     const run = active[0];
-    const progress = Number.isFinite(run.iteration) && Number.isFinite(run.total) ? `, iteration ${fmt.int(run.iteration)} of ${fmt.int(run.total)}` : '';
+    // The count and the full stop follow the text in their own element (renderNext, paintNextCount).
     return {
       tone: 'run',
-      text: `${runStatus(run.status).label}: ${run.name ?? run.id}${progress}.`,
+      text: `${runStatus(run.status).label}: ${run.name ?? run.id}`,
+      count: run,
       action: { label: 'Open run', href: runHref(run.id) },
     };
   }
@@ -300,10 +307,10 @@ function nextStep() {
         tone: 'warn',
         text: `The queue is paused, so ${count} will not start.`,
         action: {
-          label: 'Continue the queue',
+          label: 'Resume the queue',
           // Continuing lets released entries start training: the phone edition asks first.
           run: async () => {
-            if (!(await confirmOnPhone({ title: 'Continue the queue?', body: 'Released entries start when the trainer is free.', confirmLabel: 'Continue the queue' }))) return;
+            if (!(await confirmOnPhone({ title: 'Resume the queue?', body: 'The first released entry starts when the trainer is free.', confirmLabel: 'Resume the queue' }))) return;
             queue.setPaused(false).catch((error) => toast(`The queue was not continued: ${error.message}`, { kind: 'err' }));
           },
         },
@@ -482,6 +489,11 @@ function showRecipeIssues() {
 }
 
 let lastNextKey = '';
+// The end of a training run's sentence: its count and the full stop. The count changes with every iteration;
+// it is left out of the announcement, which is made when the sentence itself changes. Its text is rewritten
+// in place, so the line is not redrawn by a count.
+const countText = document.createTextNode('.');
+const countEl = h('span', { class: 'next__count', 'aria-live': 'off' }, countText);
 
 function actionButton(action, primary) {
   const cls = `btn btn--sm${primary ? ' btn--primary' : ''}`;
@@ -500,16 +512,46 @@ function renderNext() {
   const action = here(step.action) ? null : step.action;
   const second = here(step.second) ? null : step.second;
   const key = JSON.stringify([step.tone, text, action?.label, second?.label]);
-  if (key === lastNextKey) return;
+  if (key === lastNextKey) {
+    paintNextCount();
+    return;
+  }
   lastNextKey = key;
   nextEl.dataset.tone = step.tone;
   mount(
     nextEl,
     h('span', { class: 'next__label' }, 'Next'),
-    h('span', { class: 'next__text' }, text),
+    // The run's name and its count are two parts: on one line (the phone edition) the name gives way first.
+    step.count ? h('span', { class: 'next__text next__text--count' }, h('span', { class: 'next__lead' }, text), countEl) : h('span', { class: 'next__text' }, text),
     action ? actionButton(action, action.primary) : null,
     second ? actionButton(second, false) : null,
   );
+  paintNextCount();
+}
+
+/** ", iteration N of M." after the active run's sentence (the full stop alone without a count), read from the store each time. */
+function paintNextCount() {
+  const run = runs.active()[0];
+  const it = run ? progress.iterationOf(run) : undefined;
+  const text = `${run && Number.isFinite(it) && Number.isFinite(run.total) ? `, iteration ${fmt.int(it)} of ${fmt.int(run.total)}` : ''}.`;
+  if (countText.data !== text) countText.data = text;
+}
+
+// The active run whose count the rail and the next-step line show, followed while it is that run.
+let liveId = null;
+let releaseLive = null;
+
+function syncLive() {
+  const wanted = conn.get().state === 'offline' ? null : (runs.active()[0]?.id ?? null);
+  if (wanted === liveId) return;
+  releaseLive?.();
+  releaseLive = null;
+  liveId = wanted;
+  if (wanted === null) return;
+  releaseLive = progress.follow(wanted, () => {
+    paintStation('runs');
+    paintNextCount();
+  });
 }
 
 // ───────── router ─────────
@@ -580,12 +622,14 @@ buildRail();
 recipe.restore();
 for (const store of [conn, recipe, data, runs, queue, videoPrep]) {
   store.subscribe(() => {
+    syncLive();
     renderRail();
     renderNext();
   });
 }
 renderRail();
 renderNext();
+syncLive();
 
 window.addEventListener('hashchange', route);
 // "Skip to content" moves the focus only. Followed as a link it would replace the address (#/runs/<id>) with
