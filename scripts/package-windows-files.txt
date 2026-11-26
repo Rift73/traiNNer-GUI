@@ -370,6 +370,7 @@ options/_templates/train/DRCT/DRCT_XL_fidelity.yml
 options/_templates/train/DRCT/DRCT_XL_gan.yml
 options/_templates/train/DRCT/DRCT_fidelity.yml
 options/_templates/train/DRCT/DRCT_gan.yml
+options/_templates/train/DUAL/DUAL_Light_OTF_fidelity.yml
 options/_templates/train/DWT/DWT_OTF_fidelity.yml
 options/_templates/train/DWT/DWT_OTF_gan.yml
 options/_templates/train/DWT/DWT_S_OTF_fidelity.yml

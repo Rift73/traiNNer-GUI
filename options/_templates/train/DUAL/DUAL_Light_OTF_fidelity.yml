@@ -1,0 +1,136 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Rift73/traiNNer-GUI/refs/heads/main/schemas/redux-config.schema.json
+# 2x DUAL Light image pretraining with 64 px low-resolution patches.
+# Set dataroot_gt to your HR image folder. The trainer creates the 2x LR inputs.
+name: 2x_DUAL_Light_OTF_fidelity
+task: image_restoration
+scale: 2
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+use_compile: true
+compile_mode: max-autotune
+compile_discriminator: false
+num_gpu: auto
+
+high_order_degradation: true
+otf_hf_noise_prob: 0.0
+high_order_degradations_debug: false
+high_order_degradations_debug_limit: 100
+lq_usm: false
+lq_usm_radius_range: [1, 25]
+
+thicklines_prob: 0.0
+blur_prob: 0.0
+resize_prob: [0.0, 0.0, 1.0]
+resize_mode_list: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob: [0.0, 1.0, 0.0, 0.0]
+resize_range: [1.0, 1.0]
+gaussian_noise_prob: 0.0
+noise_range: [0, 0]
+poisson_scale_range: [0, 0]
+gray_noise_prob: 0.0
+compress_prob: 0.0
+compress_jpeg_range: [100, 100]
+
+blur_prob2: 0.0
+resize_prob2: [0.0, 0.0, 1.0]
+resize_mode_list2: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob2: [0.0, 1.0, 0.0, 0.0]
+resize_range2: [1.0, 1.0]
+gaussian_noise_prob2: 0.0
+noise_range2: [0, 0]
+poisson_scale_range2: [0, 0]
+gray_noise_prob2: 0.0
+compress_prob2: 0.0
+compress_jpeg_range2: [100, 100]
+
+resize_mode_list3: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob3: [0.0, 1.0, 0.0, 0.0]
+queue_size: 64
+
+datasets:
+  train:
+    name: Train Dataset
+    type: realesrgandataset
+    dataroot_gt: [datasets/train/HR]
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 32
+    accum_iter: 1
+    prefetch_mode: cuda
+    prefetch_factor: 2
+    persistent_workers: true
+    pin_memory: true
+
+  # To enable validation, set these paired folders and turn on val_enabled below.
+  val_1:
+    name: Validation
+    type: pairedimagedataset
+    dataroot_gt: [datasets/val/HR]
+    dataroot_lq: [datasets/val/LR2]
+    io_backend:
+      type: disk
+
+network_g:
+  type: dual_light
+  dynamic_experts: 4
+  scale: 2
+  c_windows: [32, 64]
+  use_checkpoint: false
+
+path:
+  pretrain_network_g: ~
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  ema_foreach: true
+  grad_clip: false
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+    fused: true
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [300000, 500000, 650000, 700000, 750000]
+    gamma: 0.5
+
+  total_iter: 800000
+  warmup_iter: -1
+  losses:
+    - type: charbonnierloss
+      loss_weight: 1.0
+
+val:
+  val_enabled: false
+  val_freq: 1000
+  save_img: true
+  save_img_freq: 25000
+  tile_size: 0
+  tile_overlap: 8
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: true
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: true
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  save_checkpoint_keep: 3
+  use_tb_logger: true
