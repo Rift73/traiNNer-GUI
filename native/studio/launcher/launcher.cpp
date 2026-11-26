@@ -5,6 +5,8 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <charconv>
+#include <chrono>
 #include <cwchar>
 #include <fstream>
 #include <memory>
@@ -260,22 +262,6 @@ std::vector<wstring> linux_command(const Settings& value, bool in_root, const wc
     return arguments;
 }
 
-string trim_lines(string text) {
-    if (text.find('\0') != string::npos && text.size() % 2 == 0) {
-        wstring decoded;
-        for (size_t i = 0; i < text.size(); i += 2) {
-            const auto lo = static_cast<unsigned char>(text[i]);
-            const auto hi = static_cast<unsigned char>(text[i + 1]);
-            decoded.push_back(static_cast<wchar_t>(lo | (hi << 8)));
-        }
-        if (!decoded.empty() && decoded.front() == 0xfeff) decoded.erase(0, 1);
-        text = utf8(decoded);
-    }
-    const auto begin = text.find_first_not_of(" \r\n\t");
-    if (begin == string::npos) return {};
-    return text.substr(begin, text.find_last_not_of(" \r\n\t") - begin + 1);
-}
-
 wstring to_linux(const Settings& value, const fs::path& path) {
     auto arguments = linux_command(value, false);
     arguments.insert(arguments.end(), {L"/usr/bin/wslpath", L"-a", L"-u", path.wstring()});
@@ -325,22 +311,159 @@ void log_checked(const Profile& profile, const string& stage, const ProcessResul
     if (result.code) throw std::runtime_error(stage + " failed. See " + utf8(profile.log().wstring()) + ".");
 }
 
-bool need_windows_setup() {
-    if (!service_present(L"WslService") || !service_present(L"vmcompute")
-        || !service_present(L"HNS") || !virtual_machine_platform_enabled())
-        return true;
-    // Match WSL's prerequisite checks so the named install stays unelevated.
+enum class WslAction { ready, install, repair };
+
+struct WindowsSetup {
+    WslAction action;
+    bool enable_platform;
+};
+
+WindowsSetup inspect_windows(const Profile& profile) {
+    const auto status = wsl_status();
+    log_result(profile, "wsl.exe --status", status);
+    std::optional<bool> platform;
+    try {
+        platform = virtual_machine_platform_enabled();
+    } catch (const std::runtime_error& error) {
+        // Status and the required services can still establish readiness when the
+        // WMI provider is unavailable to an ordinary desktop process.
+        log_result(profile, "Virtual Machine Platform query", {1, {}, error.what()});
+    }
+    if (wsl_registration_error(status) || status.code == ERROR_FILE_NOT_FOUND)
+        return {WslAction::repair, !platform.value_or(false)};
+    if (platform == false || !service_present(L"WslService") || !service_present(L"vmcompute")
+        || !service_present(L"HNS"))
+        return {WslAction::install, !platform.value_or(false)};
     const auto build = windows_build_number();
     if ((build < 22000 && !service_present(L"LxssManager"))
         || (build >= 22621 && !service_present(L"vfpext")))
-        return true;
-    const auto status = wsl({L"--status"});
-    if (!status.code) return false;
+        return {WslAction::install, false};
+    if (!status.code) return {WslAction::ready, false};
     const auto message = trim_lines(status.err) + '\n' + trim_lines(status.out);
     if (message.find("WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != string::npos
         || message.find("0x8007019e") != string::npos)
-        return true;
-    throw std::runtime_error("Windows Subsystem for Linux is unavailable.\n" + message);
+        return {WslAction::install, !platform.value_or(false)};
+    throw std::runtime_error("Windows could not start WSL (exit " + std::to_string(status.code)
+                             + ").\n" + message);
+}
+
+long long now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+bool waiting_for_reboot(const string& marker, const Profile& profile) {
+    if (marker.empty()) return false;
+    // Compare the checkpoint time with this boot. Windows uptime includes sleep.
+    // Older packages saved WMI's LastBootUpTime string instead.
+    if (marker.starts_with("at:")) {
+        long long time{};
+        const auto end = marker.data() + marker.size();
+        const auto parsed = std::from_chars(marker.data() + 3, end, time);
+        if (parsed.ec != std::errc{} || parsed.ptr != end || time <= 0)
+            throw std::runtime_error("Invalid restart checkpoint in setup.conf.");
+        const auto now = now_ms();
+        return time <= now && time > now - static_cast<long long>(GetTickCount64());
+    }
+    try {
+        return marker == boot_time();
+    } catch (const std::runtime_error& error) {
+        log_result(profile, "Read previous installer's restart checkpoint", {1, {}, error.what()});
+        return false;
+    }
+}
+
+void repair_package(const Profile& profile, SetupDialogs& dialogs, bool& reboot) {
+    dialogs.progress(L"Repairing Windows Subsystem for Linux with Microsoft’s WSL installer.");
+    ProcessResult result;
+    try {
+        result = repair_wsl_package();
+    } catch (const std::runtime_error& error) {
+        result = {ERROR_GEN_FAILURE, {}, error.what()};
+    }
+    log_result(profile, "Install Microsoft.WSL MSI using WinGet", result);
+    if (result.code == 0) return;
+    if (result.code == ERROR_SUCCESS_REBOOT_REQUIRED ||
+        (result.code >= 0x8A150109 && result.code <= 0x8A15010B)) {
+        reboot = true;
+        return;
+    }
+    if (result.code == ERROR_CANCELLED || result.code == ERROR_INSTALL_USEREXIT || result.code == 0x8A15010C)
+        throw Exit(ERROR_CANCELLED, "WSL repair was cancelled.");
+    if (dialogs.confirm(L"Windows Package Manager could not complete the WSL repair. "
+                        L"Open Microsoft’s WSL download page?\n\nInstall the x64 MSI, then reopen traiNNer-GUI. "
+                        L"Your workspace selection is saved.")) {
+        constexpr wchar_t download[] = L"https://github.com/microsoft/WSL/releases/latest";
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", download, nullptr, nullptr, SW_SHOWNORMAL)) > 32)
+            throw Exit(ERROR_CANCELLED, "Continue setup after installing Microsoft's x64 WSL MSI.");
+    }
+    throw std::runtime_error("Windows Package Manager could not install Microsoft.WSL (exit "
+                             + std::to_string(result.code) + "). Install the x64 MSI from "
+                             "https://github.com/microsoft/WSL/releases/latest and reopen traiNNer-GUI.");
+}
+
+void prepare_windows(const Profile& profile, Pending& pending, SetupDialogs& dialogs, bool interactive) {
+    constexpr char restart[] = "Restart Windows, then open traiNNer-GUI again. Setup will resume with your workspace.";
+    if (waiting_for_reboot(pending.reboot_after, profile))
+        throw Exit(ERROR_SUCCESS_REBOOT_REQUIRED, restart);
+    const bool already_restarted = !pending.reboot_after.empty();
+    const auto setup = inspect_windows(profile);
+    if (setup.action == WslAction::ready) {
+        if (already_restarted) {
+            pending.reboot_after.clear();
+            save_pending(profile, pending);
+        }
+        return;
+    }
+    const bool repair = setup.action == WslAction::repair;
+    if (!interactive)
+        throw std::runtime_error(string("WSL needs ") + (repair ? "repair" : "installation")
+                                 + ". Open traiNNer-GUI interactively to continue setup.");
+    wstring prompt = repair
+        ? L"Repair Windows Subsystem for Linux?\n\nSetup will use Windows Package Manager to install Microsoft’s WSL MSI."
+        : L"Set up Windows Subsystem for Linux?";
+    if (setup.enable_platform) prompt += L"\nSetup will enable Virtual Machine Platform for WSL 2.";
+    prompt += L"\nWindows may ask for administrator approval.";
+    if (!dialogs.confirm(prompt.c_str())) throw Exit(ERROR_CANCELLED, "Windows setup was cancelled.");
+    bool reboot = false;
+    if (setup.enable_platform) {
+        dialogs.progress(L"Enabling Virtual Machine Platform for WSL 2.");
+        const auto code = enable_vm_platform();
+        log_result(profile, "Enable Virtual Machine Platform (DISM)", {code, {}, {}});
+        if (code && code != ERROR_SUCCESS_REBOOT_REQUIRED)
+            throw std::runtime_error("Windows could not enable Virtual Machine Platform (DISM exit "
+                                     + std::to_string(code) + "). See %WINDIR%\\Logs\\DISM\\dism.log.");
+        // Enabling the feature can return zero before the hypervisor is usable.
+        reboot = true;
+        pending.reboot_after = "at:" + std::to_string(now_ms());
+        save_pending(profile, pending);
+    }
+    if (repair) {
+        repair_package(profile, dialogs, reboot);
+    } else {
+        dialogs.progress(L"Installing Windows Subsystem for Linux.");
+        const auto code = install_wsl();
+        log_result(profile, "wsl.exe --install --no-distribution", {code, {}, {}});
+        if (code == ERROR_SUCCESS_REBOOT_REQUIRED) reboot = true;
+        else if (code != 0) {
+            if (code == ERROR_CANCELLED || code == ERROR_INSTALL_USEREXIT)
+                throw Exit(ERROR_CANCELLED, "Windows setup was cancelled.");
+            const auto failure = wsl_status();
+            log_result(profile, "WSL status after setup failure", failure);
+            if (wsl_registration_error(failure)) repair_package(profile, dialogs, reboot);
+            else throw std::runtime_error("Windows could not install WSL (exit " + std::to_string(code) + ").");
+        }
+    }
+    if (!reboot) {
+        const auto after = inspect_windows(profile);
+        if (after.action == WslAction::ready) return;
+        if (after.action == WslAction::repair || already_restarted)
+            throw std::runtime_error("Windows setup finished but WSL still needs attention. "
+                                     "See the WSL status and installer results in the setup log.");
+    }
+    pending.reboot_after = "at:" + std::to_string(now_ms());
+    save_pending(profile, pending);
+    throw Exit(ERROR_SUCCESS_REBOOT_REQUIRED, restart);
 }
 
 void register_managed(const Profile& profile, SetupDialogs& dialogs) {
@@ -439,48 +562,8 @@ Settings stage_managed_upgrade(const Profile& profile, const fs::path& folder, c
     return candidate;
 }
 
-void prepare_managed(const Profile& profile, const fs::path& folder, Settings& selected,
-                     Pending pending, SetupDialogs& dialogs, const Options& options) {
-    if (selected.payload.empty())
-        throw std::runtime_error("Use the Windows release ZIP for dedicated Ubuntu setup.");
-    Handle source;
-    open_payload(folder, selected.payload, source);
-    if (!pending.reboot_after.empty() && pending.reboot_after == boot_time())
-        throw Exit(ERROR_SUCCESS_REBOOT_REQUIRED, "Restart Windows and open traiNNer-GUI.exe again.");
-    const bool windows_setup = need_windows_setup();
-    if (windows_setup) {
-        if (options.non_interactive)
-            throw std::runtime_error("Windows Subsystem for Linux needs setup. Run --configure"
-                                     " interactively to approve it.");
-        if (!dialogs.confirm(L"Install Windows Subsystem for Linux?\n\n"
-                             L"Windows will ask for administrator approval. After setup, restart"
-                             L" Windows and open traiNNer-GUI.exe again."))
-            throw Exit(ERROR_CANCELLED, "Windows setup was cancelled.");
-    }
-    const bool resume_project = !pending.project.empty()
-        && same_text(pending.project.wstring(), selected.project.wstring());
-    selected.project_id = project_id(selected.project, !resume_project);
-    if (resume_project && pending.project_id != selected.project_id)
-        throw std::runtime_error("The workspace marker changed since setup started."
-                                 " Reconnect the selected drive or select a different workspace.");
-    pending = {selected.project, selected.project_id, {},
-               options.cpu_only || (resume_project && pending.cpu_only)};
-    if (windows_setup) {
-        pending.reboot_after = boot_time();
-        save_pending(profile, pending);
-        dialogs.progress(L"Installing Windows Subsystem for Linux.");
-        try {
-            install_wsl();
-        } catch (const std::exception& error) {
-            pending.reboot_after.clear();
-            save_pending(profile, pending);
-            log_result(profile, "Windows WSL setup", {1, {}, error.what()});
-            throw;
-        }
-        log_result(profile, "Windows WSL setup requested; restart required", {});
-        throw Exit(ERROR_SUCCESS_REBOOT_REQUIRED, "Restart Windows and open traiNNer-GUI.exe again.");
-    }
-    save_pending(profile, pending);
+void prepare_managed(const Profile& profile, const Handle& source, Settings& selected,
+                     Pending& pending, SetupDialogs& dialogs, const Options& options) {
     if (!managed_registered(profile)) register_managed(profile, dialogs);
     dialogs.progress(L"Preparing the Linux trainer. This can take several minutes.");
     auto provision = [&](bool cpu_only) {
@@ -614,7 +697,7 @@ Settings setup(const Options& options, const Profile& profile, const fs::path& f
     Handle lock;
     lock_settings(profile, lock);
     SetupDialogs dialogs(interactive);
-    const auto pending = load_pending(profile);
+    auto pending = load_pending(profile);
     const bool resume = !options.configure && !pending.project.empty();
     const bool managed = options.managed || (options.distro.empty() && (resume || dialogs.choose_managed()));
     Settings selected;
@@ -651,7 +734,28 @@ Settings setup(const Options& options, const Profile& profile, const fs::path& f
         }
     };
     if (managed) {
-        if (is_digest(selected.payload) && managed_registered(profile)) {
+        if (!is_digest(selected.payload))
+            throw std::runtime_error("Use the Windows release ZIP for dedicated Ubuntu setup.");
+        Handle source;
+        open_payload(folder, selected.payload, source);
+        const bool same_project = !pending.project.empty()
+            && same_text(pending.project.wstring(), selected.project.wstring());
+        selected.project_id = project_id(selected.project, !same_project);
+        if (same_project && pending.project_id != selected.project_id)
+            throw std::runtime_error("The workspace marker changed since setup started. "
+                                     "Reconnect the selected drive or select a different workspace.");
+        pending = {selected.project, selected.project_id, pending.reboot_after,
+                   options.cpu_only || (same_project && pending.cpu_only)};
+        save_pending(profile, pending);
+        try {
+            prepare_windows(profile, pending, dialogs, interactive);
+        } catch (const Exit&) {
+            throw;
+        } catch (const std::runtime_error& error) {
+            log_result(profile, "Prepare Windows for WSL", {1, {}, error.what()});
+            throw std::runtime_error(string(error.what()) + "\nSetup log: " + utf8(profile.log().wstring()));
+        }
+        if (managed_registered(profile)) {
             auto current = recover_selection(profile.config());
             if (!current || !current->managed) current = recover_selection(profile.last_managed());
             if (current && current->managed && current->payload == selected.payload) {
@@ -669,7 +773,7 @@ Settings setup(const Options& options, const Profile& profile, const fs::path& f
                 }
             }
         }
-        prepare_managed(profile, folder, selected, pending, dialogs, options);
+        prepare_managed(profile, source, selected, pending, dialogs, options);
     } else {
         const auto registration = registered_distro(selected.distro);
         if (!registration || registration->version != 2)
@@ -802,9 +906,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         // once migrates its managed backend and preserves the recorded workspace.
         // A previous manual install may already occupy a versioned Linux slot
         // without a Windows updater receipt. Recognize its exact source digest.
-        const bool original_preview3 = selected->payload ==
-            "9815bac5468c5fb8ba32d321b72c8a2537be1eaa9534514c558d0217e10bba4c";
-        if (selected->managed && (selected->root == managed_root || original_preview3) && *payload_hash
+        const bool earlier_preview3 = selected->payload ==
+            "9815bac5468c5fb8ba32d321b72c8a2537be1eaa9534514c558d0217e10bba4c"
+            || selected->payload == "f99175c33190652aef5cbac394f50c4f7a61506bb94317d11e99e12c742e3b35";
+        if (selected->managed && (selected->root == managed_root || earlier_preview3) && *payload_hash
             && selected->payload != payload_hash && !options.phone_status) {
             try {
                 apply_update(profile, folder, false, true);

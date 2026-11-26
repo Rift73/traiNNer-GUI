@@ -107,11 +107,17 @@ struct Release {
     }
 };
 
-// GitHub keeps the tag when a ZIP is replaced. Only the original Preview 3
-// asset is superseded; an arbitrary equal-version receipt is still current.
+// GitHub keeps the tag when a ZIP is replaced. Only the superseded Preview 3
+// assets qualify; an arbitrary equal-version receipt is still current.
 constexpr std::uint64_t original_preview3_asset = 790855138;
+constexpr std::uint64_t second_preview3_asset = 793527253;
+template<class Number>
+bool superseded_preview3_asset(Number id) {
+    return id == original_preview3_asset || id == second_preview3_asset;
+}
+
 bool replaced_preview3(const Release& release) {
-    return release.tag == "v0.1.0-preview.3" && release.id == original_preview3_asset;
+    return release.tag == "v0.1.0-preview.3" && superseded_preview3_asset(release.id);
 }
 
 struct Asset {
@@ -218,7 +224,7 @@ bool recent(const path& marker, std::chrono::seconds duration) {
 path discovery_stamp(const path& root, const char* name, const UpdateBaseline& baseline) {
     // An older install's check must not delay discovery of the manually opened tag.
     if (baseline.include_version) {
-        const auto revision = std::string_view(TRAINNER_GUI_RELEASE_TAG) == "v0.1.0-preview.3" ? "-r2" : "";
+        const auto revision = std::string_view(TRAINNER_GUI_RELEASE_TAG) == "v0.1.0-preview.3" ? "-r3" : "";
         return root / (std::string(name) + "-" + TRAINNER_GUI_RELEASE_TAG + revision);
     }
     return root / name;
@@ -394,7 +400,7 @@ void consider_releases(const json::JsonArray& releases, const UpdateBaseline& ba
         for (const auto& item : release.GetNamedArray(L"assets")) {
             const auto asset = item.GetObject();
             if (asset.GetNamedString(L"name") == zip_name && asset.GetNamedString(L"state") == L"uploaded") {
-                if (tag == "v0.1.0-preview.3" && asset.GetNamedNumber(L"id") == original_preview3_asset) continue;
+                if (tag == "v0.1.0-preview.3" && superseded_preview3_asset(asset.GetNamedNumber(L"id"))) continue;
                 best = ListedAsset{std::move(tag), *version, asset};
                 break;
             }
@@ -761,6 +767,12 @@ std::optional<int> dispatch(const path& exe_folder, const path& profile_folder,
         }
     }
     if (!active) return {};
+    // A user opening the replacement to finish setup must get its repair UI,
+    // even if a previous attempt left an older same-tag updater receipt.
+    if (replaced_preview3(*active) &&
+        (std::find(args.begin(), args.end(), L"--configure") != args.end()
+         || !std::filesystem::exists(profile_folder / L"desktop.conf")))
+        return {};
     const auto folder = active->folder(root);
     if (host::same_text(exe_folder.lexically_normal().native(), folder.lexically_normal().native()))
         return {};

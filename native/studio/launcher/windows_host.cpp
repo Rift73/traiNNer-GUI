@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <exception>
 #include <memory>
@@ -27,11 +28,11 @@ std::runtime_error win_error(const string& message, DWORD error = GetLastError()
     return std::runtime_error(message + " (Windows error " + std::to_string(error) + ").");
 }
 
-fs::path wsl_exe() {
+fs::path system_exe(const wchar_t* name) {
     wchar_t path[MAX_PATH]{};
     const auto len = GetSystemDirectoryW(path, MAX_PATH);
     if (!len || len >= MAX_PATH) throw win_error("Could not locate the Windows system directory");
-    return fs::path(path) / L"wsl.exe";
+    return fs::path(path) / name;
 }
 
 wstring quote(const wstring& argument) {
@@ -109,16 +110,30 @@ void query_system(const wchar_t* query, const wchar_t* property, Variant& result
     ComPtr<IEnumWbemClassObject> rows;
     ComPtr<IWbemClassObject> row;
     ULONG count{};
-    if (FAILED(CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&locator)))
-        || FAILED(locator->ConnectServer(Bstr(L"ROOT\\CIMV2").value, nullptr, nullptr, nullptr,
-                                         WBEM_FLAG_CONNECT_USE_MAX_WAIT, nullptr, nullptr, &service))
-        || FAILED(service->ExecQuery(Bstr(L"WQL").value, Bstr(query).value,
-                                     WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                                     nullptr, &rows))
-        || FAILED(rows->Next(10000, 1, &row, &count)) || count != 1
-        || FAILED(row->Get(property, 0, &result.value, nullptr, nullptr)))
-        throw std::runtime_error("Could not read Windows setup status.");
+    auto check = [&](HRESULT hr, const char* stage) {
+        if (FAILED(hr)) {
+            char hex[16];
+            snprintf(hex, sizeof(hex), "0x%08lX", static_cast<unsigned long>(hr));
+            throw std::runtime_error("Windows could not read " + utf8(property) + " (" + stage
+                                     + ", " + hex + ").");
+        }
+    };
+    check(CoCreateInstance(CLSID_WbemLocator, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&locator)),
+          "create WMI locator");
+    check(locator->ConnectServer(Bstr(L"ROOT\\CIMV2").value, nullptr, nullptr, nullptr,
+                                 WBEM_FLAG_CONNECT_USE_MAX_WAIT, nullptr, nullptr, &service), "connect to WMI");
+    check(CoSetProxyBlanket(service.Get(), RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                            RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE),
+          "set WMI proxy security");
+    check(service->ExecQuery(Bstr(L"WQL").value, Bstr(query).value,
+                             WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &rows),
+          "run WMI query");
+    const HRESULT next = rows->Next(10000, 1, &row, &count);
+    check(next, "read WMI result");
+    if (!count)
+        throw std::runtime_error("Windows returned " + string(next == WBEM_S_TIMEDOUT ? "a timeout" : "no row")
+                                 + " for " + utf8(property) + ".");
+    check(row->Get(property, 0, &result.value, nullptr, nullptr), "read WMI property");
 }
 
 } // namespace
@@ -228,11 +243,12 @@ bool virtual_machine_platform_enabled() {
 }
 
 unsigned long windows_build_number() {
-    Variant result;
-    query_system(L"SELECT BuildNumber FROM Win32_OperatingSystem", L"BuildNumber", result);
-    if (result.value.vt != VT_BSTR || !result.value.bstrVal)
-        throw std::runtime_error("Could not read the Windows build number.");
-    return std::stoul(result.value.bstrVal);
+    wchar_t build[16]{};
+    DWORD bytes = sizeof(build);
+    const auto error = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                                    L"CurrentBuildNumber", RRF_RT_REG_SZ, nullptr, build, &bytes);
+    if (error != ERROR_SUCCESS) throw win_error("Could not read the Windows build number", error);
+    return std::stoul(build);
 }
 
 string boot_time() {
@@ -243,9 +259,37 @@ string boot_time() {
     return utf8(result.value.bstrVal);
 }
 
-ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source,
-                  const string& ready, const std::function<void()>& while_ready) {
-    const auto exe = wsl_exe();
+string trim_lines(string text) {
+    if (text.find('\0') != string::npos && text.size() % 2 == 0) {
+        wstring decoded;
+        for (size_t i = 0; i < text.size(); i += 2) {
+            const auto lo = static_cast<unsigned char>(text[i]);
+            const auto hi = static_cast<unsigned char>(text[i + 1]);
+            decoded.push_back(static_cast<wchar_t>(lo | (hi << 8)));
+        }
+        if (!decoded.empty() && decoded.front() == 0xfeff) decoded.erase(0, 1);
+        text = utf8(decoded);
+    }
+    const auto begin = text.find_first_not_of(" \r\n\t");
+    if (begin == string::npos) return {};
+    return text.substr(begin, text.find_last_not_of(" \r\n\t") - begin + 1);
+}
+
+bool wsl_registration_error(const ProcessResult& result) {
+    if (result.code == static_cast<DWORD>(REGDB_E_CLASSNOTREG)) return true;
+    for (const auto* output : {&result.err, &result.out}) {
+        auto message = trim_lines(*output);
+        std::transform(message.begin(), message.end(), message.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (message.find("regdb_e_classnotreg") != string::npos
+            || message.find("0x80040154") != string::npos) return true;
+    }
+    return false;
+}
+
+static ProcessResult capture_process(const fs::path& exe, const std::vector<wstring>& args,
+                                     DWORD timeout, HANDLE source, const string& ready,
+                                     const std::function<void()>& while_ready, bool probing_wsl = false) {
     wstring command = quote(exe.wstring());
     for (const auto& arg : args) command += L" " + quote(arg);
 
@@ -297,7 +341,7 @@ ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, TRUE,
                         CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
                         nullptr, nullptr, &startup.StartupInfo, &process))
-        throw win_error("Could not start wsl.exe");
+        throw win_error("Could not start " + utf8(exe.filename().wstring()));
     Handle child(process.hProcess), thread(process.hThread);
     out.writer.reset();
     err.writer.reset();
@@ -324,11 +368,19 @@ ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source
         const auto state = WaitForSingleObject(child.get(), 25);
         if (state == WAIT_OBJECT_0) break;
         if (state == WAIT_FAILED) throw win_error("Could not wait for WSL");
-        if (timeout != INFINITE && GetTickCount64() - started > timeout) {
-            if (!TerminateProcess(child.get(), ERROR_TIMEOUT))
-                throw win_error("Could not close the timed-out wsl.exe command");
-            WaitForSingleObject(child.get(), 5000);
-            throw std::runtime_error("WSL did not respond in time.");
+        // Inbox wsl.exe can wait for a key for a minute even with redirected input.
+        // Its stable registration error is enough to offer repair immediately.
+        const bool repair_prompt = probing_wsl && wsl_registration_error(result);
+        if (repair_prompt || (timeout != INFINITE && GetTickCount64() - started > timeout)) {
+            if (!TerminateProcess(child.get(), ERROR_TIMEOUT) && WaitForSingleObject(child.get(), 0) != WAIT_OBJECT_0)
+                throw win_error("Could not stop " + utf8(exe.filename().wstring()));
+            if (WaitForSingleObject(child.get(), 5000) != WAIT_OBJECT_0)
+                throw std::runtime_error("Timed out stopping " + utf8(exe.filename().wstring()) + ".");
+            if (probing_wsl) {
+                result.code = repair_prompt ? static_cast<DWORD>(REGDB_E_CLASSNOTREG) : ERROR_TIMEOUT;
+                return result;
+            }
+            throw std::runtime_error(utf8(exe.filename().wstring()) + " did not respond in time.");
         }
     }
     out.drain(result.out);
@@ -339,28 +391,63 @@ ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source
     return result;
 }
 
-void install_wsl() {
-    const auto exe = wsl_exe();
+ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout, HANDLE source,
+                  const string& ready, const std::function<void()>& while_ready) {
+    return capture_process(system_exe(L"wsl.exe"), args, timeout, source, ready, while_ready);
+}
+
+ProcessResult wsl_status() {
+    const auto exe = system_exe(L"wsl.exe");
+    if (!fs::exists(exe)) return {ERROR_FILE_NOT_FOUND, {}, "Windows could not find wsl.exe."};
+    return capture_process(exe, {L"--status"}, 15000, nullptr, {}, {}, true);
+}
+
+ProcessResult repair_wsl_package() {
+    // Run the App Installer alias as the caller. WinGet selects and verifies Microsoft's
+    // MSI (WiX), and Windows Installer requests any elevation it needs.
+    PWSTR app_data{};
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &app_data)))
+        throw std::runtime_error("Could not locate Windows Package Manager.");
+    const fs::path alias = fs::path(app_data) / L"Microsoft\\WindowsApps\\winget.exe";
+    CoTaskMemFree(app_data);
+    if (GetFileAttributesW(alias.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return {ERROR_FILE_NOT_FOUND, {}, "Windows Package Manager (WinGet) is unavailable."};
+    return capture_process(alias, {L"install", L"--exact", L"--id", L"Microsoft.WSL", L"--source", L"winget",
+                                   L"--installer-type", L"wix", L"--force", L"--silent",
+                                   L"--accept-package-agreements", L"--accept-source-agreements",
+                                   L"--disable-interactivity"}, INFINITE, nullptr, {}, {});
+}
+
+static DWORD elevated_setup(const fs::path& exe, const wchar_t* arguments) {
     SHELLEXECUTEINFOW setup{};
     setup.cbSize = sizeof(setup);
     setup.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     setup.lpVerb = L"runas";
     setup.lpFile = exe.c_str();
-    setup.lpParameters = L"--install --no-distribution";
+    setup.lpParameters = arguments;
+    const auto cwd = exe.parent_path();
+    setup.lpDirectory = cwd.c_str();
     setup.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&setup)) {
         const auto error = GetLastError();
         if (error == ERROR_CANCELLED) throw Exit(ERROR_CANCELLED, "Windows setup was cancelled.");
-        throw win_error("Could not start Windows Subsystem for Linux installation", error);
+        throw win_error("Could not start " + utf8(exe.filename().wstring()), error);
     }
     Handle process(setup.hProcess);
     DWORD code{};
     if (!process || WaitForSingleObject(process.get(), INFINITE) != WAIT_OBJECT_0
         || !GetExitCodeProcess(process.get(), &code))
-        throw win_error("Could not read the Windows Subsystem for Linux installation result");
-    if (code != 0 && code != ERROR_SUCCESS_REBOOT_REQUIRED)
-        throw std::runtime_error("Windows Subsystem for Linux installation failed (exit "
-                                 + std::to_string(code) + ").");
+        throw win_error("Could not read the result of " + utf8(exe.filename().wstring()));
+    return code;
+}
+
+DWORD enable_vm_platform() {
+    return elevated_setup(system_exe(L"dism.exe"),
+                         L"/Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All /NoRestart");
+}
+
+DWORD install_wsl() {
+    return elevated_setup(system_exe(L"wsl.exe"), L"--install --no-distribution");
 }
 
 string sha256(HANDLE file) {

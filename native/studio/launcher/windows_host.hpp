@@ -74,10 +74,15 @@ bool elevated();
 bool service_present(const wchar_t* name);
 bool virtual_machine_platform_enabled();
 unsigned long windows_build_number();
+string trim_lines(string text);
+bool wsl_registration_error(const ProcessResult& result);
+ProcessResult wsl_status();
+ProcessResult repair_wsl_package();
+DWORD enable_vm_platform();
 string boot_time();
 ProcessResult wsl(const std::vector<wstring>& args, DWORD timeout = 60000, HANDLE input = nullptr,
                   const string& ready = {}, const std::function<void()>& while_ready = {});
-void install_wsl();
+DWORD install_wsl();
 string sha256(HANDLE file);
 void stream(DWORD id, const string& text);
 string read_text(const fs::path& path);
